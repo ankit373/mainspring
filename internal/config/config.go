@@ -19,6 +19,7 @@ type Model struct {
 	Path      string   `yaml:"path"`
 	Ctx       int      `yaml:"ctx,omitempty"`
 	GPULayers int      `yaml:"gpu_layers,omitempty"`
+	Preload   bool     `yaml:"preload,omitempty"` // load at startup instead of on first request
 	Args      []string `yaml:"args,omitempty"`
 }
 
