@@ -1,0 +1,10 @@
+# Conformance config: Mainspring runs its shipped Ollama adopt path against the
+# fakeserver upstream. Open (no keys) to keep the SDK setup trivial.
+addr: ":11500"
+keep_alive_seconds: 0
+backend: ollama
+ollama_host: "http://127.0.0.1:18080"
+usage_ledger: "off"
+models:
+  - id: mock-model
+    path: mock-model

@@ -1,0 +1,60 @@
+name: conformance
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  openai-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build mainspring + fakeserver
+        run: |
+          go build -o /tmp/mainspring ./cmd/mainspring
+          go build -o /tmp/fakeserver ./test/conformance/fakeserver
+
+      - name: Start fake upstream
+        run: |
+          /tmp/fakeserver --addr :18080 > /tmp/fakeserver.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18080/api/tags >/dev/null && break
+            sleep 0.3
+          done
+          curl -sf http://127.0.0.1:18080/api/tags
+
+      - name: Start mainspring (ollama adopt path)
+        run: |
+          /tmp/mainspring serve --config test/conformance/config.yaml > /tmp/mainspring.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:11500/healthz >/dev/null && break
+            sleep 0.3
+          done
+          curl -sf http://127.0.0.1:11500/healthz
+
+      - name: Python SDK conformance
+        run: |
+          python -m pip install --quiet "openai>=1.40,<2"
+          python test/conformance/conformance.py
+
+      - name: Node SDK conformance
+        run: |
+          npm install --no-save --silent openai@^4
+          node test/conformance/conformance.mjs
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: |
+          echo "=== mainspring ==="; cat /tmp/mainspring.log || true
+          echo "=== fakeserver ==="; cat /tmp/fakeserver.log || true

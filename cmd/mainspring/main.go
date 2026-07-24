@@ -155,6 +155,8 @@ func cmdServe() *cobra.Command {
 		maxLoaded    int
 		maxResident  int
 		usageLedger  string
+		backendName  string
+		ollamaHost   string
 		llamaServer  string
 	)
 	cmd := &cobra.Command{
@@ -184,6 +186,12 @@ func cmdServe() *cobra.Command {
 			if cmd.Flags().Changed("usage-ledger") {
 				cfg.UsageLedger = usageLedger
 			}
+			if cmd.Flags().Changed("backend") {
+				cfg.Backend = backendName
+			}
+			if cmd.Flags().Changed("ollama-host") {
+				cfg.OllamaHost = ollamaHost
+			}
 			if cmd.Flags().Changed("llama-server") {
 				cfg.LlamaServerPath = llamaServer
 			}
@@ -208,6 +216,8 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once by count (LRU-evicted beyond this)")
 	cmd.Flags().IntVar(&maxResident, "max-resident-mb", 0, "max resident memory across models in MB (0 = no byte cap)")
 	cmd.Flags().StringVar(&usageLedger, "usage-ledger", "", "JSONL usage ledger path (empty = default location, \"off\" = disable)")
+	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | ollama | mlx")
+	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "", "Ollama daemon URL when --backend ollama")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
 	return cmd
 }
