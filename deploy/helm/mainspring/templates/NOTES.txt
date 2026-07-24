@@ -1,0 +1,16 @@
+Mainspring is deployed as {{ include "mainspring.fullname" . }}.
+
+Reach the OpenAI-compatible API in-cluster at:
+  http://{{ include "mainspring.fullname" . }}:{{ .Values.service.port }}/v1
+
+Port-forward to try it locally:
+  kubectl port-forward svc/{{ include "mainspring.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl localhost:{{ .Values.service.port }}/healthz
+  curl localhost:{{ .Values.service.port }}/capabilities   # fail-loud device/offload/ctx
+
+Reminders:
+- This image ships no local engine. Set config.backend=ollama (pointing at a
+  reachable daemon), bake an engine into a derived image, or run `mainspring
+  install` onto the /home/nonroot/.config/mainspring volume.
+- For GPU nodes, set resources.limits."nvidia.com/gpu" and a matching nodeSelector.
+- Set config.tenants[].key to require authentication — otherwise the server runs OPEN.

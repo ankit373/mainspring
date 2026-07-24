@@ -1,0 +1,15 @@
+.git
+.github
+/dist
+/mainspring
+*.gguf
+*.safetensors
+/models
+/logs
+*.log
+BUILD_STATE.md
+*_SCOPING.md
+.DS_Store
+.idea
+.vscode
+deploy
