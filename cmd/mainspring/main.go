@@ -111,6 +111,7 @@ func cmdServe() *cobra.Command {
 		apiKeys      []string
 		keepAlive    int
 		maxLoaded    int
+		maxResident  int
 		llamaServer  string
 	)
 	cmd := &cobra.Command{
@@ -134,6 +135,9 @@ func cmdServe() *cobra.Command {
 			if cmd.Flags().Changed("max-loaded") {
 				cfg.MaxLoaded = maxLoaded
 			}
+			if cmd.Flags().Changed("max-resident-mb") {
+				cfg.MaxResidentMB = maxResident
+			}
 			if cmd.Flags().Changed("llama-server") {
 				cfg.LlamaServerPath = llamaServer
 			}
@@ -155,7 +159,8 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().StringArrayVar(&modelFlags, "model", nil, "model as id=/path/to/weights.gguf (repeatable)")
 	cmd.Flags().StringArrayVar(&apiKeys, "api-key", nil, "require this API key (repeatable); if none set, server runs OPEN")
 	cmd.Flags().IntVar(&keepAlive, "keep-alive", 300, "seconds to keep an idle model loaded (0 = never unload)")
-	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once (LRU-evicted beyond this)")
+	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once by count (LRU-evicted beyond this)")
+	cmd.Flags().IntVar(&maxResident, "max-resident-mb", 0, "max resident memory across models in MB (0 = no byte cap)")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
 	return cmd
 }
@@ -177,7 +182,11 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("llama.cpp backend unavailable: %s", av.Reason)
 	}
 
-	sched := scheduler.New(be, specs, cfg.KeepAlive(), cfg.MaxLoaded)
+	sched := scheduler.New(be, specs, scheduler.Options{
+		KeepAlive: cfg.KeepAlive(),
+		MaxLoaded: cfg.MaxLoaded,
+		MaxBytes:  cfg.MaxBytes(),
+	})
 	authn := auth.New(cfg.APIKeys)
 	srv := server.New(sched, authn)
 

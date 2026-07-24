@@ -27,6 +27,7 @@ type Config struct {
 	APIKeys          []string `yaml:"api_keys,omitempty"`
 	KeepAliveSeconds int      `yaml:"keep_alive_seconds"`
 	MaxLoaded        int      `yaml:"max_loaded"`
+	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`
 	LlamaServerPath  string   `yaml:"llama_server_path,omitempty"`
 	Models           []Model  `yaml:"models,omitempty"`
 }
@@ -46,6 +47,14 @@ func (c Config) KeepAlive() time.Duration {
 		return 0
 	}
 	return time.Duration(c.KeepAliveSeconds) * time.Second
+}
+
+// MaxBytes returns the resident byte budget (0 = no byte cap).
+func (c Config) MaxBytes() int64 {
+	if c.MaxResidentMB <= 0 {
+		return 0
+	}
+	return int64(c.MaxResidentMB) << 20
 }
 
 // DefaultPath is ~/.config/mainspring/config.yaml.

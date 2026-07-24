@@ -79,7 +79,7 @@ func (r *engineRunner) Capabilities(context.Context) (backend.Capabilities, erro
 
 func newTestServer(t *testing.T, be backend.Backend, keys []string) http.Handler {
 	t.Helper()
-	sched := scheduler.New(be, []backend.ModelSpec{{ID: "m1"}}, 0, 2)
+	sched := scheduler.New(be, []backend.ModelSpec{{ID: "m1"}}, scheduler.Options{MaxLoaded: 2})
 	return server.New(sched, auth.New(keys)).Handler()
 }
 

@@ -83,10 +83,20 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		}
 		caps = append(caps, c)
 	}
+	used, budget, count := s.sched.Residency()
+	residency := map[string]any{
+		"resident_bytes": used,
+		"budget_bytes":   budget,
+		"loaded_count":   count,
+	}
+	if budget > 0 {
+		residency["headroom_bytes"] = budget - used
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"open":     s.auth.Open(),
-		"degraded": degraded,
-		"loaded":   caps,
+		"open":      s.auth.Open(),
+		"degraded":  degraded,
+		"residency": residency,
+		"loaded":    caps,
 	})
 }
 

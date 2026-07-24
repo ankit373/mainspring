@@ -92,3 +92,12 @@ type Backend interface {
 	// Ready or the context is cancelled.
 	Start(ctx context.Context, spec ModelSpec) (Runner, error)
 }
+
+// MemoryEstimator is an optional Backend capability: an a-priori estimate (in
+// bytes) of a model's resident footprint, used by the scheduler for admission
+// BEFORE the runner starts. Keeping the estimate in the backend keeps
+// model/engine-specific sizing out of the scheduler. Backends that don't
+// implement it fall back to the count cap only.
+type MemoryEstimator interface {
+	EstimateMemory(spec ModelSpec) int64
+}
