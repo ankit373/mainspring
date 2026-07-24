@@ -80,7 +80,11 @@ func (r *engineRunner) Capabilities(context.Context) (backend.Capabilities, erro
 
 func newTestServer(t *testing.T, be backend.Backend, keys []string) http.Handler {
 	t.Helper()
-	sched := scheduler.New(be, []backend.ModelSpec{{ID: "m1"}}, scheduler.Options{MaxLoaded: 2})
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": be},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
 	rec, _ := metrics.New("") // in-memory only
 	return server.New(sched, auth.New(keys), rec).Handler()
 }
@@ -207,7 +211,11 @@ func TestMetricsEndpoint(t *testing.T) {
 
 func TestCapabilitiesRequiresAdmin(t *testing.T) {
 	eng := fakeEngine(t)
-	sched := scheduler.New(&engineBackend{baseURL: eng.URL}, []backend.ModelSpec{{ID: "m1"}}, scheduler.Options{MaxLoaded: 2})
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
 	rec, _ := metrics.New("")
 	authn := auth.NewTenants([]auth.Tenant{
 		{Name: "inf", Key: "infkey", Role: auth.RoleInference},

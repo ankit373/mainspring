@@ -62,14 +62,19 @@ func (b *fakeBackend) startCount(id string) int64 {
 func specs(ids ...string) []backend.ModelSpec {
 	out := make([]backend.ModelSpec, len(ids))
 	for i, id := range ids {
-		out[i] = backend.ModelSpec{ID: id}
+		out[i] = backend.ModelSpec{ID: id, Backend: "fake"}
 	}
 	return out
 }
 
+// bmap wraps a single backend as the named-backend map the scheduler expects.
+func bmap(be backend.Backend) map[string]backend.Backend {
+	return map[string]backend.Backend{"fake": be}
+}
+
 func TestEnsureLoadedSingleFlight(t *testing.T) {
 	be := &fakeBackend{delay: 20 * time.Millisecond}
-	s := New(be, specs("a"), Options{MaxLoaded: 4})
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 4})
 
 	var wg sync.WaitGroup
 	runners := make([]backend.Runner, 20)
@@ -99,7 +104,7 @@ func TestEnsureLoadedSingleFlight(t *testing.T) {
 
 func TestEnsureLoadedEvictsLRU(t *testing.T) {
 	be := &fakeBackend{}
-	s := New(be, specs("a", "b"), Options{MaxLoaded: 1}) // capacity 1 → loading b evicts a
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 1}) // capacity 1 → loading b evicts a
 
 	ra, err := s.EnsureLoaded(context.Background(), "a")
 	if err != nil {
@@ -122,7 +127,7 @@ func TestByteBudgetEvicts(t *testing.T) {
 	// Each model is 6 units; budget is 10 and count cap is high — so a second
 	// model cannot co-reside and must evict the first on the byte budget alone.
 	be := &fakeBackend{mem: 6}
-	s := New(be, specs("a", "b"), Options{MaxLoaded: 10, MaxBytes: 10})
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 10, MaxBytes: 10})
 
 	ra, err := s.EnsureLoaded(context.Background(), "a")
 	if err != nil {
@@ -142,7 +147,7 @@ func TestByteBudgetEvicts(t *testing.T) {
 func TestByteBudgetAllowsCoresidence(t *testing.T) {
 	// Two 4-unit models fit within a 10-unit budget — both stay resident.
 	be := &fakeBackend{mem: 4}
-	s := New(be, specs("a", "b"), Options{MaxLoaded: 10, MaxBytes: 10})
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 10, MaxBytes: 10})
 	ra, _ := s.EnsureLoaded(context.Background(), "a")
 	_, _ = s.EnsureLoaded(context.Background(), "b")
 	if ra.(*fakeRunner).stopped.Load() {
@@ -153,8 +158,41 @@ func TestByteBudgetAllowsCoresidence(t *testing.T) {
 	}
 }
 
+func TestPerModelBackendRouting(t *testing.T) {
+	ba := &fakeBackend{}
+	bb := &fakeBackend{}
+	s := New(
+		map[string]backend.Backend{"A": ba, "B": bb},
+		[]backend.ModelSpec{{ID: "ma", Backend: "A"}, {ID: "mb", Backend: "B"}},
+		Options{MaxLoaded: 5},
+	)
+	if _, err := s.EnsureLoaded(context.Background(), "ma"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureLoaded(context.Background(), "mb"); err != nil {
+		t.Fatal(err)
+	}
+	if ba.startCount("ma") != 1 || bb.startCount("mb") != 1 {
+		t.Fatalf("each model should start on its own backend: A[ma]=%d B[mb]=%d", ba.startCount("ma"), bb.startCount("mb"))
+	}
+	if ba.startCount("mb") != 0 || bb.startCount("ma") != 0 {
+		t.Fatal("a model must not be started on the wrong backend")
+	}
+}
+
+func TestUnavailableBackendErrors(t *testing.T) {
+	s := New(
+		map[string]backend.Backend{"A": &fakeBackend{}},
+		[]backend.ModelSpec{{ID: "m", Backend: "missing"}},
+		Options{},
+	)
+	if _, err := s.EnsureLoaded(context.Background(), "m"); err == nil {
+		t.Fatal("model referencing an unavailable backend must error")
+	}
+}
+
 func TestUnknownModel(t *testing.T) {
-	s := New(&fakeBackend{}, specs("a"), Options{MaxLoaded: 1})
+	s := New(bmap(&fakeBackend{}), specs("a"), Options{MaxLoaded: 1})
 	if _, err := s.EnsureLoaded(context.Background(), "nope"); err == nil {
 		t.Fatal("expected error for unknown model")
 	}
@@ -162,7 +200,7 @@ func TestUnknownModel(t *testing.T) {
 
 func TestShutdownStopsAll(t *testing.T) {
 	be := &fakeBackend{}
-	s := New(be, specs("a", "b"), Options{MaxLoaded: 2})
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 2})
 	ra, _ := s.EnsureLoaded(context.Background(), "a")
 	rb, _ := s.EnsureLoaded(context.Background(), "b")
 	s.Shutdown(context.Background())
