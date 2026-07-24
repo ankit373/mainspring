@@ -21,10 +21,21 @@ type Model struct {
 	Args      []string `yaml:"args,omitempty"`
 }
 
+// Tenant is a named principal with an API key, role, and quotas.
+type Tenant struct {
+	Name        string `yaml:"name"`
+	Key         string `yaml:"key"`
+	Role        string `yaml:"role,omitempty"`         // "admin" | "inference" (default inference)
+	RateRPM     int    `yaml:"rate_rpm,omitempty"`     // requests/min; 0 = unlimited
+	TokenBudget int64  `yaml:"token_budget,omitempty"` // tokens per window; 0 = unlimited
+	WindowSec   int    `yaml:"window_sec,omitempty"`   // token-budget window; <=0 => 60
+}
+
 // Config is the full server configuration.
 type Config struct {
 	Addr             string   `yaml:"addr"`
 	APIKeys          []string `yaml:"api_keys,omitempty"`
+	Tenants          []Tenant `yaml:"tenants,omitempty"`
 	KeepAliveSeconds int      `yaml:"keep_alive_seconds"`
 	MaxLoaded        int      `yaml:"max_loaded"`
 	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`

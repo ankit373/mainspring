@@ -84,6 +84,11 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 // the real backend/device/effective-ctx for every loaded model and whether any
 // is running degraded (CPU fallback or shrunk context).
 func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
+	// Management endpoint: admin role required (open mode has no tenant → allow).
+	if t, ok := auth.FromContext(r.Context()); ok && t.Role != auth.RoleAdmin {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
@@ -146,6 +151,13 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-tenant token budget (enforced pre-request; accrued after).
+	tenant, _ := auth.FromContext(r.Context())
+	if !s.auth.AllowTokens(tenant) {
+		writeError(w, http.StatusTooManyRequests, "token budget exceeded")
+		return
+	}
+
 	runner, err := s.sched.EnsureLoaded(r.Context(), peek.Model)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "load model "+peek.Model+": "+err.Error())
@@ -158,16 +170,19 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	cap := newCapture(w, start)
 	s.proxyTo(cap, r, runner.BaseURL(), body, extra)
 
+	tokens := cap.tokensEstimate()
+	s.auth.AddTokens(tenant, tokens)
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
 			Time:       start,
 			Model:      peek.Model,
+			Tenant:     auth.TenantOf(r.Context()),
 			Status:     cap.status,
 			Stream:     cap.stream,
 			DurationMs: float64(time.Since(start).Microseconds()) / 1000.0,
 			TTFTMs:     cap.ttftMs(),
 			Bytes:      cap.bytes,
-			TokensEst:  cap.tokensEstimate(),
+			TokensEst:  tokens,
 		})
 	}
 }
