@@ -1,0 +1,16 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "mainspring.fullname" . }}
+  labels:
+    {{- include "mainspring.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mainspring.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.serviceMonitor.path | default "/metrics" }}
+      interval: {{ .Values.serviceMonitor.interval | default "30s" }}
+{{- end }}
