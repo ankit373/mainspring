@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -77,7 +76,7 @@ func (b *Backend) version(ctx context.Context, path string) string {
 	if err != nil {
 		return ""
 	}
-	return firstLine(string(out))
+	return util.FirstLine(string(out))
 }
 
 // Start implements backend.Backend. It launches llama-server on a free port,
@@ -96,7 +95,7 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 		return nil, fmt.Errorf("llamacpp: weights not found: %s", spec.Path)
 	}
 
-	port, err := freePort()
+	port, err := util.FreePort()
 	if err != nil {
 		return nil, fmt.Errorf("llamacpp: allocate port: %w", err)
 	}
@@ -211,14 +210,14 @@ func (r *runner) waitReady(ctx context.Context) error {
 	defer tick.Stop()
 	for {
 		if r.cmd.ProcessState != nil && r.cmd.ProcessState.Exited() {
-			return fmt.Errorf("llamacpp: server exited during load:\n%s", tail(r.logs.String(), 40))
+			return fmt.Errorf("llamacpp: server exited during load:\n%s", util.Tail(r.logs.String(), 40))
 		}
 		if r.Health(ctx) == backend.StatusReady {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("llamacpp: server not ready before timeout:\n%s", tail(r.logs.String(), 40))
+			return fmt.Errorf("llamacpp: server not ready before timeout:\n%s", util.Tail(r.logs.String(), 40))
 		case <-tick.C:
 		}
 	}
@@ -401,28 +400,3 @@ func atoi(s string) int {
 	return n
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port, nil
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return strings.TrimSpace(s)
-}
-
-func tail(s string, lines int) string {
-	parts := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(parts) > lines {
-		parts = parts[len(parts)-lines:]
-	}
-	return strings.Join(parts, "\n")
-}

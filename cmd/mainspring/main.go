@@ -17,6 +17,7 @@ import (
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
 	"github.com/ankit373/mainspring/internal/backend/llamacpp"
+	"github.com/ankit373/mainspring/internal/backend/mlx"
 	"github.com/ankit373/mainspring/internal/backend/ollama"
 	"github.com/ankit373/mainspring/internal/build"
 	"github.com/ankit373/mainspring/internal/config"
@@ -67,6 +68,7 @@ func cmdBackends() *cobra.Command {
 			backends := []backend.Backend{
 				llamacpp.New(cfg.LlamaServerPath),
 				ollama.New(cfg.OllamaHost),
+				mlx.New(cfg.MLXPython),
 			}
 			fmt.Printf("%-12s %-9s %s\n", "BACKEND", "PRESENT", "DETAIL")
 			for _, b := range backends {
@@ -80,8 +82,7 @@ func cmdBackends() *cobra.Command {
 				}
 				fmt.Printf("%-12s %-9v %s\n", av.Name, av.Present, detail)
 			}
-			fmt.Println("\nplanned: mlx (Apple Silicon);")
-			fmt.Println("detect-and-adopt-only: lmstudio, llamafile, gpt4all")
+			fmt.Println("\ndetect-and-adopt-only (planned): lmstudio, llamafile, gpt4all")
 			return nil
 		},
 	}
@@ -265,8 +266,10 @@ func buildBackend(cfg config.Config) (backend.Backend, error) {
 		return llamacpp.New(cfg.LlamaServerPath), nil
 	case "ollama":
 		return ollama.New(cfg.OllamaHost), nil
+	case "mlx":
+		return mlx.New(cfg.MLXPython), nil
 	default:
-		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama)", cfg.Backend)
+		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx)", cfg.Backend)
 	}
 }
 
