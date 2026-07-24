@@ -102,15 +102,18 @@ func cmdBackends() *cobra.Command {
 }
 
 func cmdInstall() *cobra.Command {
-	var version, url, sha, manifest string
+	var version, url, sha, manifest, sig, pubkey string
 	cmd := &cobra.Command{
 		Use:   "install <backend>",
 		Short: "Install an engine backend binary (opt-in, checksum-verified)",
-		Long:  "Downloads and SHA-256-verifies an engine binary, then records a receipt so\nthe backend prefers the managed binary. Nothing is downloaded unless you run\nthis command. Pin a specific artifact with --url and --sha256, or rely on a\nmanifest (--manifest / ~/.config/mainspring/install.json).",
+		Long:  "Downloads and SHA-256-verifies an engine binary, then records a receipt so\nthe backend prefers the managed binary. Nothing is downloaded unless you run\nthis command. Pin a specific artifact with --url and --sha256, or rely on a\nmanifest (--manifest / ~/.config/mainspring/install.json). When --pubkey (or\n$MAINSPRING_MANIFEST_PUBKEY) is set, the manifest must carry a valid ed25519\ndetached signature.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if pubkey == "" {
+				pubkey = os.Getenv("MAINSPRING_MANIFEST_PUBKEY")
+			}
 			rec, err := install.Install(cmd.Context(), args[0], install.Spec{
-				Version: version, URL: url, SHA256: sha,
+				Version: version, URL: url, SHA256: sha, PubKey: pubkey, SigPath: sig,
 			}, manifest, cmd.OutOrStdout())
 			if err != nil {
 				return err
@@ -123,6 +126,8 @@ func cmdInstall() *cobra.Command {
 	cmd.Flags().StringVar(&url, "url", "", "pin a direct download URL (requires --sha256)")
 	cmd.Flags().StringVar(&sha, "sha256", "", "expected SHA-256 of the download")
 	cmd.Flags().StringVar(&manifest, "manifest", "", "manifest file (default: ~/.config/mainspring/install.json)")
+	cmd.Flags().StringVar(&pubkey, "pubkey", "", "base64 ed25519 public key; requires a signed manifest ($MAINSPRING_MANIFEST_PUBKEY)")
+	cmd.Flags().StringVar(&sig, "manifest-sig", "", "detached manifest signature file (default: <manifest>.sig)")
 	return cmd
 }
 
