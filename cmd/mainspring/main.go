@@ -313,6 +313,23 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		fmt.Println("⚠  Do not expose this address beyond localhost. Set api_keys / --api-key to require auth.")
 	}
 
+	// Warm up preloaded models in the background so the server is available
+	// immediately while cold-starts happen concurrently.
+	if ids := preloadIDs(cfg); len(ids) > 0 {
+		if cfg.MaxLoaded > 0 && len(ids) > cfg.MaxLoaded {
+			fmt.Printf("⚠  %d models set to preload but max_loaded=%d — some will be evicted as they load\n", len(ids), cfg.MaxLoaded)
+		}
+		go func() {
+			for _, id := range ids {
+				if _, err := sched.EnsureLoaded(context.Background(), id); err != nil {
+					fmt.Printf("preload %s: %v\n", id, err)
+				} else {
+					fmt.Printf("preloaded %s\n", id)
+				}
+			}
+		}()
+	}
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -365,6 +382,17 @@ func defaultBackendName(cfg config.Config) string {
 		return cfg.Backend
 	}
 	return "llamacpp"
+}
+
+// preloadIDs returns the ids of models configured to load at startup.
+func preloadIDs(cfg config.Config) []string {
+	var ids []string
+	for _, m := range cfg.Models {
+		if m.Preload {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
 }
 
 // buildAuth constructs the authenticator from config: explicit tenants take
