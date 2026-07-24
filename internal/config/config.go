@@ -28,6 +28,7 @@ type Config struct {
 	KeepAliveSeconds int      `yaml:"keep_alive_seconds"`
 	MaxLoaded        int      `yaml:"max_loaded"`
 	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`
+	UsageLedger      string   `yaml:"usage_ledger,omitempty"` // JSONL path; empty => default location
 	LlamaServerPath  string   `yaml:"llama_server_path,omitempty"`
 	Models           []Model  `yaml:"models,omitempty"`
 }
@@ -64,6 +65,15 @@ func DefaultPath() string {
 		return "config.yaml"
 	}
 	return filepath.Join(home, ".config", "mainspring", "config.yaml")
+}
+
+// DefaultLedgerPath is ~/.config/mainspring/usage.jsonl.
+func DefaultLedgerPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "usage.jsonl"
+	}
+	return filepath.Join(home, ".config", "mainspring", "usage.jsonl")
 }
 
 // Load reads config from path, layered over Default. An empty path uses

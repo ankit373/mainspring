@@ -15,6 +15,7 @@ import (
 
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
+	"github.com/ankit373/mainspring/internal/metrics"
 	"github.com/ankit373/mainspring/internal/scheduler"
 )
 
@@ -23,25 +24,41 @@ const maxRequestBody = 64 << 20
 
 // Server serves the OpenAI-compatible API.
 type Server struct {
-	sched *scheduler.Scheduler
-	auth  *auth.Authenticator
+	sched   *scheduler.Scheduler
+	auth    *auth.Authenticator
+	metrics *metrics.Recorder
 }
 
-// New builds a Server.
-func New(sched *scheduler.Scheduler, a *auth.Authenticator) *Server {
-	return &Server{sched: sched, auth: a}
+// New builds a Server. rec may be nil (metrics disabled).
+func New(sched *scheduler.Scheduler, a *auth.Authenticator, rec *metrics.Recorder) *Server {
+	return &Server{sched: sched, auth: a, metrics: rec}
 }
 
 // Handler returns the fully-wired http.Handler (auth-wrapped).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.healthz)
+	mux.HandleFunc("/metrics", s.metricsHandler)
 	mux.HandleFunc("/capabilities", s.capabilities)
 	mux.HandleFunc("/v1/models", s.models)
 	mux.HandleFunc("/v1/chat/completions", s.inference)
 	mux.HandleFunc("/v1/completions", s.inference)
 	mux.HandleFunc("/v1/embeddings", s.inference)
 	return s.auth.Wrap(mux)
+}
+
+// metricsHandler renders the Prometheus exposition, merging live residency.
+func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	if s.metrics == nil {
+		return
+	}
+	used, budget, count := s.sched.Residency()
+	s.metrics.WritePrometheus(w, metrics.Gauges{
+		LoadedModels:  count,
+		ResidentBytes: used,
+		BudgetBytes:   budget,
+	})
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -136,7 +153,23 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	extra := s.failLoudHeaders(r.Context(), runner)
-	s.proxyTo(w, r, runner.BaseURL(), body, extra)
+
+	start := time.Now()
+	cap := newCapture(w, start)
+	s.proxyTo(cap, r, runner.BaseURL(), body, extra)
+
+	if s.metrics != nil {
+		s.metrics.Record(metrics.Event{
+			Time:       start,
+			Model:      peek.Model,
+			Status:     cap.status,
+			Stream:     cap.stream,
+			DurationMs: float64(time.Since(start).Microseconds()) / 1000.0,
+			TTFTMs:     cap.ttftMs(),
+			Bytes:      cap.bytes,
+			TokensEst:  cap.tokensEstimate(),
+		})
+	}
 }
 
 // failLoudHeaders builds the X-Mainspring-* signal headers and logs loudly when

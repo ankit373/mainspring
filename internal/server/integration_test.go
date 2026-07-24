@@ -11,6 +11,7 @@ import (
 
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
+	"github.com/ankit373/mainspring/internal/metrics"
 	"github.com/ankit373/mainspring/internal/scheduler"
 	"github.com/ankit373/mainspring/internal/server"
 )
@@ -80,7 +81,8 @@ func (r *engineRunner) Capabilities(context.Context) (backend.Capabilities, erro
 func newTestServer(t *testing.T, be backend.Backend, keys []string) http.Handler {
 	t.Helper()
 	sched := scheduler.New(be, []backend.ModelSpec{{ID: "m1"}}, scheduler.Options{MaxLoaded: 2})
-	return server.New(sched, auth.New(keys)).Handler()
+	rec, _ := metrics.New("") // in-memory only
+	return server.New(sched, auth.New(keys), rec).Handler()
 }
 
 func TestLoopNonStreaming(t *testing.T) {
@@ -181,6 +183,25 @@ func TestAuthEnforcedOnInference(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("want 200 with key, got %d", w.Code)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	eng := fakeEngine(t)
+	h := newTestServer(t, &engineBackend{baseURL: eng.URL}, nil)
+
+	// One inference request to generate a metric.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m1","messages":[]}`))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	m := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, m)
+	if w.Code != 200 {
+		t.Fatalf("metrics status=%d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `mainspring_requests_total{model="m1",status="200"}`) {
+		t.Fatalf("metrics missing request counter:\n%s", w.Body.String())
 	}
 }
 
