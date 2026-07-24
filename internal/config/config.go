@@ -40,6 +40,8 @@ type Config struct {
 	KeepAliveSeconds int      `yaml:"keep_alive_seconds"`
 	MaxLoaded        int      `yaml:"max_loaded"`
 	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`
+	MaxInflight      int      `yaml:"max_inflight,omitempty"` // concurrent requests per model; 0 = unbounded
+	MaxQueue         int      `yaml:"max_queue,omitempty"`    // extra waiters per model before 503
 	UsageLedger      string   `yaml:"usage_ledger,omitempty"` // JSONL path; empty => default location
 	Backend          string   `yaml:"backend,omitempty"`      // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
 	LlamaServerPath  string   `yaml:"llama_server_path,omitempty"`
