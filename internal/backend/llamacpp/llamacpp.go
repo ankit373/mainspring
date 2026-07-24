@@ -125,18 +125,13 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 		return nil, fmt.Errorf("llamacpp: start %s: %w", bin, err)
 	}
 
-	var mem int64
-	if fi, err := os.Stat(spec.Path); err == nil {
-		mem = fi.Size() // GGUF on-disk size ≈ resident footprint; good-enough proxy
-	}
-
 	r := &runner{
 		baseURL: fmt.Sprintf("http://%s:%d", host, port),
 		cmd:     cmd,
 		cancel:  cancel,
 		logs:    logs,
 		spec:    spec,
-		mem:     mem,
+		mem:     estimateMemory(spec.Path, spec.CtxSize),
 	}
 
 	if err := r.waitReady(ctx); err != nil {
@@ -144,6 +139,33 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 		return nil, err
 	}
 	return r, nil
+}
+
+// kvBytesPerToken is a coarse per-token KV-cache footprint. Real usage depends
+// on n_layers/n_kv_heads/head_dim, unknown before load; this is deliberately
+// conservative and refined once the engine reports model metadata (Phase 1).
+const kvBytesPerToken = 128 << 10
+
+// defaultCtxAssumption is the context window assumed for estimation when a model
+// leaves CtxSize unset (engine default is typically ~4k).
+const defaultCtxAssumption = 4096
+
+// estimateMemory approximates a model's resident footprint: weights on disk plus
+// a KV-cache estimate scaled by context window.
+func estimateMemory(path string, ctx int) int64 {
+	var weights int64
+	if fi, err := os.Stat(path); err == nil {
+		weights = fi.Size()
+	}
+	if ctx <= 0 {
+		ctx = defaultCtxAssumption
+	}
+	return weights + int64(ctx)*kvBytesPerToken
+}
+
+// EstimateMemory implements backend.MemoryEstimator for scheduler admission.
+func (b *Backend) EstimateMemory(spec backend.ModelSpec) int64 {
+	return estimateMemory(spec.Path, spec.CtxSize)
 }
 
 // gpuLayersArg maps our convention to llama.cpp's -ngl:

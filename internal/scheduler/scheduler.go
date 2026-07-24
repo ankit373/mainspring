@@ -23,12 +23,20 @@ type Scheduler struct {
 	specs     map[string]backend.ModelSpec
 	keepAlive time.Duration
 	maxLoaded int
+	maxBytes  int64
 
 	mu      sync.Mutex
 	running map[string]*loaded
 
 	loadingMu sync.Mutex
 	loading   map[string]*loadCall
+}
+
+// Options configures a Scheduler.
+type Options struct {
+	KeepAlive time.Duration // idle-unload delay; <=0 disables idle unloading
+	MaxLoaded int           // max models resident by count; <=0 => 1
+	MaxBytes  int64         // max resident bytes across all models; <=0 => no byte cap
 }
 
 type loaded struct {
@@ -44,11 +52,10 @@ type loadCall struct {
 	err    error
 }
 
-// New builds a scheduler. keepAlive <= 0 disables idle unloading; maxLoaded <= 0
-// means one model at a time (swap on switch).
-func New(be backend.Backend, specs []backend.ModelSpec, keepAlive time.Duration, maxLoaded int) *Scheduler {
-	if maxLoaded <= 0 {
-		maxLoaded = 1
+// New builds a scheduler from Options.
+func New(be backend.Backend, specs []backend.ModelSpec, opts Options) *Scheduler {
+	if opts.MaxLoaded <= 0 {
+		opts.MaxLoaded = 1
 	}
 	m := make(map[string]backend.ModelSpec, len(specs))
 	for _, s := range specs {
@@ -57,8 +64,9 @@ func New(be backend.Backend, specs []backend.ModelSpec, keepAlive time.Duration,
 	return &Scheduler{
 		be:        be,
 		specs:     m,
-		keepAlive: keepAlive,
-		maxLoaded: maxLoaded,
+		keepAlive: opts.KeepAlive,
+		maxLoaded: opts.MaxLoaded,
+		maxBytes:  opts.MaxBytes,
 		running:   make(map[string]*loaded),
 		loading:   make(map[string]*loadCall),
 	}
@@ -123,8 +131,15 @@ func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, e
 		return nil, fmt.Errorf("unknown model %q", modelID)
 	}
 
+	// Estimate the incoming footprint (if the backend can) so byte-budget
+	// admission can make room before starting the process.
+	var incoming int64
+	if est, ok := s.be.(backend.MemoryEstimator); ok {
+		incoming = est.EstimateMemory(spec)
+	}
+
 	// Evict LRU victims (outside the lock) until there is room.
-	for _, v := range s.evictionVictims() {
+	for _, v := range s.makeRoom(incoming) {
 		_ = v.Stop(context.Background())
 	}
 
@@ -143,21 +158,22 @@ func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, e
 	return r, nil
 }
 
-// evictionVictims removes enough LRU entries from the map to make room for one
-// more and returns their runners to be stopped by the caller (outside the lock).
-func (s *Scheduler) evictionVictims() []backend.Runner {
+// makeRoom evicts LRU entries until there is room for a model of `incoming`
+// bytes — under both the count cap and (when set) the byte budget. It returns
+// the evicted runners for the caller to Stop outside the lock. If a single
+// model is larger than the whole budget, everything else is evicted and it is
+// still admitted (best effort — surfaced via /capabilities residency).
+func (s *Scheduler) makeRoom(incoming int64) []backend.Runner {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var victims []backend.Runner
-	for len(s.running) >= s.maxLoaded {
-		var oldestID string
-		var oldest time.Time
-		first := true
-		for id, l := range s.running {
-			if first || l.lastUsed.Before(oldest) {
-				oldestID, oldest, first = id, l.lastUsed, false
-			}
+	for len(s.running) > 0 {
+		overCount := len(s.running) >= s.maxLoaded
+		overBytes := s.maxBytes > 0 && s.usedBytesLocked()+incoming > s.maxBytes
+		if !overCount && !overBytes {
+			break
 		}
+		oldestID := s.lruLocked()
 		if oldestID == "" {
 			break
 		}
@@ -169,6 +185,28 @@ func (s *Scheduler) evictionVictims() []backend.Runner {
 		victims = append(victims, l.runner)
 	}
 	return victims
+}
+
+// usedBytesLocked sums the resident footprint of loaded runners (caller holds mu).
+func (s *Scheduler) usedBytesLocked() int64 {
+	var total int64
+	for _, l := range s.running {
+		total += l.runner.MemoryBytes()
+	}
+	return total
+}
+
+// lruLocked returns the id of the least-recently-used model (caller holds mu).
+func (s *Scheduler) lruLocked() string {
+	var oldestID string
+	var oldest time.Time
+	first := true
+	for id, l := range s.running {
+		if first || l.lastUsed.Before(oldest) {
+			oldestID, oldest, first = id, l.lastUsed, false
+		}
+	}
+	return oldestID
 }
 
 func (s *Scheduler) idleEvict(modelID string) {
@@ -212,6 +250,15 @@ func (s *Scheduler) Loaded() []RunnerInfo {
 		out = append(out, RunnerInfo{ID: id, Runner: l.runner})
 	}
 	return out
+}
+
+// Residency reports current resident bytes, the configured byte budget (0 =
+// unbounded), and the number of loaded models — the signal Hydra's router can
+// use to factor swap cost into routing.
+func (s *Scheduler) Residency() (used, budget int64, count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.usedBytesLocked(), s.maxBytes, len(s.running)
 }
 
 // Shutdown stops every loaded runner, reclaiming all memory.
