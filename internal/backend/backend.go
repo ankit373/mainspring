@@ -64,6 +64,7 @@ type Availability struct {
 	Present bool   `json:"present"`           // binary/runtime found
 	Path    string `json:"path,omitempty"`    // resolved binary path
 	Version string `json:"version,omitempty"`
+	Managed bool   `json:"managed,omitempty"` // installed by `mainspring install` (vs system)
 	Reason  string `json:"reason,omitempty"`  // when absent: why / how to install
 }
 

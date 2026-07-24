@@ -1,0 +1,4 @@
+{
+  "_note": "Curated, pinned engine artifacts per backend and platform. Empty by default: v0 installs are driven by explicit --url/--sha256 or a user/release-supplied manifest (install.json / --manifest). Populating this with signed, checksum-pinned release URLs is tracked as follow-up work.",
+  "backends": {}
+}

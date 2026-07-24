@@ -21,6 +21,7 @@ import (
 	"github.com/ankit373/mainspring/internal/backend/ollama"
 	"github.com/ankit373/mainspring/internal/build"
 	"github.com/ankit373/mainspring/internal/config"
+	"github.com/ankit373/mainspring/internal/install"
 	"github.com/ankit373/mainspring/internal/metrics"
 	"github.com/ankit373/mainspring/internal/scheduler"
 	"github.com/ankit373/mainspring/internal/server"
@@ -35,7 +36,7 @@ func main() {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().String("config", "", "config file (default: ~/.config/mainspring/config.yaml)")
-	root.AddCommand(cmdServe(), cmdBackends(), cmdModels(), cmdVersion())
+	root.AddCommand(cmdServe(), cmdBackends(), cmdModels(), cmdInstall(), cmdVersion())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -70,9 +71,19 @@ func cmdBackends() *cobra.Command {
 				ollama.New(cfg.OllamaHost),
 				mlx.New(cfg.MLXPython),
 			}
-			fmt.Printf("%-12s %-9s %s\n", "BACKEND", "PRESENT", "DETAIL")
+			fmt.Printf("%-12s %-9s %-9s %s\n", "BACKEND", "PRESENT", "SOURCE", "DETAIL")
 			for _, b := range backends {
 				av := b.Detect(ctx)
+				if _, ok := install.ManagedPath(av.Name); ok {
+					av.Managed = true
+				}
+				source := "-"
+				if av.Present {
+					source = "system"
+					if av.Managed {
+						source = "managed"
+					}
+				}
 				detail := av.Path
 				if av.Version != "" {
 					detail += "  " + av.Version
@@ -80,12 +91,37 @@ func cmdBackends() *cobra.Command {
 				if !av.Present {
 					detail = av.Reason
 				}
-				fmt.Printf("%-12s %-9v %s\n", av.Name, av.Present, detail)
+				fmt.Printf("%-12s %-9v %-9s %s\n", av.Name, av.Present, source, detail)
 			}
 			fmt.Println("\ndetect-and-adopt-only (planned): lmstudio, llamafile, gpt4all")
 			return nil
 		},
 	}
+}
+
+func cmdInstall() *cobra.Command {
+	var version, url, sha, manifest string
+	cmd := &cobra.Command{
+		Use:   "install <backend>",
+		Short: "Install an engine backend binary (opt-in, checksum-verified)",
+		Long:  "Downloads and SHA-256-verifies an engine binary, then records a receipt so\nthe backend prefers the managed binary. Nothing is downloaded unless you run\nthis command. Pin a specific artifact with --url and --sha256, or rely on a\nmanifest (--manifest / ~/.config/mainspring/install.json).",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rec, err := install.Install(cmd.Context(), args[0], install.Spec{
+				Version: version, URL: url, SHA256: sha,
+			}, manifest, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			_ = rec
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&version, "version", "", "version to install (from manifest)")
+	cmd.Flags().StringVar(&url, "url", "", "pin a direct download URL (requires --sha256)")
+	cmd.Flags().StringVar(&sha, "sha256", "", "expected SHA-256 of the download")
+	cmd.Flags().StringVar(&manifest, "manifest", "", "manifest file (default: ~/.config/mainspring/install.json)")
+	return cmd
 }
 
 func cmdModels() *cobra.Command {
@@ -263,7 +299,13 @@ func runServe(ctx context.Context, cfg config.Config) error {
 func buildBackend(cfg config.Config) (backend.Backend, error) {
 	switch cfg.Backend {
 	case "", "llamacpp":
-		return llamacpp.New(cfg.LlamaServerPath), nil
+		binPath := cfg.LlamaServerPath
+		if binPath == "" {
+			if managed, ok := install.ManagedPath("llamacpp"); ok {
+				binPath = managed // prefer a managed install over PATH
+			}
+		}
+		return llamacpp.New(binPath), nil
 	case "ollama":
 		return ollama.New(cfg.OllamaHost), nil
 	case "mlx":
