@@ -27,11 +27,20 @@ type Server struct {
 	sched   *scheduler.Scheduler
 	auth    *auth.Authenticator
 	metrics *metrics.Recorder
+	gate    *gate
 }
 
-// New builds a Server. rec may be nil (metrics disabled).
+// New builds a Server. rec may be nil (metrics disabled). Concurrency gating is
+// off by default; enable it with SetConcurrency.
 func New(sched *scheduler.Scheduler, a *auth.Authenticator, rec *metrics.Recorder) *Server {
-	return &Server{sched: sched, auth: a, metrics: rec}
+	return &Server{sched: sched, auth: a, metrics: rec, gate: newGate(0, 0)}
+}
+
+// SetConcurrency enables per-model backpressure: at most maxInflight concurrent
+// requests per model with up to maxQueue waiters; excess is rejected with 503.
+// maxInflight <= 0 disables gating.
+func (s *Server) SetConcurrency(maxInflight, maxQueue int) {
+	s.gate = newGate(maxInflight, maxQueue)
 }
 
 // Handler returns the fully-wired http.Handler (auth-wrapped).
@@ -59,6 +68,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 		ResidentBytes: used,
 		BudgetBytes:   budget,
 	})
+	s.gate.writePrometheus(w)
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -157,6 +167,15 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "token budget exceeded")
 		return
 	}
+
+	// Concurrency gate: bound in-flight requests per model, backpressure over it.
+	release, ok := s.gate.acquire(r.Context(), peek.Model)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests for "+peek.Model)
+		return
+	}
+	defer release()
 
 	runner, err := s.sched.EnsureLoaded(r.Context(), peek.Model)
 	if err != nil {

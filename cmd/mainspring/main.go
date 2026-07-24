@@ -161,6 +161,8 @@ func cmdServe() *cobra.Command {
 		keepAlive    int
 		maxLoaded    int
 		maxResident  int
+		maxInflight  int
+		maxQueue     int
 		usageLedger  string
 		backendName  string
 		ollamaHost   string
@@ -189,6 +191,12 @@ func cmdServe() *cobra.Command {
 			}
 			if cmd.Flags().Changed("max-resident-mb") {
 				cfg.MaxResidentMB = maxResident
+			}
+			if cmd.Flags().Changed("max-inflight") {
+				cfg.MaxInflight = maxInflight
+			}
+			if cmd.Flags().Changed("max-queue") {
+				cfg.MaxQueue = maxQueue
 			}
 			if cmd.Flags().Changed("usage-ledger") {
 				cfg.UsageLedger = usageLedger
@@ -222,6 +230,8 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().IntVar(&keepAlive, "keep-alive", 300, "seconds to keep an idle model loaded (0 = never unload)")
 	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once by count (LRU-evicted beyond this)")
 	cmd.Flags().IntVar(&maxResident, "max-resident-mb", 0, "max resident memory across models in MB (0 = no byte cap)")
+	cmd.Flags().IntVar(&maxInflight, "max-inflight", 0, "max concurrent requests per model (0 = unbounded)")
+	cmd.Flags().IntVar(&maxQueue, "max-queue", 0, "max queued waiters per model before returning 503")
 	cmd.Flags().StringVar(&usageLedger, "usage-ledger", "", "JSONL usage ledger path (empty = default location, \"off\" = disable)")
 	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | ollama | mlx")
 	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "", "Ollama daemon URL when --backend ollama")
@@ -283,6 +293,7 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	defer func() { _ = rec.Close() }()
 
 	srv := server.New(sched, authn, rec)
+	srv.SetConcurrency(cfg.MaxInflight, cfg.MaxQueue)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
