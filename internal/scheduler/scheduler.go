@@ -17,9 +17,10 @@ import (
 	"github.com/ankit373/mainspring/internal/backend"
 )
 
-// Scheduler manages loaded runners for a single backend (v0).
+// Scheduler manages loaded runners across one or more backends, dispatching
+// each model to the backend named in its ModelSpec.
 type Scheduler struct {
-	be        backend.Backend
+	backends  map[string]backend.Backend
 	specs     map[string]backend.ModelSpec
 	keepAlive time.Duration
 	maxLoaded int
@@ -52,8 +53,9 @@ type loadCall struct {
 	err    error
 }
 
-// New builds a scheduler from Options.
-func New(be backend.Backend, specs []backend.ModelSpec, opts Options) *Scheduler {
+// New builds a scheduler from a set of named backends and Options. Each spec's
+// Backend field selects which backend serves it.
+func New(backends map[string]backend.Backend, specs []backend.ModelSpec, opts Options) *Scheduler {
 	if opts.MaxLoaded <= 0 {
 		opts.MaxLoaded = 1
 	}
@@ -62,7 +64,7 @@ func New(be backend.Backend, specs []backend.ModelSpec, opts Options) *Scheduler
 		m[s.ID] = s
 	}
 	return &Scheduler{
-		be:        be,
+		backends:  backends,
 		specs:     m,
 		keepAlive: opts.KeepAlive,
 		maxLoaded: opts.MaxLoaded,
@@ -130,11 +132,15 @@ func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, e
 	if !ok {
 		return nil, fmt.Errorf("unknown model %q", modelID)
 	}
+	be, ok := s.backends[spec.Backend]
+	if !ok {
+		return nil, fmt.Errorf("model %q references unavailable backend %q", modelID, spec.Backend)
+	}
 
 	// Estimate the incoming footprint (if the backend can) so byte-budget
 	// admission can make room before starting the process.
 	var incoming int64
-	if est, ok := s.be.(backend.MemoryEstimator); ok {
+	if est, ok := be.(backend.MemoryEstimator); ok {
 		incoming = est.EstimateMemory(spec)
 	}
 
@@ -143,7 +149,7 @@ func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, e
 		_ = v.Stop(context.Background())
 	}
 
-	r, err := s.be.Start(ctx, spec)
+	r, err := be.Start(ctx, spec)
 	if err != nil {
 		return nil, err
 	}

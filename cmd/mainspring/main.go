@@ -137,9 +137,14 @@ func cmdModels() *cobra.Command {
 				fmt.Println("no models configured — add them to your config or pass --model id=path to serve")
 				return nil
 			}
-			fmt.Printf("%-24s %-6s %s\n", "MODEL", "CTX", "PATH")
+			fallback := defaultBackendName(cfg)
+			fmt.Printf("%-24s %-10s %-6s %s\n", "MODEL", "BACKEND", "CTX", "PATH")
 			for _, m := range cfg.Models {
-				fmt.Printf("%-24s %-6d %s\n", m.ID, m.Ctx, m.Path)
+				b := m.Backend
+				if b == "" {
+					b = fallback
+				}
+				fmt.Printf("%-24s %-10s %-6d %s\n", m.ID, b, m.Ctx, m.Path)
 			}
 			return nil
 		},
@@ -223,10 +228,18 @@ func cmdServe() *cobra.Command {
 }
 
 func runServe(ctx context.Context, cfg config.Config) error {
+	fallback := defaultBackendName(cfg)
 	specs := make([]backend.ModelSpec, 0, len(cfg.Models))
+	needed := map[string]bool{}
 	for _, m := range cfg.Models {
+		bname := m.Backend
+		if bname == "" {
+			bname = fallback
+		}
+		needed[bname] = true
 		specs = append(specs, backend.ModelSpec{
 			ID:        m.ID,
+			Backend:   bname,
 			Path:      m.Path,
 			CtxSize:   m.Ctx,
 			GPULayers: m.GPULayers,
@@ -234,15 +247,20 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		})
 	}
 
-	be, err := buildBackend(cfg)
-	if err != nil {
-		return err
-	}
-	if av := be.Detect(ctx); !av.Present {
-		return fmt.Errorf("%s backend unavailable: %s", be.Name(), av.Reason)
+	// Construct and detect only the backends the configured models actually use.
+	backends := make(map[string]backend.Backend, len(needed))
+	for name := range needed {
+		be, err := newBackendByName(name, cfg)
+		if err != nil {
+			return err
+		}
+		if av := be.Detect(ctx); !av.Present {
+			return fmt.Errorf("%s backend unavailable: %s", name, av.Reason)
+		}
+		backends[name] = be
 	}
 
-	sched := scheduler.New(be, specs, scheduler.Options{
+	sched := scheduler.New(backends, specs, scheduler.Options{
 		KeepAlive: cfg.KeepAlive(),
 		MaxLoaded: cfg.MaxLoaded,
 		MaxBytes:  cfg.MaxBytes(),
@@ -305,10 +323,11 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	}
 }
 
-// buildBackend selects the inference backend from config (default llamacpp).
-func buildBackend(cfg config.Config) (backend.Backend, error) {
-	switch cfg.Backend {
-	case "", "llamacpp":
+// newBackendByName constructs a backend by name, applying config (incl. a
+// managed-install path preference for llamacpp).
+func newBackendByName(name string, cfg config.Config) (backend.Backend, error) {
+	switch name {
+	case "llamacpp":
 		binPath := cfg.LlamaServerPath
 		if binPath == "" {
 			if managed, ok := install.ManagedPath("llamacpp"); ok {
@@ -321,8 +340,16 @@ func buildBackend(cfg config.Config) (backend.Backend, error) {
 	case "mlx":
 		return mlx.New(cfg.MLXPython), nil
 	default:
-		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx)", cfg.Backend)
+		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx)", name)
 	}
+}
+
+// defaultBackendName resolves the fallback backend for models that don't set one.
+func defaultBackendName(cfg config.Config) string {
+	if cfg.Backend != "" {
+		return cfg.Backend
+	}
+	return "llamacpp"
 }
 
 // buildAuth constructs the authenticator from config: explicit tenants take

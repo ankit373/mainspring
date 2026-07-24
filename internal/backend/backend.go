@@ -24,6 +24,7 @@ const (
 // ModelSpec describes a model to serve.
 type ModelSpec struct {
 	ID      string   // logical id exposed via the API, e.g. "qwen2.5-coder"
+	Backend string   // backend name that serves this model ("llamacpp"|"ollama"|"mlx")
 	Path    string   // absolute path to the weights (e.g. a .gguf file)
 	CtxSize   int      // requested context window; 0 = engine default
 	GPULayers int      // 0 = offload all (default), N>0 = that many, N<0 = CPU-only
