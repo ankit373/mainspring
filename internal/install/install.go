@@ -57,6 +57,8 @@ type Spec struct {
 	Version string
 	URL     string
 	SHA256  string
+	PubKey  string // base64 ed25519 public key; when set, the manifest must be signed
+	SigPath string // detached signature path (defaults to <manifest>.sig)
 }
 
 // PlatformKey is "os/arch", e.g. "darwin/arm64".
@@ -164,6 +166,13 @@ func resolve(backend string, spec Spec, manifestPath string) (url, sha, version 
 // writing a receipt. It is the ONLY function that performs a download, and only
 // when explicitly invoked.
 func Install(ctx context.Context, backend string, spec Spec, manifestPath string, out io.Writer) (Receipt, error) {
+	// When installing from a manifest (not a direct --url pin) and a public key
+	// is configured, the manifest must carry a valid detached signature.
+	if spec.URL == "" {
+		if err := verifyManifestFile(manifestPath, spec.SigPath, spec.PubKey); err != nil {
+			return Receipt{}, err
+		}
+	}
 	url, wantSHA, version, err := resolve(backend, spec, manifestPath)
 	if err != nil {
 		return Receipt{}, err
