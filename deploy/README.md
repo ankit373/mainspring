@@ -41,3 +41,21 @@ The full `config.yaml` is rendered into a Secret (it may hold tenant keys) and
 mounted at `/config/config.yaml`. Model weights mount at `/models`
 (`models.persistence.enabled=true` for a PVC). Liveness/readiness probes hit
 `/healthz`; scrape `/metrics` for Prometheus.
+
+### GPU, autoscaling, and monitoring
+
+```bash
+# Ready-made GPU overrides (nvidia.com/gpu, nodeSelector, tolerations, PVC)
+helm install ms deploy/helm/mainspring -f deploy/helm/mainspring/values-gpu.yaml
+
+# Prometheus Operator scraping (monitoring.coreos.com CRD required)
+helm install ms deploy/helm/mainspring --set serviceMonitor.enabled=true
+
+# CPU-backed autoscaling (HPA; leave off for 1:1 GPU pods)
+helm install ms deploy/helm/mainspring \
+  --set autoscaling.enabled=true --set autoscaling.maxReplicas=6
+```
+
+When `autoscaling.enabled=true` the Deployment omits `replicas` (the HPA owns
+it). `values-gpu.yaml` also bounds concurrency (`max_inflight`/`max_queue`) so a
+single GPU degrades gracefully under load.

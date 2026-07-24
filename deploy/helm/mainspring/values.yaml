@@ -68,5 +68,15 @@ securityContext:
 probes:
   enabled: true
 
+# Horizontal Pod Autoscaler (autoscaling/v2).
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 75
+  # targetMemoryUtilizationPercentage: 80
+
 serviceMonitor:
-  enabled: false   # set true if the Prometheus Operator is installed
+  enabled: false   # set true if the Prometheus Operator (monitoring.coreos.com) is installed
+  interval: 30s
+  path: /metrics
