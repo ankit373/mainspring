@@ -17,6 +17,7 @@ import (
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
 	"github.com/ankit373/mainspring/internal/backend/llamacpp"
+	"github.com/ankit373/mainspring/internal/backend/ollama"
 	"github.com/ankit373/mainspring/internal/build"
 	"github.com/ankit373/mainspring/internal/config"
 	"github.com/ankit373/mainspring/internal/metrics"
@@ -63,7 +64,10 @@ func cmdBackends() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
 
-			backends := []backend.Backend{llamacpp.New(cfg.LlamaServerPath)}
+			backends := []backend.Backend{
+				llamacpp.New(cfg.LlamaServerPath),
+				ollama.New(cfg.OllamaHost),
+			}
 			fmt.Printf("%-12s %-9s %s\n", "BACKEND", "PRESENT", "DETAIL")
 			for _, b := range backends {
 				av := b.Detect(ctx)
@@ -76,7 +80,7 @@ func cmdBackends() *cobra.Command {
 				}
 				fmt.Printf("%-12s %-9v %s\n", av.Name, av.Present, detail)
 			}
-			fmt.Println("\nplanned: mlx (Apple Silicon), ollama (adopt existing daemon);")
+			fmt.Println("\nplanned: mlx (Apple Silicon);")
 			fmt.Println("detect-and-adopt-only: lmstudio, llamafile, gpt4all")
 			return nil
 		},
@@ -183,9 +187,12 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		})
 	}
 
-	be := llamacpp.New(cfg.LlamaServerPath)
+	be, err := buildBackend(cfg)
+	if err != nil {
+		return err
+	}
 	if av := be.Detect(ctx); !av.Present {
-		return fmt.Errorf("llama.cpp backend unavailable: %s", av.Reason)
+		return fmt.Errorf("%s backend unavailable: %s", be.Name(), av.Reason)
 	}
 
 	sched := scheduler.New(be, specs, scheduler.Options{
@@ -248,6 +255,18 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		_ = httpSrv.Shutdown(shutCtx)
 		sched.Shutdown(shutCtx)
 		return nil
+	}
+}
+
+// buildBackend selects the inference backend from config (default llamacpp).
+func buildBackend(cfg config.Config) (backend.Backend, error) {
+	switch cfg.Backend {
+	case "", "llamacpp":
+		return llamacpp.New(cfg.LlamaServerPath), nil
+	case "ollama":
+		return ollama.New(cfg.OllamaHost), nil
+	default:
+		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama)", cfg.Backend)
 	}
 }
 

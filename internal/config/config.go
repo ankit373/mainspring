@@ -40,7 +40,9 @@ type Config struct {
 	MaxLoaded        int      `yaml:"max_loaded"`
 	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`
 	UsageLedger      string   `yaml:"usage_ledger,omitempty"` // JSONL path; empty => default location
+	Backend          string   `yaml:"backend,omitempty"`      // "llamacpp" (default) | "ollama"
 	LlamaServerPath  string   `yaml:"llama_server_path,omitempty"`
+	OllamaHost       string   `yaml:"ollama_host,omitempty"` // e.g. http://127.0.0.1:11434
 	Models           []Model  `yaml:"models,omitempty"`
 }
 
