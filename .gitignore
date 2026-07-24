@@ -1,0 +1,30 @@
+# Binaries
+/mainspring
+/dist/
+*.exe
+*.test
+*.out
+
+# Local model weights — never commit multi-GB files
+*.gguf
+*.safetensors
+/models/
+
+# Local config / state / logs
+/config.local.yaml
+~/.config/mainspring/
+*.log
+/logs/
+
+# Planning docs (private)
+BUILD_STATE.md
+*_SCOPING.md
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go
+/vendor/

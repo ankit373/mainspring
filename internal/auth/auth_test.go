@@ -1,0 +1,63 @@
+package auth
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestOpenMode(t *testing.T) {
+	a := New(nil)
+	if !a.Open() {
+		t.Fatal("no keys => open")
+	}
+	if New([]string{"  "}).Open() != true {
+		t.Fatal("blank keys are ignored => still open")
+	}
+	if New([]string{"k"}).Open() {
+		t.Fatal("a real key => not open")
+	}
+}
+
+func TestWrapEnforcesKey(t *testing.T) {
+	a := New([]string{"secret"})
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+	h := a.Wrap(ok)
+
+	cases := []struct {
+		name   string
+		path   string
+		header map[string]string
+		want   int
+	}{
+		{"no key", "/v1/models", nil, http.StatusUnauthorized},
+		{"wrong key", "/v1/models", map[string]string{"Authorization": "Bearer nope"}, http.StatusUnauthorized},
+		{"right bearer", "/v1/models", map[string]string{"Authorization": "Bearer secret"}, http.StatusOK},
+		{"right x-api-key", "/v1/models", map[string]string{"x-api-key": "secret"}, http.StatusOK},
+		{"healthz exempt", "/healthz", nil, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			for k, v := range tc.header {
+				r.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("got %d, want %d", w.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenModeAllowsAll(t *testing.T) {
+	a := New(nil)
+	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("open mode should allow all, got %d", w.Code)
+	}
+}
