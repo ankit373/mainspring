@@ -193,7 +193,7 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		MaxLoaded: cfg.MaxLoaded,
 		MaxBytes:  cfg.MaxBytes(),
 	})
-	authn := auth.New(cfg.APIKeys)
+	authn := buildAuth(cfg)
 
 	ledgerPath := cfg.UsageLedger
 	if ledgerPath == "" {
@@ -249,6 +249,26 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		sched.Shutdown(shutCtx)
 		return nil
 	}
+}
+
+// buildAuth constructs the authenticator from config: explicit tenants take
+// precedence over the flat api_keys list.
+func buildAuth(cfg config.Config) *auth.Authenticator {
+	if len(cfg.Tenants) > 0 {
+		ts := make([]auth.Tenant, 0, len(cfg.Tenants))
+		for _, t := range cfg.Tenants {
+			ts = append(ts, auth.Tenant{
+				Name:        t.Name,
+				Key:         t.Key,
+				Role:        auth.Role(t.Role),
+				RateRPM:     t.RateRPM,
+				TokenBudget: t.TokenBudget,
+				WindowSec:   t.WindowSec,
+			})
+		}
+		return auth.NewTenants(ts)
+	}
+	return auth.New(cfg.APIKeys)
 }
 
 // parseModelFlag parses "id=/path/to/weights.gguf".

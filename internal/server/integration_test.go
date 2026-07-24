@@ -205,6 +205,31 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesRequiresAdmin(t *testing.T) {
+	eng := fakeEngine(t)
+	sched := scheduler.New(&engineBackend{baseURL: eng.URL}, []backend.ModelSpec{{ID: "m1"}}, scheduler.Options{MaxLoaded: 2})
+	rec, _ := metrics.New("")
+	authn := auth.NewTenants([]auth.Tenant{
+		{Name: "inf", Key: "infkey", Role: auth.RoleInference},
+		{Name: "adm", Key: "admkey", Role: auth.RoleAdmin},
+	})
+	h := server.New(sched, authn, rec).Handler()
+
+	get := func(key string) int {
+		r := httptest.NewRequest(http.MethodGet, "/capabilities", nil)
+		r.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := get("infkey"); code != http.StatusForbidden {
+		t.Fatalf("inference role on /capabilities: want 403, got %d", code)
+	}
+	if code := get("admkey"); code != http.StatusOK {
+		t.Fatalf("admin role on /capabilities: want 200, got %d", code)
+	}
+}
+
 func TestCapabilitiesEndpoint(t *testing.T) {
 	eng := fakeEngine(t)
 	h := newTestServer(t, &engineBackend{baseURL: eng.URL, degraded: true}, nil)

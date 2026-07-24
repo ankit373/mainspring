@@ -51,6 +51,49 @@ func TestWrapEnforcesKey(t *testing.T) {
 	}
 }
 
+func TestTenantRateLimit(t *testing.T) {
+	a := NewTenants([]Tenant{{Name: "t", Key: "k", Role: RoleInference, RateRPM: 2}})
+	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	do := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		r.Header.Set("Authorization", "Bearer k")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if do().Code != 200 || do().Code != 200 {
+		t.Fatal("first two requests should pass")
+	}
+	third := do()
+	if third.Code != http.StatusTooManyRequests {
+		t.Fatalf("third request should be 429, got %d", third.Code)
+	}
+	if third.Header().Get("Retry-After") == "" {
+		t.Fatal("429 must set Retry-After")
+	}
+}
+
+func TestTokenBudget(t *testing.T) {
+	a := NewTenants([]Tenant{{Name: "t", Key: "k", TokenBudget: 100, WindowSec: 60}})
+	tn := &Tenant{Name: "t", Key: "k", TokenBudget: 100, WindowSec: 60}
+	if !a.AllowTokens(tn) {
+		t.Fatal("fresh budget should allow")
+	}
+	a.AddTokens(tn, 100)
+	if a.AllowTokens(tn) {
+		t.Fatal("budget exhausted should deny")
+	}
+}
+
+func TestUnlimitedTenantHasNoQuota(t *testing.T) {
+	a := NewTenants([]Tenant{{Name: "t", Key: "k"}}) // no RateRPM, no budget
+	tn := &Tenant{Name: "t", Key: "k"}
+	a.AddTokens(tn, 1_000_000)
+	if !a.AllowTokens(tn) {
+		t.Fatal("zero budget means unlimited")
+	}
+}
+
 func TestOpenModeAllowsAll(t *testing.T) {
 	a := New(nil)
 	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
