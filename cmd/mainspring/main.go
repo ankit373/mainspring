@@ -19,6 +19,7 @@ import (
 	"github.com/ankit373/mainspring/internal/backend/llamacpp"
 	"github.com/ankit373/mainspring/internal/build"
 	"github.com/ankit373/mainspring/internal/config"
+	"github.com/ankit373/mainspring/internal/metrics"
 	"github.com/ankit373/mainspring/internal/scheduler"
 	"github.com/ankit373/mainspring/internal/server"
 )
@@ -112,6 +113,7 @@ func cmdServe() *cobra.Command {
 		keepAlive    int
 		maxLoaded    int
 		maxResident  int
+		usageLedger  string
 		llamaServer  string
 	)
 	cmd := &cobra.Command{
@@ -138,6 +140,9 @@ func cmdServe() *cobra.Command {
 			if cmd.Flags().Changed("max-resident-mb") {
 				cfg.MaxResidentMB = maxResident
 			}
+			if cmd.Flags().Changed("usage-ledger") {
+				cfg.UsageLedger = usageLedger
+			}
 			if cmd.Flags().Changed("llama-server") {
 				cfg.LlamaServerPath = llamaServer
 			}
@@ -161,6 +166,7 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().IntVar(&keepAlive, "keep-alive", 300, "seconds to keep an idle model loaded (0 = never unload)")
 	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once by count (LRU-evicted beyond this)")
 	cmd.Flags().IntVar(&maxResident, "max-resident-mb", 0, "max resident memory across models in MB (0 = no byte cap)")
+	cmd.Flags().StringVar(&usageLedger, "usage-ledger", "", "JSONL usage ledger path (empty = default location, \"off\" = disable)")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
 	return cmd
 }
@@ -188,7 +194,21 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		MaxBytes:  cfg.MaxBytes(),
 	})
 	authn := auth.New(cfg.APIKeys)
-	srv := server.New(sched, authn)
+
+	ledgerPath := cfg.UsageLedger
+	if ledgerPath == "" {
+		ledgerPath = config.DefaultLedgerPath()
+	}
+	if ledgerPath == "off" {
+		ledgerPath = ""
+	}
+	rec, err := metrics.New(ledgerPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err) // metrics still work in-memory
+	}
+	defer func() { _ = rec.Close() }()
+
+	srv := server.New(sched, authn, rec)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -198,6 +218,11 @@ func runServe(ctx context.Context, cfg config.Config) error {
 
 	fmt.Println(build.String())
 	fmt.Printf("serving %d model(s) on %s\n", len(specs), cfg.Addr)
+	if ledgerPath != "" {
+		fmt.Printf("metrics: %s/metrics   usage ledger: %s\n", cfg.Addr, ledgerPath)
+	} else {
+		fmt.Printf("metrics: %s/metrics   usage ledger: disabled\n", cfg.Addr)
+	}
 	if authn.Open() {
 		fmt.Println("⚠  WARNING: no API keys configured — the server is OPEN (no authentication).")
 		fmt.Println("⚠  Do not expose this address beyond localhost. Set api_keys / --api-key to require auth.")

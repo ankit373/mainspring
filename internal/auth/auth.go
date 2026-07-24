@@ -41,10 +41,15 @@ func (a *Authenticator) valid(presented string) bool {
 	return ok
 }
 
-// Wrap enforces auth on next. /healthz is always exempt (liveness probes).
+// exempt paths bypass auth: liveness and metrics scraping.
+func exempt(path string) bool {
+	return path == "/healthz" || path == "/metrics"
+}
+
+// Wrap enforces auth on next. /healthz and /metrics are always exempt.
 func (a *Authenticator) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.Open() || r.URL.Path == "/healthz" {
+		if a.Open() || exempt(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
