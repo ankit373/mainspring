@@ -503,6 +503,10 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 		}
 	}
 	srv.SetTimeouts(cfg.RequestTimeout(), perModelTimeout)
+	// Opt-in response cache (disabled unless cache_max_entries > 0).
+	if cfg.CacheMaxEntries > 0 {
+		srv.SetCache(cfg.CacheTTL(), cfg.CacheMaxEntries)
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)

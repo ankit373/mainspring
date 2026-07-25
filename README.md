@@ -42,6 +42,8 @@ layer around them **fail loud, VRAM-aware, and governed**.
   unload, optional preload.
 - **Reliability** — per-model concurrency limit + bounded queue (503 backpressure), a **circuit breaker**
   with a background health probe, and a structured error taxonomy (stable `code` per failure class).
+- **Opt-in response cache** — identical deterministic (temperature 0) non-streaming requests return from a
+  bounded TTL+LRU cache without re-running the model; hits carry `X-Mainspring-Cache: hit`.
 - **Standalone governance** — API-key tenants with roles (admin/inference), per-tenant rate + token
   budgets, and **real** streaming token accounting.
 - **Operability** — Prometheus `/metrics`, JSONL usage ledger, `X-Request-ID` + W3C `traceparent`

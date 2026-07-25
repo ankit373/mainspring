@@ -25,6 +25,7 @@ type Event struct {
 	Tenant       string    `json:"tenant,omitempty"`
 	Status       int       `json:"status"`
 	Stream       bool      `json:"stream"`
+	Cached       bool      `json:"cached,omitempty"` // served from the response cache (no backend hit)
 	DurationMs   float64   `json:"duration_ms"`
 	TTFTMs       float64   `json:"ttft_ms,omitempty"` // 0 when not applicable
 	Bytes        int64     `json:"bytes"`

@@ -25,11 +25,28 @@ type captureWriter struct {
 	bytes       int64
 	sseFrames   int64
 	tail        []byte
+
+	// Optional full-body recording for the response cache. Enabled by
+	// recordBody; body accumulates until it exceeds bodyCap, at which point it is
+	// dropped (bodyOver=true) so the response is never cached. snapHeader is the
+	// response header snapshot taken when the status line is written.
+	recordBody bool
+	bodyCap    int
+	bodyOver   bool
+	body       []byte
+	snapHeader http.Header
 }
 
 func newCapture(w http.ResponseWriter, start time.Time) *captureWriter {
 	fl, _ := w.(http.Flusher)
 	return &captureWriter{ResponseWriter: w, flusher: fl, start: start, status: http.StatusOK}
+}
+
+// recordFor enables full-body capture up to cap bytes so a successful
+// non-streaming response can be stored in the cache.
+func (c *captureWriter) recordFor(cap int) {
+	c.recordBody = true
+	c.bodyCap = cap
 }
 
 func (c *captureWriter) WriteHeader(code int) {
@@ -39,6 +56,9 @@ func (c *captureWriter) WriteHeader(code int) {
 	c.status = code
 	c.wroteHeader = true
 	c.stream = bytes.Contains([]byte(c.Header().Get("Content-Type")), []byte("event-stream"))
+	if c.recordBody {
+		c.snapHeader = c.Header().Clone()
+	}
 	c.ResponseWriter.WriteHeader(code)
 }
 
@@ -57,6 +77,15 @@ func (c *captureWriter) Write(p []byte) (int, error) {
 	// the end of a non-stream body and in the final include_usage SSE chunk, so a
 	// trailing window (not a prefix) is what lets us read it without buffering all.
 	c.appendTail(p)
+	// Full-body capture for the cache: accumulate until over cap, then drop.
+	if c.recordBody && !c.bodyOver {
+		if len(c.body)+len(p) > c.bodyCap {
+			c.bodyOver = true
+			c.body = nil
+		} else {
+			c.body = append(c.body, p...)
+		}
+	}
 	return c.ResponseWriter.Write(p)
 }
 

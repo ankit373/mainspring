@@ -18,6 +18,7 @@ import (
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
 	"github.com/ankit373/mainspring/internal/breaker"
+	"github.com/ankit373/mainspring/internal/cache"
 	"github.com/ankit373/mainspring/internal/metrics"
 	"github.com/ankit373/mainspring/internal/scheduler"
 )
@@ -36,6 +37,7 @@ type Server struct {
 	accessMu sync.RWMutex
 	access   *accessLogger
 	reloadFn func() error // wired by main for POST /admin/reload
+	cache    *cache.LRU   // opt-in response cache (nil = disabled)
 
 	defaultTimeout time.Duration            // per-request timeout (0 = unbounded)
 	timeouts       map[string]time.Duration // per-model overrides (real ids)
@@ -147,6 +149,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	})
 	s.gate.writePrometheus(w)
 	s.breaker.WritePrometheus(w)
+	s.cache.WritePrometheus(w)
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -265,6 +268,36 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Response cache: serve identical deterministic non-stream requests without
+	// touching the gate, breaker, loader, or backend. A hit still meters the
+	// tenant's token budget so accounting is consistent whether or not the model
+	// actually ran.
+	cacheKey, cached, hit := s.cacheLookup(model, r.URL.Path, body)
+	if hit {
+		serveCached(w, cached)
+		charge := cached.Completion
+		if cached.Exact {
+			charge = cached.Prompt + cached.Completion
+		}
+		s.auth.AddTokens(tenant, charge)
+		if s.metrics != nil {
+			s.metrics.Record(metrics.Event{
+				Time:         time.Now(),
+				RequestID:    RequestID(r.Context()),
+				TraceID:      TraceID(r.Context()),
+				Model:        model,
+				Tenant:       auth.TenantOf(r.Context()),
+				Status:       cached.Status,
+				Cached:       true,
+				Bytes:        int64(len(cached.Body)),
+				PromptTokens: cached.Prompt,
+				TokensEst:    cached.Completion,
+				Exact:        cached.Exact,
+			})
+		}
+		return
+	}
+
 	// Concurrency gate: bound in-flight requests per model, backpressure over it.
 	release, ok := s.gate.acquire(r.Context(), model)
 	if !ok {
@@ -299,12 +332,28 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	cap := newCapture(w, start)
+	// Record the full body only when this request is a cache candidate (miss on
+	// an enabled, cacheable request → cacheKey is non-empty).
+	if cacheKey != "" {
+		cap.recordFor(cacheBodyCap)
+	}
 	s.proxyTo(cap, r, runner.BaseURL(), body, extra)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
 	// (4xx is a client error, not the backend's fault).
 	s.breaker.OnResult(model, cap.status < 500)
 
 	prompt, completion, exact := cap.usage()
+	// Store a successful, non-streaming, within-cap response for future hits.
+	if cacheKey != "" && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
+		s.cache.Put(cacheKey, cache.Value{
+			Status:     cap.status,
+			Header:     cap.snapHeader,
+			Body:       cap.body,
+			Prompt:     prompt,
+			Completion: completion,
+			Exact:      exact,
+		})
+	}
 	// Token budgets charge total consumption when we have exact usage; otherwise
 	// only the (estimated) output count is known.
 	charge := completion
