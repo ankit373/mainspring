@@ -189,7 +189,7 @@ func bearer(r *http.Request) string {
 func unauthorized(w http.ResponseWriter) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(`{"error":{"message":"invalid or missing API key","type":"authentication_error"}}`))
+	_, _ = w.Write([]byte(`{"error":{"message":"invalid or missing API key","type":"authentication_error","code":"unauthorized"}}`))
 }
 
 func tooManyRequests(w http.ResponseWriter, retry time.Duration) {
@@ -200,5 +200,5 @@ func tooManyRequests(w http.ResponseWriter, retry time.Duration) {
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusTooManyRequests)
-	_, _ = w.Write([]byte(`{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`))
+	_, _ = w.Write([]byte(`{"error":{"message":"rate limit exceeded","type":"rate_limit_error","code":"rate_limited"}}`))
 }

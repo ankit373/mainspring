@@ -235,7 +235,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// Per-tenant token budget (enforced pre-request; accrued after).
 	tenant, _ := auth.FromContext(r.Context())
 	if !s.auth.AllowTokens(tenant) {
-		writeError(w, http.StatusTooManyRequests, "token budget exceeded")
+		writeErr(w, codeTokenBudget, "token budget exceeded")
 		return
 	}
 
@@ -243,7 +243,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	release, ok := s.gate.acquire(r.Context(), model)
 	if !ok {
 		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests for "+model)
+		writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
 		return
 	}
 	defer release()
@@ -251,14 +251,14 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// Circuit breaker: fast-fail while this model's backend is tripped open.
 	if !s.breaker.Allow(model) {
 		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, "circuit open: backend for "+model+" is unavailable")
+		writeErr(w, codeCircuitOpen, "circuit open: backend for "+model+" is unavailable")
 		return
 	}
 
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
 		s.breaker.OnResult(model, false)
-		writeError(w, http.StatusServiceUnavailable, "load model "+model+": "+err.Error())
+		writeErr(w, codeBackendUnavailable, "load model "+model+": "+err.Error())
 		return
 	}
 
@@ -336,13 +336,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeError emits an OpenAI-shaped error object.
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]string{"message": msg, "type": "invalid_request_error"},
-	})
 }
 
 // rewriteModelField rewrites the top-level "model" field of a JSON request body
