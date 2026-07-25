@@ -398,6 +398,39 @@ func TestCandidatesOrderAndDedup(t *testing.T) {
 	}
 }
 
+func TestUnloadEvictsSpecificModel(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 3})
+	ra, _ := s.EnsureLoaded(context.Background(), "a")
+	_, _ = s.EnsureLoaded(context.Background(), "b")
+
+	if !s.Unload("a") {
+		t.Fatal("Unload should report true for a resident model")
+	}
+	if !ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("Unload must Stop the runner")
+	}
+	if len(s.Loaded()) != 1 {
+		t.Fatalf("only b should remain, got %d loaded", len(s.Loaded()))
+	}
+	if s.Unload("a") {
+		t.Fatal("Unloading a non-resident model should return false")
+	}
+	// A reload path still works after unload.
+	if _, err := s.EnsureLoaded(context.Background(), "a"); err != nil {
+		t.Fatalf("model should reload after unload: %v", err)
+	}
+}
+
+func TestUnloadResolvesAlias(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("real"), Options{MaxLoaded: 2, Aliases: map[string]string{"friendly": "real"}})
+	_, _ = s.EnsureLoaded(context.Background(), "friendly")
+	if !s.Unload("friendly") {
+		t.Fatal("Unload should resolve the alias and evict the real model")
+	}
+}
+
 func TestShutdownStopsAll(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 2})

@@ -476,6 +476,8 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if cfg.BreakerThreshold > 0 {
 		srv.SetBreaker(cfg.BreakerThreshold, cfg.BreakerCooldown())
 	}
+	// Wire the admin reload endpoint to the same reload path SIGHUP uses.
+	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, sched, authn) })
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)
@@ -532,7 +534,9 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	defer signal.Stop(hup)
 	go func() {
 		for range hup {
-			reloadConfig(cfgPath, cfg, sched, authn)
+			if err := reloadConfig(cfgPath, cfg, sched, authn); err != nil {
+				fmt.Fprintln(os.Stderr, "SIGHUP:", err)
+			}
 		}
 	}()
 
@@ -603,40 +607,39 @@ func runHealthProber(ctx context.Context, interval time.Duration, sched *schedul
 	}
 }
 
-// reloadConfig re-reads the config file on SIGHUP and applies the safe subset:
-// model specs, aliases, and tenants. Changes to the listen address, backend set,
-// or ledger require a restart and are only logged. A missing config file is a
-// no-op (so a flag-only launch is never wiped by an accidental signal).
-func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator) {
+// reloadConfig re-reads the config file and applies the safe subset: model
+// specs, aliases, and tenants. Changes to the listen address, backend set, or
+// ledger require a restart and are only logged. A missing config file is a
+// no-op (so a flag-only launch is never wiped). Shared by SIGHUP and the admin
+// reload endpoint; it returns an error the caller can surface or log.
+func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator) error {
 	resolved := path
 	if resolved == "" {
 		resolved = config.DefaultPath()
 	}
 	if _, err := os.Stat(resolved); err != nil {
-		fmt.Fprintf(os.Stderr, "SIGHUP: no config file at %s; reload skipped\n", resolved)
-		return
+		return fmt.Errorf("no config file at %s; reload skipped", resolved)
 	}
 	newCfg, err := config.Load(resolved)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "SIGHUP: reload failed, keeping current config: %v\n", err)
-		return
+		return fmt.Errorf("reload failed, keeping current config: %w", err)
 	}
 
 	// Unsafe changes can't be applied to a running listener — warn, don't apply.
 	if newCfg.Addr != startup.Addr {
-		fmt.Fprintf(os.Stderr, "SIGHUP: addr change (%s → %s) requires a restart; ignoring\n", startup.Addr, newCfg.Addr)
+		fmt.Fprintf(os.Stderr, "reload: addr change (%s → %s) requires a restart; ignoring\n", startup.Addr, newCfg.Addr)
 	}
 	if newCfg.Backend != startup.Backend {
-		fmt.Fprintf(os.Stderr, "SIGHUP: backend change (%q → %q) requires a restart; ignoring\n", startup.Backend, newCfg.Backend)
+		fmt.Fprintf(os.Stderr, "reload: backend change (%q → %q) requires a restart; ignoring\n", startup.Backend, newCfg.Backend)
 	}
 
 	if err := sched.Reload(modelSpecs(newCfg), newCfg.Aliases); err != nil {
-		fmt.Fprintf(os.Stderr, "SIGHUP: model/alias reload rejected, keeping current: %v\n", err)
-		return
+		return fmt.Errorf("model/alias reload rejected, keeping current: %w", err)
 	}
 	authn.Reload(authTenants(newCfg))
-	fmt.Printf("SIGHUP: reloaded %d model(s), %d alias(es), %d tenant(s)\n",
+	fmt.Printf("reload: %d model(s), %d alias(es), %d tenant(s)\n",
 		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
+	return nil
 }
 
 // allBackends constructs every known backend adapter (for detection/listing).
