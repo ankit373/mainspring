@@ -1,0 +1,55 @@
+version: 2
+
+project_name: mainspring
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mainspring
+    main: ./cmd/mainspring
+    binary: mainspring
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/ankit373/mainspring/internal/build.Version={{ .Version }}
+      - -X github.com/ankit373/mainspring/internal/build.Commit={{ .ShortCommit }}
+      - -X github.com/ankit373/mainspring/internal/build.Date={{ .Date }}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-edge"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^style:"
+      - "^refactor:"
+
+release:
+  github:
+    owner: ankit373
+    name: mainspring
+  prerelease: auto

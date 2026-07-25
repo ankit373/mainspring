@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mainspring — backend-agnostic local inference server</title>
+<meta name="description" content="One stable OpenAI/Anthropic-compatible API in front, pluggable engines (llama.cpp, MLX, Ollama, LM Studio, llamafile, GPT4All) behind it. Build the local-inference control plane, not the kernels.">
+<style>
+  :root{
+    --bg:#0e0f13; --panel:#15171d; --panel2:#1b1e26; --line:#282c37;
+    --ink:#e8e6df; --muted:#9aa0ab; --brass:#e6a94b; --brass-dim:#b9812f; --ok:#5fbf7f;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;
+    -webkit-font-smoothing:antialiased}
+  a{color:var(--brass);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px;margin:0 auto;padding:0 20px}
+  code,pre{font-family:var(--mono)}
+  header{border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(14,15,19,.85);
+    backdrop-filter:blur(8px);z-index:10}
+  header .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.2px}
+  .coil{width:22px;height:22px;flex:none}
+  nav a{color:var(--muted);margin-left:20px;font-size:14px}
+  nav a:hover{color:var(--ink);text-decoration:none}
+
+  .hero{padding:72px 0 40px;border-bottom:1px solid var(--line)}
+  .eyebrow{font-family:var(--mono);color:var(--brass);font-size:13px;letter-spacing:.14em;
+    text-transform:uppercase;margin-bottom:14px}
+  h1{font-size:clamp(34px,6vw,56px);line-height:1.05;margin:0 0 18px;letter-spacing:-.02em;text-wrap:balance}
+  h1 .g{color:var(--brass)}
+  .lede{font-size:19px;color:var(--muted);max-width:60ch;margin:0 0 28px}
+  .cta{display:flex;gap:12px;flex-wrap:wrap}
+  .btn{display:inline-block;padding:11px 18px;border-radius:8px;font-weight:600;font-size:14px}
+  .btn.primary{background:var(--brass);color:#20160a}
+  .btn.ghost{border:1px solid var(--line);color:var(--ink)}
+
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;
+    overflow-x:auto;font-size:13.5px;line-height:1.7;margin:18px 0}
+  pre .c{color:var(--muted)}
+  pre .b{color:var(--brass)}
+
+  section{padding:52px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 24px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .card h3{margin:0 0 8px;font-size:16px}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+
+  table{width:100%;border-collapse:collapse;font-size:14.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+  td code{color:var(--brass)}
+  .tag{display:inline-block;font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .tag.mng{color:var(--brass);border-color:var(--brass-dim)}
+  .tableScroll{overflow-x:auto}
+
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+  @media(max-width:640px){.cols{grid-template-columns:1fr}}
+  ul.tight{margin:0;padding-left:18px;color:var(--muted);font-size:14.5px}
+  ul.tight li{margin:6px 0}
+  ul.tight code{color:var(--ink)}
+
+  footer{padding:40px 0 64px;color:var(--muted);font-size:14px}
+  footer .note{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--brass);
+    border-radius:8px;padding:14px 16px;margin-bottom:22px}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <span class="brand">
+    <svg class="coil" viewBox="0 0 24 24" fill="none" stroke="#e6a94b" stroke-width="1.6" aria-hidden="true">
+      <path d="M12 12 m0 0 a2 2 0 1 1 3 1 a4 4 0 1 1 -6 -1 a6 6 0 1 1 9 2 a8 8 0 1 1 -12 -2"/>
+    </svg>
+    Mainspring
+  </span>
+  <nav>
+    <a href="#features">Features</a>
+    <a href="#backends">Backends</a>
+    <a href="#api">API</a>
+    <a href="https://github.com/ankit373/mainspring">GitHub</a>
+  </nav>
+</div></header>
+
+<div class="hero"><div class="wrap">
+  <div class="eyebrow">Local inference control plane</div>
+  <h1>The <span class="g">mainspring</span> that drives your local AI.</h1>
+  <p class="lede">One stable OpenAI/Anthropic-compatible API in front. Pluggable engines —
+    llama.cpp, MLX, Ollama, LM Studio, llamafile, GPT4All — behind it. Install and run only what a
+    model needs. Build the control plane, not the kernels.</p>
+  <div class="cta">
+    <a class="btn primary" href="#quickstart">Quick start</a>
+    <a class="btn ghost" href="https://github.com/ankit373/mainspring">View on GitHub</a>
+  </div>
+</div></div>
+
+<section id="why"><div class="wrap">
+  <h2>Why</h2>
+  <div class="cols">
+    <div>
+      <p style="margin-top:0">Local inference <em>engines</em> are commoditized and excellent —
+        llama.cpp and Apple MLX are MIT-licensed and win on tokens/sec. What's missing is the
+        <strong>control plane around them</strong>. The most-cited problems with the incumbents aren't
+        kernel problems, they're control-plane problems:</p>
+    </div>
+    <div>
+      <ul class="tight">
+        <li><strong>Silent context truncation</strong> — prompts dropped with no error, differently per machine.</li>
+        <li><strong>Silent CPU fallback</strong> — you think you're on the GPU; you aren't.</li>
+        <li><strong>Zero authentication</strong> — tens of thousands of instances exposed publicly.</li>
+        <li><strong>VRAM thrashing</strong> — evict-and-reload every call; leaks on model switch.</li>
+        <li><strong>OpenAI-compat gaps</strong> — tool-call/streaming bugs break real SDKs.</li>
+      </ul>
+    </div>
+  </div>
+</div></section>
+
+<section id="features"><div class="wrap">
+  <h2>What it does</h2>
+  <div class="grid">
+    <div class="card"><h3>One API, many engines</h3><p>Per-model backend routing: serve a GGUF via llama.cpp, an MLX model, and an adopted Ollama model from one server.</p></div>
+    <div class="card"><h3>Fail loud</h3><p><code>/capabilities</code> reports the real backend, device, GPU offload, and effective context — never silently smaller than asked.</p></div>
+    <div class="card"><h3>VRAM-aware scheduling</h3><p>Single-flight load, LRU + byte-budget eviction, KeepAlive idle-unload, optional preload at startup.</p></div>
+    <div class="card"><h3>Standalone governance</h3><p>API keys → named tenants with roles and per-tenant rate limits (429 + Retry-After) and token budgets.</p></div>
+    <div class="card"><h3>Backpressure</h3><p>Per-model in-flight limit + bounded queue. Returns 503 instead of letting latency collapse.</p></div>
+    <div class="card"><h3>Observability</h3><p>Prometheus <code>/metrics</code> (TTFT, tokens/sec, residency, inflight/queued) + a JSONL usage ledger.</p></div>
+    <div class="card"><h3>Verified install</h3><p>Opt-in only. SHA-256-pinned artifacts, optional ed25519 signed manifests. Never installs silently.</p></div>
+    <div class="card"><h3>Deploy anywhere</h3><p>Single static binary, distroless image, Helm chart (HPA, ServiceMonitor, GPU nodes). Graceful drain via <code>/readyz</code>.</p></div>
+  </div>
+</div></section>
+
+<section id="quickstart"><div class="wrap">
+  <h2>Quick start</h2>
+<pre><span class="c"># build</span>
+go build -o mainspring ./cmd/mainspring
+
+<span class="c"># see which engines are present (detect-first)</span>
+./mainspring <span class="b">backends</span>
+
+<span class="c"># diagnose your environment</span>
+./mainspring <span class="b">doctor</span>
+
+<span class="c"># serve a local GGUF over the OpenAI API</span>
+./mainspring <span class="b">serve</span> --model qwen2.5-coder=/path/to/model.gguf --addr :11500
+
+<span class="c"># talk to it with any OpenAI client</span>
+curl localhost:11500/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "qwen2.5-coder",
+  "messages": [{"role":"user","content":"hello"}]
+}'
+
+<span class="c"># the fail-loud truth about what actually ran it</span>
+curl localhost:11500/capabilities</pre>
+</div></section>
+
+<section id="backends"><div class="wrap">
+  <h2>Backends</h2>
+  <div class="tableScroll"><table>
+    <tr><th>Backend</th><th>Type</th><th>Default</th></tr>
+    <tr><td><code>llamacpp</code></td><td><span class="tag mng">managed</span> subprocess (llama-server)</td><td>PATH / managed install</td></tr>
+    <tr><td><code>mlx</code></td><td><span class="tag mng">managed</span> subprocess (mlx_lm.server, Apple Silicon)</td><td>python3 -m mlx_lm.server</td></tr>
+    <tr><td><code>ollama</code></td><td><span class="tag">adopt-only</span></td><td>http://127.0.0.1:11434</td></tr>
+    <tr><td><code>lmstudio</code></td><td><span class="tag">adopt-only</span></td><td>http://127.0.0.1:1234</td></tr>
+    <tr><td><code>llamafile</code></td><td><span class="tag">adopt-only</span></td><td>http://127.0.0.1:8080</td></tr>
+    <tr><td><code>gpt4all</code></td><td><span class="tag">adopt-only</span></td><td>http://127.0.0.1:4891</td></tr>
+  </table></div>
+  <p style="color:var(--muted);font-size:14px;margin-top:14px">Managed backends can be installed on demand
+    (opt-in, checksum-verified). Adopt-only backends are detected if already running — Mainspring never installs them.</p>
+</div></section>
+
+<section id="api"><div class="wrap">
+  <h2>API &amp; CLI</h2>
+  <div class="cols">
+    <div>
+      <h3 style="margin-top:0;font-size:15px">Endpoints</h3>
+      <ul class="tight">
+        <li><code>POST /v1/chat/completions</code></li>
+        <li><code>POST /v1/completions</code></li>
+        <li><code>POST /v1/embeddings</code></li>
+        <li><code>POST /v1/messages</code> — Anthropic (streaming translated)</li>
+        <li><code>GET /v1/models</code></li>
+        <li><code>GET /capabilities</code> — fail-loud device/offload/ctx</li>
+        <li><code>GET /metrics</code> — Prometheus</li>
+        <li><code>GET /healthz</code> · <code>GET /readyz</code></li>
+      </ul>
+    </div>
+    <div>
+      <h3 style="margin-top:0;font-size:15px">Commands</h3>
+      <ul class="tight">
+        <li><code>mainspring serve</code></li>
+        <li><code>mainspring backends</code></li>
+        <li><code>mainspring models</code></li>
+        <li><code>mainspring install &lt;backend&gt;</code></li>
+        <li><code>mainspring doctor</code></li>
+        <li><code>mainspring version</code></li>
+      </ul>
+    </div>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="note">
+    <strong>Relationship to Hydra.</strong> Mainspring is an inference <em>head</em>;
+    <a href="https://github.com/ankit373/hydra">Hydra</a> is a provider-neutral router/trust control
+    plane above it. They meet over the standard OpenAI-compatible boundary. Hydra works with everything
+    (Ollama, OpenAI, Anthropic, any OpenAI-compatible endpoint) and never depends on Mainspring —
+    Mainspring is simply the head it integrates with best.
+  </div>
+  <p>MIT licensed. Built on MIT/Apache-2.0 engines only.
+    <a href="https://github.com/ankit373/mainspring">github.com/ankit373/mainspring</a></p>
+</div></footer>
+</body>
+</html>

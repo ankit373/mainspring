@@ -11,18 +11,26 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ankit373/mainspring/internal/backend"
 )
 
-// Scheduler manages loaded runners for a single backend (v0).
+// Scheduler manages loaded runners across one or more backends, dispatching
+// each model to the backend named in its ModelSpec.
 type Scheduler struct {
-	be        backend.Backend
-	specs     map[string]backend.ModelSpec
+	backends  map[string]backend.Backend
 	keepAlive time.Duration
 	maxLoaded int
+	maxBytes  int64
+
+	// specsMu guards specs+aliases, which SIGHUP reload swaps at runtime.
+	specsMu sync.RWMutex
+	specs   map[string]backend.ModelSpec
+	aliases map[string]string // friendly name -> target (spec id or another alias)
 
 	mu      sync.Mutex
 	running map[string]*loaded
@@ -30,6 +38,17 @@ type Scheduler struct {
 	loadingMu sync.Mutex
 	loading   map[string]*loadCall
 }
+
+// Options configures a Scheduler.
+type Options struct {
+	KeepAlive time.Duration     // idle-unload delay; <=0 disables idle unloading
+	MaxLoaded int               // max models resident by count; <=0 => 1
+	MaxBytes  int64             // max resident bytes across all models; <=0 => no byte cap
+	Aliases   map[string]string // friendly name -> target model id (or another alias)
+}
+
+// maxAliasDepth bounds transitive alias resolution, which also detects cycles.
+const maxAliasDepth = 16
 
 type loaded struct {
 	runner   backend.Runner
@@ -44,34 +63,166 @@ type loadCall struct {
 	err    error
 }
 
-// New builds a scheduler. keepAlive <= 0 disables idle unloading; maxLoaded <= 0
-// means one model at a time (swap on switch).
-func New(be backend.Backend, specs []backend.ModelSpec, keepAlive time.Duration, maxLoaded int) *Scheduler {
-	if maxLoaded <= 0 {
-		maxLoaded = 1
+// New builds a scheduler from a set of named backends and Options. Each spec's
+// Backend field selects which backend serves it.
+func New(backends map[string]backend.Backend, specs []backend.ModelSpec, opts Options) *Scheduler {
+	if opts.MaxLoaded <= 0 {
+		opts.MaxLoaded = 1
 	}
 	m := make(map[string]backend.ModelSpec, len(specs))
 	for _, s := range specs {
 		m[s.ID] = s
 	}
+	al := make(map[string]string, len(opts.Aliases))
+	for name, target := range opts.Aliases {
+		al[name] = target
+	}
 	return &Scheduler{
-		be:        be,
+		backends:  backends,
 		specs:     m,
-		keepAlive: keepAlive,
-		maxLoaded: maxLoaded,
+		aliases:   al,
+		keepAlive: opts.KeepAlive,
+		maxLoaded: opts.MaxLoaded,
+		maxBytes:  opts.MaxBytes,
 		running:   make(map[string]*loaded),
 		loading:   make(map[string]*loadCall),
 	}
 }
 
-// Known reports whether a model id is configured.
+// resolveIn maps name to a real model id within the given spec/alias tables,
+// following alias chains with a depth (cycle) guard. It is a pure function so
+// both live resolution and pre-commit validation share one implementation.
+func resolveIn(specs map[string]backend.ModelSpec, aliases map[string]string, name string) (string, bool) {
+	cur := name
+	for i := 0; i < maxAliasDepth; i++ {
+		if _, ok := specs[cur]; ok {
+			return cur, true
+		}
+		next, ok := aliases[cur]
+		if !ok {
+			return "", false
+		}
+		cur = next
+	}
+	return "", false // exceeded depth => cycle or too-long chain
+}
+
+// validateAliases checks every alias resolves to a real model within the tables.
+func validateAliases(specs map[string]backend.ModelSpec, aliases map[string]string) error {
+	for name := range aliases {
+		if _, ok := resolveIn(specs, aliases, name); !ok {
+			return fmt.Errorf("alias %q does not resolve to a known model (unknown target or cycle)", name)
+		}
+	}
+	return nil
+}
+
+// Resolve maps a requested model name (which may be an alias, possibly chained)
+// to a real, configured model id. It returns false if the name is neither a
+// configured model nor an alias that resolves to one within maxAliasDepth (the
+// cycle guard). Resolving a real id is idempotent.
+func (s *Scheduler) Resolve(name string) (string, bool) {
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
+	return resolveIn(s.specs, s.aliases, name)
+}
+
+// Aliases returns a copy of the configured alias table (friendly name -> target).
+func (s *Scheduler) Aliases() map[string]string {
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
+	out := make(map[string]string, len(s.aliases))
+	for k, v := range s.aliases {
+		out[k] = v
+	}
+	return out
+}
+
+// Validate checks that every configured alias resolves to a real model within
+// the cycle guard. It is meant to be called once at startup so misconfiguration
+// fails loud rather than surfacing as a 404 at request time.
+func (s *Scheduler) Validate() error {
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
+	return validateAliases(s.specs, s.aliases)
+}
+
+// Reload atomically swaps the model specs and aliases (e.g. on SIGHUP). It
+// rejects the new set if any alias fails to resolve, leaving the old set intact.
+// Running models whose spec changed or was removed are evicted so the next
+// request reloads them under the new spec; unchanged models stay resident.
+// Note: reload does not construct new backends, so a model referencing a
+// backend not already built will only load after a restart.
+func (s *Scheduler) Reload(specList []backend.ModelSpec, aliases map[string]string) error {
+	newSpecs := make(map[string]backend.ModelSpec, len(specList))
+	for _, sp := range specList {
+		newSpecs[sp.ID] = sp
+	}
+	newAliases := make(map[string]string, len(aliases))
+	for k, v := range aliases {
+		newAliases[k] = v
+	}
+	if err := validateAliases(newSpecs, newAliases); err != nil {
+		return err
+	}
+
+	s.specsMu.Lock()
+	s.specs = newSpecs
+	s.aliases = newAliases
+	s.specsMu.Unlock()
+
+	// Evict runners whose spec changed or disappeared.
+	var victims []backend.Runner
+	s.mu.Lock()
+	for id, l := range s.running {
+		ns, ok := newSpecs[id]
+		if !ok || !specEqual(ns, l.spec) {
+			if l.timer != nil {
+				l.timer.Stop()
+			}
+			delete(s.running, id)
+			victims = append(victims, l.runner)
+		}
+	}
+	s.mu.Unlock()
+	for _, r := range victims {
+		_ = r.Stop(context.Background())
+	}
+	return nil
+}
+
+// specEqual reports whether two specs describe the same runtime (so an unchanged
+// model need not be reloaded on config reload).
+func specEqual(a, b backend.ModelSpec) bool {
+	if a.ID != b.ID || a.Backend != b.Backend || a.Path != b.Path ||
+		a.CtxSize != b.CtxSize || a.GPULayers != b.GPULayers ||
+		len(a.ExtraArgs) != len(b.ExtraArgs) || len(a.Fallbacks) != len(b.Fallbacks) {
+		return false
+	}
+	for i := range a.ExtraArgs {
+		if a.ExtraArgs[i] != b.ExtraArgs[i] {
+			return false
+		}
+	}
+	for i := range a.Fallbacks {
+		if a.Fallbacks[i] != b.Fallbacks[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Known reports whether a model id is configured or is an alias that resolves
+// to a configured model.
 func (s *Scheduler) Known(id string) bool {
-	_, ok := s.specs[id]
+	_, ok := s.Resolve(id)
 	return ok
 }
 
 // Models returns the configured model ids.
 func (s *Scheduler) Models() []backend.ModelSpec {
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
 	out := make([]backend.ModelSpec, 0, len(s.specs))
 	for _, sp := range s.specs {
 		out = append(out, sp)
@@ -83,6 +234,11 @@ func (s *Scheduler) Models() []backend.ModelSpec {
 // LRU model if at capacity) if necessary. Concurrent callers for the same model
 // share one load.
 func (s *Scheduler) EnsureLoaded(ctx context.Context, modelID string) (backend.Runner, error) {
+	// Resolve aliases so residency keys on the real id (two aliases pointing at
+	// one model share a single load) and direct callers need not pre-resolve.
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
 	// Fast path: already loaded.
 	s.mu.Lock()
 	if l, ok := s.running[modelID]; ok {
@@ -118,46 +274,73 @@ func (s *Scheduler) EnsureLoaded(ctx context.Context, modelID string) (backend.R
 }
 
 func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, error) {
+	s.specsMu.RLock()
 	spec, ok := s.specs[modelID]
+	s.specsMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown model %q", modelID)
 	}
 
-	// Evict LRU victims (outside the lock) until there is room.
-	for _, v := range s.evictionVictims() {
-		_ = v.Stop(context.Background())
-	}
+	// Try each candidate backend in order (primary, then fallbacks) until one
+	// starts. This is the failover path: a down or misconfigured backend hands
+	// off to the next. The runner reports which backend actually served via its
+	// Capabilities (surfaced as X-Mainspring-Backend).
+	candidates := spec.Candidates()
+	var errs []string
+	for _, bname := range candidates {
+		be, ok := s.backends[bname]
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: backend not configured", bname))
+			continue
+		}
 
-	r, err := s.be.Start(ctx, spec)
-	if err != nil {
-		return nil, err
-	}
+		// Estimate the incoming footprint (if the backend can) so byte-budget
+		// admission can make room before starting the process.
+		var incoming int64
+		if est, ok := be.(backend.MemoryEstimator); ok {
+			incoming = est.EstimateMemory(spec)
+		}
+		for _, v := range s.makeRoom(incoming) {
+			_ = v.Stop(context.Background())
+		}
 
-	s.mu.Lock()
-	l := &loaded{runner: r, spec: spec, lastUsed: time.Now()}
-	if s.keepAlive > 0 {
-		l.timer = time.AfterFunc(s.keepAlive, func() { s.idleEvict(modelID) })
+		r, err := be.Start(ctx, spec)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", bname, err))
+			continue
+		}
+
+		s.mu.Lock()
+		l := &loaded{runner: r, spec: spec, lastUsed: time.Now()}
+		if s.keepAlive > 0 {
+			l.timer = time.AfterFunc(s.keepAlive, func() { s.idleEvict(modelID) })
+		}
+		s.running[modelID] = l
+		s.mu.Unlock()
+		if bname != spec.Backend {
+			log.Printf("model %q failed over to backend %q (primary %q unavailable)", modelID, bname, spec.Backend)
+		}
+		return r, nil
 	}
-	s.running[modelID] = l
-	s.mu.Unlock()
-	return r, nil
+	return nil, fmt.Errorf("model %q: all backends failed [%s]", modelID, strings.Join(errs, "; "))
 }
 
-// evictionVictims removes enough LRU entries from the map to make room for one
-// more and returns their runners to be stopped by the caller (outside the lock).
-func (s *Scheduler) evictionVictims() []backend.Runner {
+// makeRoom evicts LRU entries until there is room for a model of `incoming`
+// bytes — under both the count cap and (when set) the byte budget. It returns
+// the evicted runners for the caller to Stop outside the lock. If a single
+// model is larger than the whole budget, everything else is evicted and it is
+// still admitted (best effort — surfaced via /capabilities residency).
+func (s *Scheduler) makeRoom(incoming int64) []backend.Runner {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var victims []backend.Runner
-	for len(s.running) >= s.maxLoaded {
-		var oldestID string
-		var oldest time.Time
-		first := true
-		for id, l := range s.running {
-			if first || l.lastUsed.Before(oldest) {
-				oldestID, oldest, first = id, l.lastUsed, false
-			}
+	for len(s.running) > 0 {
+		overCount := len(s.running) >= s.maxLoaded
+		overBytes := s.maxBytes > 0 && s.usedBytesLocked()+incoming > s.maxBytes
+		if !overCount && !overBytes {
+			break
 		}
+		oldestID := s.lruLocked()
 		if oldestID == "" {
 			break
 		}
@@ -169,6 +352,28 @@ func (s *Scheduler) evictionVictims() []backend.Runner {
 		victims = append(victims, l.runner)
 	}
 	return victims
+}
+
+// usedBytesLocked sums the resident footprint of loaded runners (caller holds mu).
+func (s *Scheduler) usedBytesLocked() int64 {
+	var total int64
+	for _, l := range s.running {
+		total += l.runner.MemoryBytes()
+	}
+	return total
+}
+
+// lruLocked returns the id of the least-recently-used model (caller holds mu).
+func (s *Scheduler) lruLocked() string {
+	var oldestID string
+	var oldest time.Time
+	first := true
+	for id, l := range s.running {
+		if first || l.lastUsed.Before(oldest) {
+			oldestID, oldest, first = id, l.lastUsed, false
+		}
+	}
+	return oldestID
 }
 
 func (s *Scheduler) idleEvict(modelID string) {
@@ -187,6 +392,30 @@ func (s *Scheduler) idleEvict(modelID string) {
 	r := l.runner
 	s.mu.Unlock()
 	_ = r.Stop(context.Background())
+}
+
+// Unload evicts a specific model if resident, stopping its runner and reclaiming
+// its memory. It resolves aliases first. It returns true if a model was
+// unloaded, false if it was not resident. The model can be reloaded on the next
+// request.
+func (s *Scheduler) Unload(modelID string) bool {
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
+	s.mu.Lock()
+	l, ok := s.running[modelID]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	if l.timer != nil {
+		l.timer.Stop()
+	}
+	delete(s.running, modelID)
+	r := l.runner
+	s.mu.Unlock()
+	_ = r.Stop(context.Background())
+	return true
 }
 
 // touch marks a loaded model as recently used (caller holds s.mu).
@@ -212,6 +441,15 @@ func (s *Scheduler) Loaded() []RunnerInfo {
 		out = append(out, RunnerInfo{ID: id, Runner: l.runner})
 	}
 	return out
+}
+
+// Residency reports current resident bytes, the configured byte budget (0 =
+// unbounded), and the number of loaded models — the signal Hydra's router can
+// use to factor swap cost into routing.
+func (s *Scheduler) Residency() (used, budget int64, count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.usedBytesLocked(), s.maxBytes, len(s.running)
 }
 
 // Shutdown stops every loaded runner, reclaiming all memory.

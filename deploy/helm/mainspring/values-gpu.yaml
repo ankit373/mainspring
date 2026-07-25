@@ -1,0 +1,50 @@
+# Example overrides for running Mainspring on an NVIDIA GPU node.
+#   helm install ms deploy/helm/mainspring -f deploy/helm/mainspring/values-gpu.yaml
+#
+# Assumes the NVIDIA device plugin is installed and nodes are labeled gpu=true.
+
+image:
+  repository: ghcr.io/ankit373/mainspring
+  tag: latest
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 4Gi
+  limits:
+    nvidia.com/gpu: 1
+
+nodeSelector:
+  gpu: "true"
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+# readOnlyRootFilesystem must stay true; models live on the mounted volume.
+models:
+  persistence:
+    enabled: true
+    size: 100Gi
+
+# Bound concurrency so a single GPU degrades gracefully under load.
+config:
+  addr: ":11500"
+  keep_alive_seconds: 600
+  max_loaded: 1
+  max_resident_mb: 20000
+  max_inflight: 4
+  max_queue: 16
+  backend: llamacpp
+  models: []
+  #   - id: qwen2.5-coder
+  #     path: /models/qwen2.5-coder.gguf
+  #     ctx: 8192
+  #     preload: true
+
+serviceMonitor:
+  enabled: true
+
+autoscaling:
+  enabled: false   # GPU pods usually pin 1:1 to a device; scale by node, not HPA

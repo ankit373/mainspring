@@ -1,0 +1,15 @@
+apiVersion: v2
+name: mainspring
+description: Backend-agnostic local inference server — one OpenAI-compatible API, pluggable engines.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/ankit373/mainspring
+sources:
+  - https://github.com/ankit373/mainspring
+keywords:
+  - inference
+  - llm
+  - openai
+  - llama.cpp
+  - gpu

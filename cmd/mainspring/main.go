@@ -4,10 +4,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -17,8 +21,15 @@ import (
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
 	"github.com/ankit373/mainspring/internal/backend/llamacpp"
+	"github.com/ankit373/mainspring/internal/backend/lmstudio"
+	"github.com/ankit373/mainspring/internal/backend/mlx"
+	"github.com/ankit373/mainspring/internal/backend/ollama"
+	"github.com/ankit373/mainspring/internal/backend/openaiadopt"
+	"github.com/ankit373/mainspring/internal/breaker"
 	"github.com/ankit373/mainspring/internal/build"
 	"github.com/ankit373/mainspring/internal/config"
+	"github.com/ankit373/mainspring/internal/install"
+	"github.com/ankit373/mainspring/internal/metrics"
 	"github.com/ankit373/mainspring/internal/scheduler"
 	"github.com/ankit373/mainspring/internal/server"
 )
@@ -32,7 +43,7 @@ func main() {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().String("config", "", "config file (default: ~/.config/mainspring/config.yaml)")
-	root.AddCommand(cmdServe(), cmdBackends(), cmdModels(), cmdVersion())
+	root.AddCommand(cmdServe(), cmdBackends(), cmdModels(), cmdInstall(), cmdDoctor(), cmdVersion())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -62,10 +73,19 @@ func cmdBackends() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
 
-			backends := []backend.Backend{llamacpp.New(cfg.LlamaServerPath)}
-			fmt.Printf("%-12s %-9s %s\n", "BACKEND", "PRESENT", "DETAIL")
-			for _, b := range backends {
+			fmt.Printf("%-12s %-9s %-9s %s\n", "BACKEND", "PRESENT", "SOURCE", "DETAIL")
+			for _, b := range allBackends(cfg) {
 				av := b.Detect(ctx)
+				if _, ok := install.ManagedPath(av.Name); ok {
+					av.Managed = true
+				}
+				source := "-"
+				if av.Present {
+					source = "system"
+					if av.Managed {
+						source = "managed"
+					}
+				}
 				detail := av.Path
 				if av.Version != "" {
 					detail += "  " + av.Version
@@ -73,13 +93,147 @@ func cmdBackends() *cobra.Command {
 				if !av.Present {
 					detail = av.Reason
 				}
-				fmt.Printf("%-12s %-9v %s\n", av.Name, av.Present, detail)
+				fmt.Printf("%-12s %-9v %-9s %s\n", av.Name, av.Present, source, detail)
 			}
-			fmt.Println("\nplanned: mlx (Apple Silicon), ollama (adopt existing daemon);")
-			fmt.Println("detect-and-adopt-only: lmstudio, llamafile, gpt4all")
+			fmt.Println("\nadopt-only backends detect a running local OpenAI server; Mainspring never installs them.")
 			return nil
 		},
 	}
+}
+
+func cmdDoctor() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose the Mainspring environment (backends, config, models, ports)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fmt.Println(build.String())
+			cfg, err := config.Load(configPath(cmd))
+			if err != nil {
+				fmt.Printf("✗ config: %v\n", err)
+				return nil
+			}
+			fmt.Println("✓ config loaded")
+
+			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			defer cancel()
+
+			present := map[string]bool{}
+			fmt.Println("\nbackends:")
+			for _, b := range allBackends(cfg) {
+				av := b.Detect(ctx)
+				present[av.Name] = av.Present
+				mark := "✗"
+				detail := av.Reason
+				if av.Present {
+					mark = "✓"
+					detail = av.Version
+					if _, ok := install.ManagedPath(av.Name); ok {
+						detail += " (managed)"
+					}
+				}
+				fmt.Printf("  %s %-10s %s\n", mark, av.Name, detail)
+			}
+
+			fmt.Println("\nmodels:")
+			if len(cfg.Models) == 0 {
+				fmt.Println("  (none configured)")
+			}
+			for _, line := range checkModels(cfg, present) {
+				fmt.Println("  " + line)
+			}
+
+			fmt.Println("\nserver:")
+			if portFree(cfg.Addr) {
+				fmt.Printf("  ✓ listen address %s is free\n", cfg.Addr)
+			} else {
+				fmt.Printf("  ✗ listen address %s is in use\n", cfg.Addr)
+			}
+			fmt.Printf("  · accelerator: %s\n", gpuHint())
+			return nil
+		},
+	}
+}
+
+// checkModels resolves each configured model's backend and reports whether that
+// backend is present and (for local-file backends) whether the weights exist.
+func checkModels(cfg config.Config, present map[string]bool) []string {
+	fallback := defaultBackendName(cfg)
+	var lines []string
+	for _, m := range cfg.Models {
+		b := m.Backend
+		if b == "" {
+			b = fallback
+		}
+		switch {
+		case !present[b]:
+			lines = append(lines, fmt.Sprintf("✗ %s → %s (backend not available)", m.ID, b))
+		case (b == "llamacpp" || b == "mlx") && m.Path != "" && !pathExists(m.Path):
+			lines = append(lines, fmt.Sprintf("✗ %s → %s (weights not found: %s)", m.ID, b, m.Path))
+		default:
+			lines = append(lines, fmt.Sprintf("✓ %s → %s", m.ID, b))
+		}
+	}
+	return lines
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// portFree reports whether addr can be bound (i.e. is currently free).
+func portFree(addr string) bool {
+	if addr == "" {
+		addr = ":11500"
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+// gpuHint gives a best-effort accelerator note for this platform.
+func gpuHint() string {
+	switch {
+	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
+		return "Apple Silicon (Metal) — use backend llamacpp or mlx"
+	case runtime.GOOS == "linux":
+		return "Linux — check `nvidia-smi` (CUDA) or ROCm; ensure the engine build has GPU support"
+	default:
+		return runtime.GOOS + "/" + runtime.GOARCH
+	}
+}
+
+func cmdInstall() *cobra.Command {
+	var version, url, sha, manifest, sig, pubkey string
+	cmd := &cobra.Command{
+		Use:   "install <backend>",
+		Short: "Install an engine backend binary (opt-in, checksum-verified)",
+		Long:  "Downloads and SHA-256-verifies an engine binary, then records a receipt so\nthe backend prefers the managed binary. Nothing is downloaded unless you run\nthis command. Pin a specific artifact with --url and --sha256, or rely on a\nmanifest (--manifest / ~/.config/mainspring/install.json). When --pubkey (or\n$MAINSPRING_MANIFEST_PUBKEY) is set, the manifest must carry a valid ed25519\ndetached signature.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if pubkey == "" {
+				pubkey = os.Getenv("MAINSPRING_MANIFEST_PUBKEY")
+			}
+			rec, err := install.Install(cmd.Context(), args[0], install.Spec{
+				Version: version, URL: url, SHA256: sha, PubKey: pubkey, SigPath: sig,
+			}, manifest, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			_ = rec
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&version, "version", "", "version to install (from manifest)")
+	cmd.Flags().StringVar(&url, "url", "", "pin a direct download URL (requires --sha256)")
+	cmd.Flags().StringVar(&sha, "sha256", "", "expected SHA-256 of the download")
+	cmd.Flags().StringVar(&manifest, "manifest", "", "manifest file (default: ~/.config/mainspring/install.json)")
+	cmd.Flags().StringVar(&pubkey, "pubkey", "", "base64 ed25519 public key; requires a signed manifest ($MAINSPRING_MANIFEST_PUBKEY)")
+	cmd.Flags().StringVar(&sig, "manifest-sig", "", "detached manifest signature file (default: <manifest>.sig)")
+	return cmd
 }
 
 func cmdModels() *cobra.Command {
@@ -95,9 +249,14 @@ func cmdModels() *cobra.Command {
 				fmt.Println("no models configured — add them to your config or pass --model id=path to serve")
 				return nil
 			}
-			fmt.Printf("%-24s %-6s %s\n", "MODEL", "CTX", "PATH")
+			fallback := defaultBackendName(cfg)
+			fmt.Printf("%-24s %-10s %-6s %s\n", "MODEL", "BACKEND", "CTX", "PATH")
 			for _, m := range cfg.Models {
-				fmt.Printf("%-24s %-6d %s\n", m.ID, m.Ctx, m.Path)
+				b := m.Backend
+				if b == "" {
+					b = fallback
+				}
+				fmt.Printf("%-24s %-10s %-6d %s\n", m.ID, b, m.Ctx, m.Path)
 			}
 			return nil
 		},
@@ -106,12 +265,20 @@ func cmdModels() *cobra.Command {
 
 func cmdServe() *cobra.Command {
 	var (
-		addr         string
-		modelFlags   []string
-		apiKeys      []string
-		keepAlive    int
-		maxLoaded    int
-		llamaServer  string
+		addr        string
+		modelFlags  []string
+		apiKeys     []string
+		keepAlive   int
+		maxLoaded   int
+		maxResident int
+		maxInflight int
+		maxQueue    int
+		usageLedger string
+		backendName string
+		ollamaHost  string
+		llamaServer string
+		tlsCert     string
+		tlsKey      string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -134,8 +301,32 @@ func cmdServe() *cobra.Command {
 			if cmd.Flags().Changed("max-loaded") {
 				cfg.MaxLoaded = maxLoaded
 			}
+			if cmd.Flags().Changed("max-resident-mb") {
+				cfg.MaxResidentMB = maxResident
+			}
+			if cmd.Flags().Changed("max-inflight") {
+				cfg.MaxInflight = maxInflight
+			}
+			if cmd.Flags().Changed("max-queue") {
+				cfg.MaxQueue = maxQueue
+			}
+			if cmd.Flags().Changed("usage-ledger") {
+				cfg.UsageLedger = usageLedger
+			}
+			if cmd.Flags().Changed("backend") {
+				cfg.Backend = backendName
+			}
+			if cmd.Flags().Changed("ollama-host") {
+				cfg.OllamaHost = ollamaHost
+			}
 			if cmd.Flags().Changed("llama-server") {
 				cfg.LlamaServerPath = llamaServer
+			}
+			if cmd.Flags().Changed("tls-cert") {
+				cfg.TLSCert = tlsCert
+			}
+			if cmd.Flags().Changed("tls-key") {
+				cfg.TLSKey = tlsKey
 			}
 			for _, mf := range modelFlags {
 				m, err := parseModelFlag(mf)
@@ -148,59 +339,227 @@ func cmdServe() *cobra.Command {
 				return fmt.Errorf("no models configured — pass --model id=/path/to/weights.gguf or add models to the config")
 			}
 
-			return runServe(cmd.Context(), cfg)
+			return runServe(cmd.Context(), cfg, configPath(cmd))
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", ":11500", "listen address")
 	cmd.Flags().StringArrayVar(&modelFlags, "model", nil, "model as id=/path/to/weights.gguf (repeatable)")
 	cmd.Flags().StringArrayVar(&apiKeys, "api-key", nil, "require this API key (repeatable); if none set, server runs OPEN")
 	cmd.Flags().IntVar(&keepAlive, "keep-alive", 300, "seconds to keep an idle model loaded (0 = never unload)")
-	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once (LRU-evicted beyond this)")
+	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once by count (LRU-evicted beyond this)")
+	cmd.Flags().IntVar(&maxResident, "max-resident-mb", 0, "max resident memory across models in MB (0 = no byte cap)")
+	cmd.Flags().IntVar(&maxInflight, "max-inflight", 0, "max concurrent requests per model (0 = unbounded)")
+	cmd.Flags().IntVar(&maxQueue, "max-queue", 0, "max queued waiters per model before returning 503")
+	cmd.Flags().StringVar(&usageLedger, "usage-ledger", "", "JSONL usage ledger path (empty = default location, \"off\" = disable)")
+	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | ollama | mlx")
+	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "", "Ollama daemon URL when --backend ollama")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate path (with --tls-key => serve HTTPS)")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "PEM private key path")
 	return cmd
 }
 
-func runServe(ctx context.Context, cfg config.Config) error {
+// modelSpecs builds the scheduler specs from config, applying the default
+// backend to models that don't name one. Shared by startup and SIGHUP reload.
+func modelSpecs(cfg config.Config) []backend.ModelSpec {
+	fallback := defaultBackendName(cfg)
 	specs := make([]backend.ModelSpec, 0, len(cfg.Models))
 	for _, m := range cfg.Models {
+		bname := m.Backend
+		if bname == "" {
+			bname = fallback
+		}
 		specs = append(specs, backend.ModelSpec{
 			ID:        m.ID,
+			Backend:   bname,
+			Fallbacks: m.Fallbacks,
 			Path:      m.Path,
 			CtxSize:   m.Ctx,
 			GPULayers: m.GPULayers,
 			ExtraArgs: m.Args,
 		})
 	}
+	return specs
+}
 
-	be := llamacpp.New(cfg.LlamaServerPath)
-	if av := be.Detect(ctx); !av.Present {
-		return fmt.Errorf("llama.cpp backend unavailable: %s", av.Reason)
+// authTenants resolves the effective tenant set from config: explicit tenants
+// when present, otherwise each API key as an admin tenant (mirroring auth.New).
+// Shared by startup and SIGHUP reload.
+func authTenants(cfg config.Config) []auth.Tenant {
+	if len(cfg.Tenants) > 0 {
+		ts := make([]auth.Tenant, 0, len(cfg.Tenants))
+		for _, t := range cfg.Tenants {
+			ts = append(ts, auth.Tenant{
+				Name:        t.Name,
+				Key:         t.Key,
+				Role:        auth.Role(t.Role),
+				RateRPM:     t.RateRPM,
+				TokenBudget: t.TokenBudget,
+				WindowSec:   t.WindowSec,
+			})
+		}
+		return ts
+	}
+	ts := make([]auth.Tenant, 0, len(cfg.APIKeys))
+	for i, k := range cfg.APIKeys {
+		if k = strings.TrimSpace(k); k != "" {
+			ts = append(ts, auth.Tenant{Name: fmt.Sprintf("key-%d", i+1), Key: k, Role: auth.RoleAdmin})
+		}
+	}
+	return ts
+}
+
+func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
+	specs := modelSpecs(cfg)
+	needed := map[string]bool{}
+	for _, sp := range specs {
+		for _, bname := range sp.Candidates() { // primary + fallbacks
+			needed[bname] = true
+		}
 	}
 
-	sched := scheduler.New(be, specs, cfg.KeepAlive(), cfg.MaxLoaded)
-	authn := auth.New(cfg.APIKeys)
-	srv := server.New(sched, authn)
+	// Construct and detect only the backends the configured models actually use.
+	// An absent backend is not fatal when it is only a fallback: we skip it and
+	// require each model to retain at least one present candidate (checked below).
+	backends := make(map[string]backend.Backend, len(needed))
+	for name := range needed {
+		be, err := newBackendByName(name, cfg)
+		if err != nil {
+			return err
+		}
+		if av := be.Detect(ctx); !av.Present {
+			fmt.Fprintf(os.Stderr, "warning: backend %q unavailable (%s) — skipping; models will fail over if configured\n", name, av.Reason)
+			continue
+		}
+		backends[name] = be
+	}
+	// Every model must have at least one usable backend among its candidates.
+	for _, sp := range specs {
+		hasBackend := false
+		for _, bname := range sp.Candidates() {
+			if backends[bname] != nil {
+				hasBackend = true
+				break
+			}
+		}
+		if !hasBackend {
+			return fmt.Errorf("model %q has no available backend (tried %v)", sp.ID, sp.Candidates())
+		}
+	}
+
+	sched := scheduler.New(backends, specs, scheduler.Options{
+		KeepAlive: cfg.KeepAlive(),
+		MaxLoaded: cfg.MaxLoaded,
+		MaxBytes:  cfg.MaxBytes(),
+		Aliases:   cfg.Aliases,
+	})
+	if err := sched.Validate(); err != nil {
+		return fmt.Errorf("invalid model aliases: %w", err)
+	}
+	authn := buildAuth(cfg)
+
+	ledgerPath := cfg.UsageLedger
+	if ledgerPath == "" {
+		ledgerPath = config.DefaultLedgerPath()
+	}
+	if ledgerPath == "off" {
+		ledgerPath = ""
+	}
+	rec, err := metrics.New(ledgerPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err) // metrics still work in-memory
+	}
+	defer func() { _ = rec.Close() }()
+
+	srv := server.New(sched, authn, rec)
+	srv.SetConcurrency(cfg.MaxInflight, cfg.MaxQueue)
+	if cfg.BreakerThreshold > 0 {
+		srv.SetBreaker(cfg.BreakerThreshold, cfg.BreakerCooldown())
+	}
+	// Wire the admin reload endpoint to the same reload path SIGHUP uses.
+	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, sched, authn) })
+
+	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)
+	} else if alClose != nil {
+		defer alClose()
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	if cfg.TLSEnabled() {
+		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
 
+	scheme := "http"
+	if cfg.TLSEnabled() {
+		scheme = "https"
+	}
 	fmt.Println(build.String())
-	fmt.Printf("serving %d model(s) on %s\n", len(specs), cfg.Addr)
+	fmt.Printf("serving %d model(s) on %s (%s)\n", len(specs), cfg.Addr, scheme)
+	if ledgerPath != "" {
+		fmt.Printf("metrics: %s/metrics   usage ledger: %s\n", cfg.Addr, ledgerPath)
+	} else {
+		fmt.Printf("metrics: %s/metrics   usage ledger: disabled\n", cfg.Addr)
+	}
 	if authn.Open() {
 		fmt.Println("⚠  WARNING: no API keys configured — the server is OPEN (no authentication).")
 		fmt.Println("⚠  Do not expose this address beyond localhost. Set api_keys / --api-key to require auth.")
 	}
 
+	// Warm up preloaded models in the background so the server is available
+	// immediately while cold-starts happen concurrently.
+	if ids := preloadIDs(cfg); len(ids) > 0 {
+		if cfg.MaxLoaded > 0 && len(ids) > cfg.MaxLoaded {
+			fmt.Printf("⚠  %d models set to preload but max_loaded=%d — some will be evicted as they load\n", len(ids), cfg.MaxLoaded)
+		}
+		go func() {
+			for _, id := range ids {
+				if _, err := sched.EnsureLoaded(context.Background(), id); err != nil {
+					fmt.Printf("preload %s: %v\n", id, err)
+				} else {
+					fmt.Printf("preloaded %s\n", id)
+				}
+			}
+		}()
+	}
+
+	// SIGHUP hot-reloads the safe subset of config (models, aliases, tenants)
+	// from the config file without dropping in-flight requests or the listener.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			if err := reloadConfig(cfgPath, cfg, sched, authn); err != nil {
+				fmt.Fprintln(os.Stderr, "SIGHUP:", err)
+			}
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Background health prober: feed loaded-runner health into the circuit
+	// breaker so a backend that goes bad trips (and recovers) without waiting for
+	// live request failures.
+	if iv := cfg.HealthProbeInterval(); iv > 0 && cfg.BreakerThreshold > 0 {
+		go runHealthProber(ctx, iv, sched, srv.Breaker())
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+		var serveErr error
+		if cfg.TLSEnabled() {
+			serveErr = httpSrv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey)
+		} else {
+			serveErr = httpSrv.ListenAndServe()
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			errCh <- serveErr
 		}
 	}()
 
@@ -208,13 +567,180 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		fmt.Println("\nshutting down — reclaiming loaded models…")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// Graceful drain: flip readiness so load balancers stop routing, let
+		// in-flight requests finish (http.Server.Shutdown), then reclaim models.
+		srv.SetDraining(true)
+		fmt.Println("\ndraining in-flight requests…")
+		shutCtx, cancel := context.WithTimeout(context.Background(), cfg.DrainTimeout())
 		defer cancel()
-		_ = httpSrv.Shutdown(shutCtx)
-		sched.Shutdown(shutCtx)
+		if err := httpSrv.Shutdown(shutCtx); err != nil {
+			fmt.Println("drain timed out; forcing shutdown")
+		}
+		fmt.Println("reclaiming loaded models…")
+		sched.Shutdown(context.Background())
 		return nil
 	}
+}
+
+// runHealthProber periodically probes each loaded runner's health and feeds the
+// result into the circuit breaker (StatusReady => success, anything else =>
+// failure). It exits when ctx is cancelled. A "down" runner trips the breaker;
+// a recovered one closes it, without waiting for live traffic to notice.
+func runHealthProber(ctx context.Context, interval time.Duration, sched *scheduler.Scheduler, brk *breaker.Group) {
+	if brk == nil || !brk.Enabled() {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			for _, ri := range sched.Loaded() {
+				pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				status := ri.Runner.Health(pctx)
+				cancel()
+				brk.OnResult(ri.ID, status == backend.StatusReady)
+			}
+		}
+	}
+}
+
+// reloadConfig re-reads the config file and applies the safe subset: model
+// specs, aliases, and tenants. Changes to the listen address, backend set, or
+// ledger require a restart and are only logged. A missing config file is a
+// no-op (so a flag-only launch is never wiped). Shared by SIGHUP and the admin
+// reload endpoint; it returns an error the caller can surface or log.
+func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator) error {
+	resolved := path
+	if resolved == "" {
+		resolved = config.DefaultPath()
+	}
+	if _, err := os.Stat(resolved); err != nil {
+		return fmt.Errorf("no config file at %s; reload skipped", resolved)
+	}
+	newCfg, err := config.Load(resolved)
+	if err != nil {
+		return fmt.Errorf("reload failed, keeping current config: %w", err)
+	}
+
+	// Unsafe changes can't be applied to a running listener — warn, don't apply.
+	if newCfg.Addr != startup.Addr {
+		fmt.Fprintf(os.Stderr, "reload: addr change (%s → %s) requires a restart; ignoring\n", startup.Addr, newCfg.Addr)
+	}
+	if newCfg.Backend != startup.Backend {
+		fmt.Fprintf(os.Stderr, "reload: backend change (%q → %q) requires a restart; ignoring\n", startup.Backend, newCfg.Backend)
+	}
+
+	if err := sched.Reload(modelSpecs(newCfg), newCfg.Aliases); err != nil {
+		return fmt.Errorf("model/alias reload rejected, keeping current: %w", err)
+	}
+	authn.Reload(authTenants(newCfg))
+	fmt.Printf("reload: %d model(s), %d alias(es), %d tenant(s)\n",
+		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
+	return nil
+}
+
+// allBackends constructs every known backend adapter (for detection/listing).
+func allBackends(cfg config.Config) []backend.Backend {
+	return []backend.Backend{
+		llamacpp.New(cfg.LlamaServerPath),
+		ollama.New(cfg.OllamaHost),
+		mlx.New(cfg.MLXPython),
+		lmstudio.New(cfg.LMStudioHost),
+		openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"), "start it with `./model.llamafile --server`"),
+		openaiadopt.New("gpt4all", orDefault(cfg.GPT4AllHost, "http://127.0.0.1:4891"), "enable the API server in GPT4All settings"),
+	}
+}
+
+// newBackendByName constructs a backend by name, applying config (incl. a
+// managed-install path preference for llamacpp).
+func newBackendByName(name string, cfg config.Config) (backend.Backend, error) {
+	switch name {
+	case "llamacpp":
+		binPath := cfg.LlamaServerPath
+		if binPath == "" {
+			if managed, ok := install.ManagedPath("llamacpp"); ok {
+				binPath = managed // prefer a managed install over PATH
+			}
+		}
+		return llamacpp.New(binPath), nil
+	case "ollama":
+		return ollama.New(cfg.OllamaHost), nil
+	case "mlx":
+		return mlx.New(cfg.MLXPython), nil
+	case "lmstudio":
+		return lmstudio.New(cfg.LMStudioHost), nil
+	case "llamafile":
+		return openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"),
+			"start it with `./model.llamafile --server --port 8080`"), nil
+	case "gpt4all":
+		return openaiadopt.New("gpt4all", orDefault(cfg.GPT4AllHost, "http://127.0.0.1:4891"),
+			"enable the API server in GPT4All → Settings → Application"), nil
+	default:
+		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx|lmstudio|llamafile|gpt4all)", name)
+	}
+}
+
+// orDefault returns v if non-empty, else def.
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// configureAccessLog wires the server's structured access log from the config
+// value: "" disables it, "stderr"/"stdout" stream to those, any other value is a
+// file path (parent dirs created). It returns a close func for the file (nil
+// otherwise) so the caller can defer cleanup.
+func configureAccessLog(srv *server.Server, dest string) (func(), error) {
+	switch dest {
+	case "":
+		return nil, nil
+	case "stderr":
+		srv.SetAccessLog(os.Stderr)
+		return nil, nil
+	case "stdout":
+		srv.SetAccessLog(os.Stdout)
+		return nil, nil
+	default:
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(dest, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		srv.SetAccessLog(f)
+		return func() { _ = f.Close() }, nil
+	}
+}
+
+// defaultBackendName resolves the fallback backend for models that don't set one.
+func defaultBackendName(cfg config.Config) string {
+	if cfg.Backend != "" {
+		return cfg.Backend
+	}
+	return "llamacpp"
+}
+
+// preloadIDs returns the ids of models configured to load at startup.
+func preloadIDs(cfg config.Config) []string {
+	var ids []string
+	for _, m := range cfg.Models {
+		if m.Preload {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
+}
+
+// buildAuth constructs the authenticator from config: explicit tenants take
+// precedence over the flat api_keys list.
+func buildAuth(cfg config.Config) *auth.Authenticator {
+	return auth.NewTenants(authTenants(cfg))
 }
 
 // parseModelFlag parses "id=/path/to/weights.gguf".

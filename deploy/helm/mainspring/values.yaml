@@ -1,0 +1,82 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/ankit373/mainspring
+  tag: ""          # defaults to .Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 11500
+
+# Full Mainspring config.yaml, rendered into a Secret (it may contain API keys /
+# tenant secrets) and mounted at /config/config.yaml.
+config:
+  addr: ":11500"
+  keep_alive_seconds: 300
+  max_loaded: 1
+  # backend: llamacpp | ollama | mlx
+  backend: llamacpp
+  # tenants:
+  #   - name: team-a
+  #     key: change-me
+  #     role: inference
+  #     rate_rpm: 120
+  #     token_budget: 2000000
+  #     window_sec: 3600
+  models: []
+  #   - id: qwen2.5-coder
+  #     path: /models/qwen2.5-coder.gguf
+  #     ctx: 8192
+
+# Persistent volume for model weights, mounted at /models.
+models:
+  persistence:
+    enabled: false
+    existingClaim: ""
+    size: 50Gi
+    storageClass: ""
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: 1Gi
+  limits: {}
+  # For GPU nodes, add e.g.:
+  #   limits:
+  #     nvidia.com/gpu: 1
+
+# Schedule onto GPU nodes.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Liveness/readiness probes hit /healthz (always unauthenticated).
+probes:
+  enabled: true
+
+# Horizontal Pod Autoscaler (autoscaling/v2).
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 75
+  # targetMemoryUtilizationPercentage: 80
+
+serviceMonitor:
+  enabled: false   # set true if the Prometheus Operator (monitoring.coreos.com) is installed
+  interval: 30s
+  path: /metrics

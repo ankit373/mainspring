@@ -23,11 +23,28 @@ const (
 
 // ModelSpec describes a model to serve.
 type ModelSpec struct {
-	ID      string   // logical id exposed via the API, e.g. "qwen2.5-coder"
-	Path    string   // absolute path to the weights (e.g. a .gguf file)
+	ID        string   // logical id exposed via the API, e.g. "qwen2.5-coder"
+	Backend   string   // primary backend that serves this model ("llamacpp"|"ollama"|"mlx")
+	Fallbacks []string // ordered backends to try if the primary can't start (failover)
+	Path      string   // absolute path to the weights (e.g. a .gguf file)
 	CtxSize   int      // requested context window; 0 = engine default
 	GPULayers int      // 0 = offload all (default), N>0 = that many, N<0 = CPU-only
 	ExtraArgs []string // engine-specific passthrough flags
+}
+
+// Candidates returns the ordered backend names to try for this model: the
+// primary first, then each fallback, de-duplicated and skipping empties.
+func (m ModelSpec) Candidates() []string {
+	out := make([]string, 0, 1+len(m.Fallbacks))
+	seen := make(map[string]bool)
+	for _, b := range append([]string{m.Backend}, m.Fallbacks...) {
+		if b == "" || seen[b] {
+			continue
+		}
+		seen[b] = true
+		out = append(out, b)
+	}
+	return out
 }
 
 // Capabilities is the fail-loud truth about a running model — the anti-Ollama
@@ -36,14 +53,14 @@ type ModelSpec struct {
 // RequestedCtx means the engine silently shrank the window; callers must warn,
 // never treat it as success.
 type Capabilities struct {
-	Backend      string `json:"backend"`               // "llamacpp"
-	Model        string `json:"model"`                 // logical model id
-	Device       string `json:"device"`                // "metal" | "cuda" | "rocm" | "cpu"
-	GPUOffload   bool   `json:"gpu_offload"`           // false ⇒ running on CPU
-	RequestedCtx int    `json:"requested_ctx"`
-	EffectiveCtx int    `json:"effective_ctx"`
-	Quantization string `json:"quantization,omitempty"`
-	Warnings     []string `json:"warnings,omitempty"`  // populated when degraded
+	Backend      string   `json:"backend"`     // "llamacpp"
+	Model        string   `json:"model"`       // logical model id
+	Device       string   `json:"device"`      // "metal" | "cuda" | "rocm" | "cpu"
+	GPUOffload   bool     `json:"gpu_offload"` // false ⇒ running on CPU
+	RequestedCtx int      `json:"requested_ctx"`
+	EffectiveCtx int      `json:"effective_ctx"`
+	Quantization string   `json:"quantization,omitempty"`
+	Warnings     []string `json:"warnings,omitempty"` // populated when degraded
 }
 
 // Degraded reports whether the running model differs from what was asked for —
@@ -61,9 +78,10 @@ func (c Capabilities) Degraded() bool {
 // Availability reports whether a backend can run on this host (detect-first UX).
 type Availability struct {
 	Name    string `json:"name"`
-	Present bool   `json:"present"`           // binary/runtime found
-	Path    string `json:"path,omitempty"`    // resolved binary path
+	Present bool   `json:"present"`        // binary/runtime found
+	Path    string `json:"path,omitempty"` // resolved binary path
 	Version string `json:"version,omitempty"`
+	Managed bool   `json:"managed,omitempty"` // installed by `mainspring install` (vs system)
 	Reason  string `json:"reason,omitempty"`  // when absent: why / how to install
 }
 
@@ -91,4 +109,13 @@ type Backend interface {
 	// Start launches a Runner serving spec. It blocks until the runner is
 	// Ready or the context is cancelled.
 	Start(ctx context.Context, spec ModelSpec) (Runner, error)
+}
+
+// MemoryEstimator is an optional Backend capability: an a-priori estimate (in
+// bytes) of a model's resident footprint, used by the scheduler for admission
+// BEFORE the runner starts. Keeping the estimate in the backend keeps
+// model/engine-specific sizing out of the scheduler. Backends that don't
+// implement it fall back to the count cap only.
+type MemoryEstimator interface {
+	EstimateMemory(spec ModelSpec) int64
 }
