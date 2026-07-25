@@ -35,6 +35,9 @@ MIT and already win; Mainspring wraps them).
   ServiceMonitor, GPU node scheduling).
 - Graceful drain: `/readyz` flips to 503 on shutdown so load balancers stop routing while in-flight
   requests finish.
+- Request correlation: every request carries an `X-Request-ID` (accepted from the client or generated,
+  echoed on the response and recorded in the usage ledger); an optional JSONL access log records every
+  request (method, path, status, duration).
 
 ## Backends
 

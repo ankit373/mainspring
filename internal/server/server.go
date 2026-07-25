@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +31,26 @@ type Server struct {
 	metrics  *metrics.Recorder
 	gate     *gate
 	draining atomic.Bool
+	accessMu sync.RWMutex
+	access   *accessLogger
+}
+
+// SetAccessLog enables the structured JSONL access log, writing one line per
+// request to w. Passing nil disables it. Safe to call at startup.
+func (s *Server) SetAccessLog(w io.Writer) {
+	s.accessMu.Lock()
+	defer s.accessMu.Unlock()
+	if w == nil {
+		s.access = nil
+		return
+	}
+	s.access = &accessLogger{w: w}
+}
+
+func (s *Server) accessLog() *accessLogger {
+	s.accessMu.RLock()
+	defer s.accessMu.RUnlock()
+	return s.access
 }
 
 // SetDraining marks the server as draining: readiness (/readyz) starts failing so
@@ -61,7 +82,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/completions", s.inference)
 	mux.HandleFunc("/v1/embeddings", s.inference)
 	mux.HandleFunc("/v1/messages", s.messages) // Anthropic Messages API
-	return s.auth.Wrap(mux)
+	// requestID is outermost so every request — including auth rejections and
+	// health checks — gets a correlation id and an access-log line.
+	return s.requestID(s.auth.Wrap(mux))
 }
 
 // metricsHandler renders the Prometheus exposition, merging live residency.
@@ -227,6 +250,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
 			Time:         start,
+			RequestID:    RequestID(r.Context()),
 			Model:        model,
 			Tenant:       auth.TenantOf(r.Context()),
 			Status:       cap.status,

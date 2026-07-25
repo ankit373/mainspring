@@ -45,6 +45,7 @@ type Config struct {
 	MaxQueue         int               `yaml:"max_queue,omitempty"`     // extra waiters per model before 503
 	DrainSeconds     int               `yaml:"drain_seconds,omitempty"` // shutdown drain timeout; <=0 => 30s
 	UsageLedger      string            `yaml:"usage_ledger,omitempty"`  // JSONL path; empty => default location
+	AccessLog        string            `yaml:"access_log,omitempty"`    // JSONL access log path; empty => off, "stderr"/"stdout" accepted
 	Backend          string            `yaml:"backend,omitempty"`       // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
 	LlamaServerPath  string            `yaml:"llama_server_path,omitempty"`
 	OllamaHost       string            `yaml:"ollama_host,omitempty"`    // e.g. http://127.0.0.1:11434
