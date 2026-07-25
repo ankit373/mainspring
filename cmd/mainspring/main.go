@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -335,8 +336,8 @@ func cmdServe() *cobra.Command {
 				}
 				cfg.Models = append(cfg.Models, m)
 			}
-			if len(cfg.Models) == 0 {
-				return fmt.Errorf("no models configured — pass --model id=/path/to/weights.gguf or add models to the config")
+			if len(cfg.Models) == 0 && !cfg.DiscoverModels {
+				return fmt.Errorf("no models configured — pass --model id=/path/to/weights.gguf, add models to the config, or set discover_models: true")
 			}
 
 			return runServe(cmd.Context(), cfg, configPath(cmd))
@@ -417,6 +418,13 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 			needed[bname] = true
 		}
 	}
+	// Model auto-discovery: also construct the adopt backends so we can enumerate
+	// their models. Absent ones are skipped below (not fatal).
+	if cfg.DiscoverModels {
+		for _, bname := range adoptBackendNames {
+			needed[bname] = true
+		}
+	}
 
 	// Construct and detect only the backends the configured models actually use.
 	// An absent backend is not fatal when it is only a fallback: we skip it and
@@ -445,6 +453,15 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 		if !hasBackend {
 			return fmt.Errorf("model %q has no available backend (tried %v)", sp.ID, sp.Candidates())
 		}
+	}
+
+	// Auto-discover models from present adopt backends (opt-in). Configured
+	// models win on an id clash.
+	if cfg.DiscoverModels {
+		specs = append(specs, discoverModels(ctx, backends, specs)...)
+	}
+	if len(specs) == 0 {
+		return fmt.Errorf("no models to serve — none configured and discovery found none on any present adopt backend")
 	}
 
 	sched := scheduler.New(backends, specs, scheduler.Options{
@@ -640,6 +657,48 @@ func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler
 	fmt.Printf("reload: %d model(s), %d alias(es), %d tenant(s)\n",
 		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
 	return nil
+}
+
+// adoptBackendNames are the detect-and-adopt backends that can enumerate their
+// own models for auto-discovery.
+var adoptBackendNames = []string{"ollama", "lmstudio", "llamafile", "gpt4all"}
+
+// discoverModels queries each present backend that implements backend.ModelLister
+// and returns specs for models not already configured (configured wins on an id
+// clash). A backend that fails to list is skipped with a warning.
+func discoverModels(ctx context.Context, backends map[string]backend.Backend, existing []backend.ModelSpec) []backend.ModelSpec {
+	have := make(map[string]bool, len(existing))
+	for _, sp := range existing {
+		have[sp.ID] = true
+	}
+	var found []backend.ModelSpec
+	names := make([]string, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic discovery order
+	for _, name := range names {
+		lister, ok := backends[name].(backend.ModelLister)
+		if !ok {
+			continue
+		}
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ids, err := lister.ListModels(lctx)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "discover: %s: %v\n", name, err)
+			continue
+		}
+		for _, id := range ids {
+			if id == "" || have[id] {
+				continue
+			}
+			have[id] = true
+			found = append(found, backend.ModelSpec{ID: id, Backend: name})
+			fmt.Printf("discovered model %q on %s\n", id, name)
+		}
+	}
+	return found
 }
 
 // allBackends constructs every known backend adapter (for detection/listing).

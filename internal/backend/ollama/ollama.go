@@ -106,6 +106,33 @@ func (b *Backend) hasModel(ctx context.Context, id string) (bool, error) {
 	return false, nil
 }
 
+// ListModels enumerates the models the daemon has pulled (adopt-only discovery).
+// The ":latest" suffix is trimmed so ids match how they're normally referenced.
+func (b *Backend) ListModels(ctx context.Context) ([]string, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, b.Host+"/api/tags", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama /api/tags returned status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(payload.Models))
+	for _, m := range payload.Models {
+		ids = append(ids, strings.TrimSuffix(m.Name, ":latest"))
+	}
+	return ids, nil
+}
+
 // runner adopts the daemon for one logical model.
 type runner struct {
 	host string
