@@ -84,6 +84,7 @@ type Config struct {
 	EnforceContext   bool              `yaml:"enforce_context,omitempty"`         // reject requests exceeding a model's context window (needs model ctx > 0)
 	RetryMax         int               `yaml:"retry_max,omitempty"`               // additional upstream attempts after the first on transient failure; 0 = no retry
 	RetryBackoffMs   int               `yaml:"retry_backoff_ms,omitempty"`        // base of the exponential retry backoff; <=0 => 100ms when retry enabled
+	Coalesce         bool              `yaml:"coalesce,omitempty"`                // single-flight de-dup of identical deterministic in-flight requests
 }
 
 // Default returns the baseline configuration.

@@ -41,6 +41,7 @@ type Server struct {
 	costRates      map[string]CostRate      // per-model USD pricing (nil = all free)
 	ctxPolicies    map[string]ContextPolicy // per-model context guardrail (nil = off)
 	modelFallbacks map[string][]string      // per-model fallback chains (nil = none)
+	coalesce       *flightGroup             // single-flight de-dup of identical in-flight requests (nil = off)
 
 	retryMax     int           // additional upstream attempts after the first (0 = no retry)
 	retryBackoff time.Duration // base of the exponential retry backoff
@@ -317,6 +318,58 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Request coalescing: identical deterministic requests already in flight share
+	// one backend computation. Followers wait for the leader and replay its result.
+	var (
+		coKey    string
+		coLeader bool
+		coVal    cache.Value
+		coOK     bool
+	)
+	if s.coalesce != nil && cacheable(body) {
+		coKey = cacheKey
+		if coKey == "" {
+			coKey = cache.Key(model, r.URL.Path, body)
+		}
+		leader, f := s.coalesce.join(coKey)
+		if !leader {
+			select {
+			case <-f.done:
+				if f.ok {
+					serveCoalesced(w, f.val)
+					charge := f.val.Completion
+					if f.val.Exact {
+						charge = f.val.Prompt + f.val.Completion
+					}
+					s.auth.AddTokens(tenant, charge)
+					if s.metrics != nil {
+						s.metrics.Record(metrics.Event{
+							Time:         time.Now(),
+							RequestID:    RequestID(r.Context()),
+							TraceID:      TraceID(r.Context()),
+							Model:        model,
+							Tenant:       auth.TenantOf(r.Context()),
+							Status:       f.val.Status,
+							Bytes:        int64(len(f.val.Body)),
+							PromptTokens: f.val.Prompt,
+							TokensEst:    f.val.Completion,
+							Exact:        f.val.Exact,
+							CostUSD:      s.costFor(model, f.val.Prompt, f.val.Completion, f.val.Exact),
+						})
+					}
+					return
+				}
+				// Leader produced no shareable result → fall through and run normally.
+			case <-r.Context().Done():
+				writeErr(w, codeTimeout, "request cancelled while waiting for coalesced result")
+				return
+			}
+		} else {
+			coLeader = true
+			defer func() { s.coalesce.publish(coKey, coVal, coOK) }()
+		}
+	}
+
 	// Select a servable model: try the requested one, then its fallback chain.
 	// A candidate is skipped only for a pre-serve failure (circuit open or load
 	// error); gate saturation is backpressure, not a fallback trigger.
@@ -364,9 +417,10 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	cap := newCapture(w, start)
-	// Record the full body only when this request is a cache candidate served by
-	// the primary model (fallback outputs are not cached under the primary key).
-	if cacheKey != "" && served == model {
+	// Record the full body when the response may be shared — cached and/or
+	// coalesced — and only when the primary model served (a fallback's output is
+	// never stored under the primary key).
+	if ((cacheKey != "") || coLeader) && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
 	s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
@@ -375,17 +429,23 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	s.breaker.OnResult(served, cap.status < 500)
 
 	prompt, completion, exact := cap.usage()
-	// Store a successful, non-streaming, within-cap response for future hits
-	// (only when the primary model served — never a fallback's output).
-	if cacheKey != "" && served == model && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
-		s.cache.Put(cacheKey, cache.Value{
+	// Build the shareable value once for a successful, non-streaming, within-cap
+	// primary-model response, then feed it to the cache and/or coalesce followers.
+	if served == model && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
+		shared := cache.Value{
 			Status:     cap.status,
 			Header:     cap.snapHeader,
 			Body:       cap.body,
 			Prompt:     prompt,
 			Completion: completion,
 			Exact:      exact,
-		})
+		}
+		if cacheKey != "" {
+			s.cache.Put(cacheKey, shared)
+		}
+		if coLeader {
+			coVal, coOK = shared, true
+		}
 	}
 	// Token budgets charge total consumption when we have exact usage; otherwise
 	// only the (estimated) output count is known.
