@@ -28,17 +28,18 @@ const maxRequestBody = 64 << 20
 
 // Server serves the OpenAI-compatible API.
 type Server struct {
-	sched     *scheduler.Scheduler
-	auth      *auth.Authenticator
-	metrics   *metrics.Recorder
-	gate      *gate
-	breaker   *breaker.Group
-	draining  atomic.Bool
-	accessMu  sync.RWMutex
-	access    *accessLogger
-	reloadFn  func() error        // wired by main for POST /admin/reload
-	cache     *cache.LRU          // opt-in response cache (nil = disabled)
-	costRates map[string]CostRate // per-model USD pricing (nil = all free)
+	sched       *scheduler.Scheduler
+	auth        *auth.Authenticator
+	metrics     *metrics.Recorder
+	gate        *gate
+	breaker     *breaker.Group
+	draining    atomic.Bool
+	accessMu    sync.RWMutex
+	access      *accessLogger
+	reloadFn    func() error             // wired by main for POST /admin/reload
+	cache       *cache.LRU               // opt-in response cache (nil = disabled)
+	costRates   map[string]CostRate      // per-model USD pricing (nil = all free)
+	ctxPolicies map[string]ContextPolicy // per-model context guardrail (nil = off)
 
 	defaultTimeout time.Duration            // per-request timeout (0 = unbounded)
 	timeouts       map[string]time.Duration // per-model overrides (real ids)
@@ -260,6 +261,18 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	}
 	if model != peek.Model {
 		body = rewriteModelField(body, model)
+	}
+
+	// Context guardrail: reject (or warn) an over-context request before doing any
+	// work, rather than letting the engine silently truncate it.
+	if pol, ok := s.ctxPolicies[model]; ok && pol.Limit > 0 {
+		if over, reason := contextOverage(body, pol.Limit); over {
+			if pol.Enforce {
+				writeErr(w, codeContextLength, reason)
+				return
+			}
+			w.Header().Set("X-Mainspring-Context-Warning", reason)
+		}
 	}
 
 	// Per-tenant token budget (enforced pre-request; accrued after).
