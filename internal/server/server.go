@@ -350,6 +350,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 							Model:        model,
 							Tenant:       auth.TenantOf(r.Context()),
 							Status:       f.val.Status,
+							Coalesced:    true,
 							Bytes:        int64(len(f.val.Body)),
 							PromptTokens: f.val.Prompt,
 							TokensEst:    f.val.Completion,
@@ -423,7 +424,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	if ((cacheKey != "") || coLeader) && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
-	s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
+	retries := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
 	// (4xx is a client error, not the backend's fault).
 	s.breaker.OnResult(served, cap.status < 500)
@@ -470,6 +471,8 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			TokensEst:    completion,
 			Exact:        exact,
 			CostUSD:      s.costFor(served, prompt, completion, exact),
+			Retries:      retries,
+			Fallback:     served != model,
 		})
 	}
 }
