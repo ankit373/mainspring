@@ -263,18 +263,18 @@ func cmdModels() *cobra.Command {
 
 func cmdServe() *cobra.Command {
 	var (
-		addr         string
-		modelFlags   []string
-		apiKeys      []string
-		keepAlive    int
-		maxLoaded    int
-		maxResident  int
-		maxInflight  int
-		maxQueue     int
-		usageLedger  string
-		backendName  string
-		ollamaHost   string
-		llamaServer  string
+		addr        string
+		modelFlags  []string
+		apiKeys     []string
+		keepAlive   int
+		maxLoaded   int
+		maxResident int
+		maxInflight int
+		maxQueue    int
+		usageLedger string
+		backendName string
+		ollamaHost  string
+		llamaServer string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -329,7 +329,7 @@ func cmdServe() *cobra.Command {
 				return fmt.Errorf("no models configured — pass --model id=/path/to/weights.gguf or add models to the config")
 			}
 
-			return runServe(cmd.Context(), cfg)
+			return runServe(cmd.Context(), cfg, configPath(cmd))
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", ":11500", "listen address")
@@ -347,16 +347,16 @@ func cmdServe() *cobra.Command {
 	return cmd
 }
 
-func runServe(ctx context.Context, cfg config.Config) error {
+// modelSpecs builds the scheduler specs from config, applying the default
+// backend to models that don't name one. Shared by startup and SIGHUP reload.
+func modelSpecs(cfg config.Config) []backend.ModelSpec {
 	fallback := defaultBackendName(cfg)
 	specs := make([]backend.ModelSpec, 0, len(cfg.Models))
-	needed := map[string]bool{}
 	for _, m := range cfg.Models {
 		bname := m.Backend
 		if bname == "" {
 			bname = fallback
 		}
-		needed[bname] = true
 		specs = append(specs, backend.ModelSpec{
 			ID:        m.ID,
 			Backend:   bname,
@@ -365,6 +365,42 @@ func runServe(ctx context.Context, cfg config.Config) error {
 			GPULayers: m.GPULayers,
 			ExtraArgs: m.Args,
 		})
+	}
+	return specs
+}
+
+// authTenants resolves the effective tenant set from config: explicit tenants
+// when present, otherwise each API key as an admin tenant (mirroring auth.New).
+// Shared by startup and SIGHUP reload.
+func authTenants(cfg config.Config) []auth.Tenant {
+	if len(cfg.Tenants) > 0 {
+		ts := make([]auth.Tenant, 0, len(cfg.Tenants))
+		for _, t := range cfg.Tenants {
+			ts = append(ts, auth.Tenant{
+				Name:        t.Name,
+				Key:         t.Key,
+				Role:        auth.Role(t.Role),
+				RateRPM:     t.RateRPM,
+				TokenBudget: t.TokenBudget,
+				WindowSec:   t.WindowSec,
+			})
+		}
+		return ts
+	}
+	ts := make([]auth.Tenant, 0, len(cfg.APIKeys))
+	for i, k := range cfg.APIKeys {
+		if k = strings.TrimSpace(k); k != "" {
+			ts = append(ts, auth.Tenant{Name: fmt.Sprintf("key-%d", i+1), Key: k, Role: auth.RoleAdmin})
+		}
+	}
+	return ts
+}
+
+func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
+	specs := modelSpecs(cfg)
+	needed := map[string]bool{}
+	for _, sp := range specs {
+		needed[sp.Backend] = true
 	}
 
 	// Construct and detect only the backends the configured models actually use.
@@ -448,6 +484,17 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		}()
 	}
 
+	// SIGHUP hot-reloads the safe subset of config (models, aliases, tenants)
+	// from the config file without dropping in-flight requests or the listener.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			reloadConfig(cfgPath, cfg, sched, authn)
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -475,6 +522,42 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		sched.Shutdown(context.Background())
 		return nil
 	}
+}
+
+// reloadConfig re-reads the config file on SIGHUP and applies the safe subset:
+// model specs, aliases, and tenants. Changes to the listen address, backend set,
+// or ledger require a restart and are only logged. A missing config file is a
+// no-op (so a flag-only launch is never wiped by an accidental signal).
+func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator) {
+	resolved := path
+	if resolved == "" {
+		resolved = config.DefaultPath()
+	}
+	if _, err := os.Stat(resolved); err != nil {
+		fmt.Fprintf(os.Stderr, "SIGHUP: no config file at %s; reload skipped\n", resolved)
+		return
+	}
+	newCfg, err := config.Load(resolved)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "SIGHUP: reload failed, keeping current config: %v\n", err)
+		return
+	}
+
+	// Unsafe changes can't be applied to a running listener — warn, don't apply.
+	if newCfg.Addr != startup.Addr {
+		fmt.Fprintf(os.Stderr, "SIGHUP: addr change (%s → %s) requires a restart; ignoring\n", startup.Addr, newCfg.Addr)
+	}
+	if newCfg.Backend != startup.Backend {
+		fmt.Fprintf(os.Stderr, "SIGHUP: backend change (%q → %q) requires a restart; ignoring\n", startup.Backend, newCfg.Backend)
+	}
+
+	if err := sched.Reload(modelSpecs(newCfg), newCfg.Aliases); err != nil {
+		fmt.Fprintf(os.Stderr, "SIGHUP: model/alias reload rejected, keeping current: %v\n", err)
+		return
+	}
+	authn.Reload(authTenants(newCfg))
+	fmt.Printf("SIGHUP: reloaded %d model(s), %d alias(es), %d tenant(s)\n",
+		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
 }
 
 // allBackends constructs every known backend adapter (for detection/listing).
@@ -575,21 +658,7 @@ func preloadIDs(cfg config.Config) []string {
 // buildAuth constructs the authenticator from config: explicit tenants take
 // precedence over the flat api_keys list.
 func buildAuth(cfg config.Config) *auth.Authenticator {
-	if len(cfg.Tenants) > 0 {
-		ts := make([]auth.Tenant, 0, len(cfg.Tenants))
-		for _, t := range cfg.Tenants {
-			ts = append(ts, auth.Tenant{
-				Name:        t.Name,
-				Key:         t.Key,
-				Role:        auth.Role(t.Role),
-				RateRPM:     t.RateRPM,
-				TokenBudget: t.TokenBudget,
-				WindowSec:   t.WindowSec,
-			})
-		}
-		return auth.NewTenants(ts)
-	}
-	return auth.New(cfg.APIKeys)
+	return auth.NewTenants(authTenants(cfg))
 }
 
 // parseModelFlag parses "id=/path/to/weights.gguf".
