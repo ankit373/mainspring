@@ -41,7 +41,11 @@ MIT and already win; Mainspring wraps them).
   from a bounded TTL+LRU cache without touching the backend; hits carry `X-Mainspring-Cache: hit` and
   are counted in /metrics (`mainspring_cache_hits_total`). Streaming and non-zero-temperature requests
   bypass it. Enable with `cache_max_entries` (+ optional `cache_ttl_seconds`, default 300s).
-- Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, requests, residency, inflight/queued)
+- Cost accounting: optional per-model USD pricing (`input_usd_per_mtok` / `output_usd_per_mtok`, 0 =
+  local/free) turns real token usage into spend. Cost lands in the usage ledger (`cost_usd`), a
+  `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
+  cost signal a router (Hydra) can route away from. Priced only from exact usage; never guessed.
+- Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, cost, requests, residency, inflight/queued)
   and an append-only JSONL usage ledger. Token counts are real when the upstream reports a usage object
   (non-stream body, or the streaming `include_usage` final chunk) and estimated otherwise.
 - Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
