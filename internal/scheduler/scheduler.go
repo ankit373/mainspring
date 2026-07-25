@@ -11,6 +11,8 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -194,11 +196,16 @@ func (s *Scheduler) Reload(specList []backend.ModelSpec, aliases map[string]stri
 func specEqual(a, b backend.ModelSpec) bool {
 	if a.ID != b.ID || a.Backend != b.Backend || a.Path != b.Path ||
 		a.CtxSize != b.CtxSize || a.GPULayers != b.GPULayers ||
-		len(a.ExtraArgs) != len(b.ExtraArgs) {
+		len(a.ExtraArgs) != len(b.ExtraArgs) || len(a.Fallbacks) != len(b.Fallbacks) {
 		return false
 	}
 	for i := range a.ExtraArgs {
 		if a.ExtraArgs[i] != b.ExtraArgs[i] {
+			return false
+		}
+	}
+	for i := range a.Fallbacks {
+		if a.Fallbacks[i] != b.Fallbacks[i] {
 			return false
 		}
 	}
@@ -273,36 +280,49 @@ func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, e
 	if !ok {
 		return nil, fmt.Errorf("unknown model %q", modelID)
 	}
-	be, ok := s.backends[spec.Backend]
-	if !ok {
-		return nil, fmt.Errorf("model %q references unavailable backend %q", modelID, spec.Backend)
-	}
 
-	// Estimate the incoming footprint (if the backend can) so byte-budget
-	// admission can make room before starting the process.
-	var incoming int64
-	if est, ok := be.(backend.MemoryEstimator); ok {
-		incoming = est.EstimateMemory(spec)
-	}
+	// Try each candidate backend in order (primary, then fallbacks) until one
+	// starts. This is the failover path: a down or misconfigured backend hands
+	// off to the next. The runner reports which backend actually served via its
+	// Capabilities (surfaced as X-Mainspring-Backend).
+	candidates := spec.Candidates()
+	var errs []string
+	for _, bname := range candidates {
+		be, ok := s.backends[bname]
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: backend not configured", bname))
+			continue
+		}
 
-	// Evict LRU victims (outside the lock) until there is room.
-	for _, v := range s.makeRoom(incoming) {
-		_ = v.Stop(context.Background())
-	}
+		// Estimate the incoming footprint (if the backend can) so byte-budget
+		// admission can make room before starting the process.
+		var incoming int64
+		if est, ok := be.(backend.MemoryEstimator); ok {
+			incoming = est.EstimateMemory(spec)
+		}
+		for _, v := range s.makeRoom(incoming) {
+			_ = v.Stop(context.Background())
+		}
 
-	r, err := be.Start(ctx, spec)
-	if err != nil {
-		return nil, err
-	}
+		r, err := be.Start(ctx, spec)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", bname, err))
+			continue
+		}
 
-	s.mu.Lock()
-	l := &loaded{runner: r, spec: spec, lastUsed: time.Now()}
-	if s.keepAlive > 0 {
-		l.timer = time.AfterFunc(s.keepAlive, func() { s.idleEvict(modelID) })
+		s.mu.Lock()
+		l := &loaded{runner: r, spec: spec, lastUsed: time.Now()}
+		if s.keepAlive > 0 {
+			l.timer = time.AfterFunc(s.keepAlive, func() { s.idleEvict(modelID) })
+		}
+		s.running[modelID] = l
+		s.mu.Unlock()
+		if bname != spec.Backend {
+			log.Printf("model %q failed over to backend %q (primary %q unavailable)", modelID, bname, spec.Backend)
+		}
+		return r, nil
 	}
-	s.running[modelID] = l
-	s.mu.Unlock()
-	return r, nil
+	return nil, fmt.Errorf("model %q: all backends failed [%s]", modelID, strings.Join(errs, "; "))
 }
 
 // makeRoom evicts LRU entries until there is room for a model of `incoming`

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -340,6 +341,61 @@ func TestReloadConcurrentWithResolve(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// downBackend fails every Start (simulates a dead engine).
+type downBackend struct{ name string }
+
+func (b *downBackend) Name() string { return b.name }
+func (b *downBackend) Detect(context.Context) backend.Availability {
+	return backend.Availability{Name: b.name, Present: false, Reason: "down"}
+}
+func (b *downBackend) Start(context.Context, backend.ModelSpec) (backend.Runner, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func TestFallbackToSecondBackend(t *testing.T) {
+	up := &fakeBackend{}
+	backends := map[string]backend.Backend{"a": &downBackend{name: "a"}, "b": up}
+	spec := backend.ModelSpec{ID: "m", Backend: "a", Fallbacks: []string{"b"}}
+	s := New(backends, []backend.ModelSpec{spec}, Options{MaxLoaded: 2})
+
+	r, err := s.EnsureLoaded(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("fallback should have loaded via b: %v", err)
+	}
+	if r.(*fakeRunner).id != "m" {
+		t.Fatalf("unexpected runner id %q", r.(*fakeRunner).id)
+	}
+	if up.startCount("m") != 1 {
+		t.Fatalf("fallback backend b should have started the model, starts=%d", up.startCount("m"))
+	}
+}
+
+func TestFallbackAllDownErrors(t *testing.T) {
+	backends := map[string]backend.Backend{"a": &downBackend{name: "a"}, "b": &downBackend{name: "b"}}
+	spec := backend.ModelSpec{ID: "m", Backend: "a", Fallbacks: []string{"b"}}
+	s := New(backends, []backend.ModelSpec{spec}, Options{MaxLoaded: 2})
+
+	if _, err := s.EnsureLoaded(context.Background(), "m"); err == nil {
+		t.Fatal("all candidates down should error")
+	} else if !strings.Contains(err.Error(), "all backends failed") {
+		t.Fatalf("error should mention all backends failed: %v", err)
+	}
+}
+
+func TestCandidatesOrderAndDedup(t *testing.T) {
+	m := backend.ModelSpec{Backend: "a", Fallbacks: []string{"a", "b", "", "c", "b"}}
+	got := m.Candidates()
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("candidates=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("candidates=%v, want %v", got, want)
+		}
+	}
 }
 
 func TestShutdownStopsAll(t *testing.T) {

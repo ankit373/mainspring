@@ -361,6 +361,7 @@ func modelSpecs(cfg config.Config) []backend.ModelSpec {
 		specs = append(specs, backend.ModelSpec{
 			ID:        m.ID,
 			Backend:   bname,
+			Fallbacks: m.Fallbacks,
 			Path:      m.Path,
 			CtxSize:   m.Ctx,
 			GPULayers: m.GPULayers,
@@ -401,10 +402,14 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	specs := modelSpecs(cfg)
 	needed := map[string]bool{}
 	for _, sp := range specs {
-		needed[sp.Backend] = true
+		for _, bname := range sp.Candidates() { // primary + fallbacks
+			needed[bname] = true
+		}
 	}
 
 	// Construct and detect only the backends the configured models actually use.
+	// An absent backend is not fatal when it is only a fallback: we skip it and
+	// require each model to retain at least one present candidate (checked below).
 	backends := make(map[string]backend.Backend, len(needed))
 	for name := range needed {
 		be, err := newBackendByName(name, cfg)
@@ -412,9 +417,23 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 			return err
 		}
 		if av := be.Detect(ctx); !av.Present {
-			return fmt.Errorf("%s backend unavailable: %s", name, av.Reason)
+			fmt.Fprintf(os.Stderr, "warning: backend %q unavailable (%s) — skipping; models will fail over if configured\n", name, av.Reason)
+			continue
 		}
 		backends[name] = be
+	}
+	// Every model must have at least one usable backend among its candidates.
+	for _, sp := range specs {
+		hasBackend := false
+		for _, bname := range sp.Candidates() {
+			if backends[bname] != nil {
+				hasBackend = true
+				break
+			}
+		}
+		if !hasBackend {
+			return fmt.Errorf("model %q has no available backend (tried %v)", sp.ID, sp.Candidates())
+		}
 	}
 
 	sched := scheduler.New(backends, specs, scheduler.Options{
