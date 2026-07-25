@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,8 +47,39 @@ func (t *Tenant) tokenWindow() int {
 
 // Authenticator enforces keys, roles, and quotas.
 type Authenticator struct {
+	mu    sync.RWMutex // guards byKey (SIGHUP reload swaps it)
 	byKey map[string]*Tenant
 	lim   *Limiter
+}
+
+// buildByKey indexes tenants by key, applying role/name defaults and skipping
+// blank keys.
+func buildByKey(ts []Tenant) map[string]*Tenant {
+	byKey := make(map[string]*Tenant, len(ts))
+	for i := range ts {
+		t := ts[i]
+		if t.Key = strings.TrimSpace(t.Key); t.Key == "" {
+			continue
+		}
+		if t.Role == "" {
+			t.Role = RoleInference
+		}
+		if t.Name == "" {
+			t.Name = fmt.Sprintf("tenant-%d", i+1)
+		}
+		tc := t
+		byKey[t.Key] = &tc
+	}
+	return byKey
+}
+
+// Reload atomically swaps the tenant set (e.g. on SIGHUP). The rate/token
+// limiter state is preserved, so surviving keys keep their current windows.
+func (a *Authenticator) Reload(ts []Tenant) {
+	byKey := buildByKey(ts)
+	a.mu.Lock()
+	a.byKey = byKey
+	a.mu.Unlock()
 }
 
 // New builds an authenticator from a flat key list; each key becomes an admin
@@ -64,28 +96,19 @@ func New(keys []string) *Authenticator {
 
 // NewTenants builds an authenticator from explicit tenants.
 func NewTenants(ts []Tenant) *Authenticator {
-	a := &Authenticator{byKey: make(map[string]*Tenant), lim: NewLimiter()}
-	for i := range ts {
-		t := ts[i]
-		if t.Key = strings.TrimSpace(t.Key); t.Key == "" {
-			continue
-		}
-		if t.Role == "" {
-			t.Role = RoleInference
-		}
-		if t.Name == "" {
-			t.Name = fmt.Sprintf("tenant-%d", i+1)
-		}
-		tc := t
-		a.byKey[t.Key] = &tc
-	}
-	return a
+	return &Authenticator{byKey: buildByKey(ts), lim: NewLimiter()}
 }
 
 // Open reports whether the server runs without authentication.
-func (a *Authenticator) Open() bool { return len(a.byKey) == 0 }
+func (a *Authenticator) Open() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.byKey) == 0
+}
 
 func (a *Authenticator) lookup(presented string) *Tenant {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	var found *Tenant
 	for k, t := range a.byKey {
 		if subtle.ConstantTimeCompare([]byte(k), []byte(presented)) == 1 {

@@ -21,11 +21,14 @@ import (
 // each model to the backend named in its ModelSpec.
 type Scheduler struct {
 	backends  map[string]backend.Backend
-	specs     map[string]backend.ModelSpec
-	aliases   map[string]string // friendly name -> target (spec id or another alias)
 	keepAlive time.Duration
 	maxLoaded int
 	maxBytes  int64
+
+	// specsMu guards specs+aliases, which SIGHUP reload swaps at runtime.
+	specsMu sync.RWMutex
+	specs   map[string]backend.ModelSpec
+	aliases map[string]string // friendly name -> target (spec id or another alias)
 
 	mu      sync.Mutex
 	running map[string]*loaded
@@ -84,17 +87,16 @@ func New(backends map[string]backend.Backend, specs []backend.ModelSpec, opts Op
 	}
 }
 
-// Resolve maps a requested model name (which may be an alias, possibly chained)
-// to a real, configured model id. It returns false if the name is neither a
-// configured model nor an alias that resolves to one within maxAliasDepth (the
-// cycle guard). Resolving a real id is idempotent.
-func (s *Scheduler) Resolve(name string) (string, bool) {
+// resolveIn maps name to a real model id within the given spec/alias tables,
+// following alias chains with a depth (cycle) guard. It is a pure function so
+// both live resolution and pre-commit validation share one implementation.
+func resolveIn(specs map[string]backend.ModelSpec, aliases map[string]string, name string) (string, bool) {
 	cur := name
 	for i := 0; i < maxAliasDepth; i++ {
-		if _, ok := s.specs[cur]; ok {
+		if _, ok := specs[cur]; ok {
 			return cur, true
 		}
-		next, ok := s.aliases[cur]
+		next, ok := aliases[cur]
 		if !ok {
 			return "", false
 		}
@@ -103,8 +105,30 @@ func (s *Scheduler) Resolve(name string) (string, bool) {
 	return "", false // exceeded depth => cycle or too-long chain
 }
 
+// validateAliases checks every alias resolves to a real model within the tables.
+func validateAliases(specs map[string]backend.ModelSpec, aliases map[string]string) error {
+	for name := range aliases {
+		if _, ok := resolveIn(specs, aliases, name); !ok {
+			return fmt.Errorf("alias %q does not resolve to a known model (unknown target or cycle)", name)
+		}
+	}
+	return nil
+}
+
+// Resolve maps a requested model name (which may be an alias, possibly chained)
+// to a real, configured model id. It returns false if the name is neither a
+// configured model nor an alias that resolves to one within maxAliasDepth (the
+// cycle guard). Resolving a real id is idempotent.
+func (s *Scheduler) Resolve(name string) (string, bool) {
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
+	return resolveIn(s.specs, s.aliases, name)
+}
+
 // Aliases returns a copy of the configured alias table (friendly name -> target).
 func (s *Scheduler) Aliases() map[string]string {
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
 	out := make(map[string]string, len(s.aliases))
 	for k, v := range s.aliases {
 		out[k] = v
@@ -116,12 +140,69 @@ func (s *Scheduler) Aliases() map[string]string {
 // the cycle guard. It is meant to be called once at startup so misconfiguration
 // fails loud rather than surfacing as a 404 at request time.
 func (s *Scheduler) Validate() error {
-	for name := range s.aliases {
-		if _, ok := s.Resolve(name); !ok {
-			return fmt.Errorf("alias %q does not resolve to a known model (unknown target or cycle)", name)
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
+	return validateAliases(s.specs, s.aliases)
+}
+
+// Reload atomically swaps the model specs and aliases (e.g. on SIGHUP). It
+// rejects the new set if any alias fails to resolve, leaving the old set intact.
+// Running models whose spec changed or was removed are evicted so the next
+// request reloads them under the new spec; unchanged models stay resident.
+// Note: reload does not construct new backends, so a model referencing a
+// backend not already built will only load after a restart.
+func (s *Scheduler) Reload(specList []backend.ModelSpec, aliases map[string]string) error {
+	newSpecs := make(map[string]backend.ModelSpec, len(specList))
+	for _, sp := range specList {
+		newSpecs[sp.ID] = sp
+	}
+	newAliases := make(map[string]string, len(aliases))
+	for k, v := range aliases {
+		newAliases[k] = v
+	}
+	if err := validateAliases(newSpecs, newAliases); err != nil {
+		return err
+	}
+
+	s.specsMu.Lock()
+	s.specs = newSpecs
+	s.aliases = newAliases
+	s.specsMu.Unlock()
+
+	// Evict runners whose spec changed or disappeared.
+	var victims []backend.Runner
+	s.mu.Lock()
+	for id, l := range s.running {
+		ns, ok := newSpecs[id]
+		if !ok || !specEqual(ns, l.spec) {
+			if l.timer != nil {
+				l.timer.Stop()
+			}
+			delete(s.running, id)
+			victims = append(victims, l.runner)
 		}
 	}
+	s.mu.Unlock()
+	for _, r := range victims {
+		_ = r.Stop(context.Background())
+	}
 	return nil
+}
+
+// specEqual reports whether two specs describe the same runtime (so an unchanged
+// model need not be reloaded on config reload).
+func specEqual(a, b backend.ModelSpec) bool {
+	if a.ID != b.ID || a.Backend != b.Backend || a.Path != b.Path ||
+		a.CtxSize != b.CtxSize || a.GPULayers != b.GPULayers ||
+		len(a.ExtraArgs) != len(b.ExtraArgs) {
+		return false
+	}
+	for i := range a.ExtraArgs {
+		if a.ExtraArgs[i] != b.ExtraArgs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Known reports whether a model id is configured or is an alias that resolves
@@ -133,6 +214,8 @@ func (s *Scheduler) Known(id string) bool {
 
 // Models returns the configured model ids.
 func (s *Scheduler) Models() []backend.ModelSpec {
+	s.specsMu.RLock()
+	defer s.specsMu.RUnlock()
 	out := make([]backend.ModelSpec, 0, len(s.specs))
 	for _, sp := range s.specs {
 		out = append(out, sp)
@@ -184,7 +267,9 @@ func (s *Scheduler) EnsureLoaded(ctx context.Context, modelID string) (backend.R
 }
 
 func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, error) {
+	s.specsMu.RLock()
 	spec, ok := s.specs[modelID]
+	s.specsMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown model %q", modelID)
 	}

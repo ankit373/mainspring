@@ -247,6 +247,101 @@ func TestAliasValidation(t *testing.T) {
 	}
 }
 
+func TestReloadSwapsSpecsAndAliases(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a", "b"),
+		Options{MaxLoaded: 3, Aliases: map[string]string{"x": "a"}})
+
+	// New config: drop b, add c, repoint alias x -> c.
+	err := s.Reload(specs("a", "c"), map[string]string{"x": "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Known("c") || s.Known("b") {
+		t.Fatal("Reload must add c and drop b")
+	}
+	if got, _ := s.Resolve("x"); got != "c" {
+		t.Fatalf("alias not repointed: got %q, want c", got)
+	}
+}
+
+func TestReloadEvictsChangedModel(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2})
+	r, _ := s.EnsureLoaded(context.Background(), "a")
+
+	// Same id but a different path => must be evicted (stale runner stopped).
+	changed := []backend.ModelSpec{{ID: "a", Backend: "fake", Path: "/new/path"}}
+	if err := s.Reload(changed, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !r.(*fakeRunner).stopped.Load() {
+		t.Fatal("changed spec should evict (Stop) the running model")
+	}
+	if len(s.Loaded()) != 0 {
+		t.Fatal("evicted model should not remain loaded")
+	}
+}
+
+func TestReloadKeepsUnchangedModelResident(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 3})
+	ra, _ := s.EnsureLoaded(context.Background(), "a")
+
+	// Reload with identical spec for a (plus b): a stays resident, not restarted.
+	if err := s.Reload(specs("a", "b"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("unchanged model must stay resident across reload")
+	}
+	if be.startCount("a") != 1 {
+		t.Fatalf("unchanged model should not reload, starts=%d", be.startCount("a"))
+	}
+}
+
+func TestReloadRejectsBadAliases(t *testing.T) {
+	s := New(bmap(&fakeBackend{}), specs("a"), Options{Aliases: map[string]string{"x": "a"}})
+	// Alias points at a model that won't exist after reload => reject, keep old.
+	if err := s.Reload(specs("a"), map[string]string{"x": "gone"}); err == nil {
+		t.Fatal("Reload must reject unresolvable aliases")
+	}
+	if got, _ := s.Resolve("x"); got != "a" {
+		t.Fatalf("rejected reload must leave old aliases intact, got %q", got)
+	}
+}
+
+func TestReloadConcurrentWithResolve(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 4, Aliases: map[string]string{"x": "a"}})
+
+	var wg sync.WaitGroup
+	// Readers hammer Resolve/EnsureLoaded/Models while writers reload — the race
+	// detector must find no data race on specs/aliases.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				s.Resolve("x")
+				s.Known("a")
+				_ = s.Models()
+				_, _ = s.EnsureLoaded(context.Background(), "a")
+			}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = s.Reload(specs("a", "b"), map[string]string{"x": "a"})
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
 func TestShutdownStopsAll(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 2})

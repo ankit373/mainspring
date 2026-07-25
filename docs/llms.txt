@@ -38,6 +38,9 @@ MIT and already win; Mainspring wraps them).
 - Request correlation: every request carries an `X-Request-ID` (accepted from the client or generated,
   echoed on the response and recorded in the usage ledger); an optional JSONL access log records every
   request (method, path, status, duration).
+- Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
+  in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
+  are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand.
 
 ## Backends
 

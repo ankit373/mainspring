@@ -51,6 +51,33 @@ func TestWrapEnforcesKey(t *testing.T) {
 	}
 }
 
+func TestReloadSwapsTenants(t *testing.T) {
+	a := New([]string{"old"})
+	if a.lookup("old") == nil {
+		t.Fatal("initial key should authenticate")
+	}
+	// Reload with a new key set: old revoked, new admitted.
+	a.Reload([]Tenant{{Name: "svc", Key: "new", Role: RoleAdmin}})
+	if a.lookup("old") != nil {
+		t.Fatal("revoked key must no longer authenticate after reload")
+	}
+	tn := a.lookup("new")
+	if tn == nil || tn.Name != "svc" || tn.Role != RoleAdmin {
+		t.Fatalf("new tenant not admitted after reload: %+v", tn)
+	}
+}
+
+func TestReloadToOpen(t *testing.T) {
+	a := New([]string{"k"})
+	if a.Open() {
+		t.Fatal("keyed auth should not be open")
+	}
+	a.Reload(nil)
+	if !a.Open() {
+		t.Fatal("reloading to no tenants should make the server open")
+	}
+}
+
 func TestTenantRateLimit(t *testing.T) {
 	a := NewTenants([]Tenant{{Name: "t", Key: "k", Role: RoleInference, RateRPM: 2}})
 	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
