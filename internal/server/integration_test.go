@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
@@ -308,6 +309,56 @@ func TestQualityRequiresAdmin(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("inference role should be forbidden, got %d", w.Code)
+	}
+}
+
+func TestCircuitBreakerTripsAndReports(t *testing.T) {
+	// Engine that always 500s so the breaker trips.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	srv := server.New(sched, auth.New(nil), rec)
+	srv.SetBreaker(2, time.Minute) // opens after 2 consecutive failures
+	h := srv.Handler()
+
+	post := func() int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"m1","messages":[]}`)))
+		return w.Code
+	}
+	// Two upstream 500s trip the breaker.
+	if c := post(); c != 500 {
+		t.Fatalf("first call should proxy the 500, got %d", c)
+	}
+	post() // second failure => opens
+	// Now the breaker fast-fails with 503 (no upstream call).
+	if c := post(); c != http.StatusServiceUnavailable {
+		t.Fatalf("open breaker should fast-fail 503, got %d", c)
+	}
+
+	// /v1/quality reports the open breaker.
+	qw := httptest.NewRecorder()
+	h.ServeHTTP(qw, httptest.NewRequest(http.MethodGet, "/v1/quality", nil))
+	if !strings.Contains(qw.Body.String(), `"breaker":"open"`) {
+		t.Fatalf("quality should report open breaker: %s", qw.Body.String())
+	}
+	// /metrics exposes the gauge.
+	mw := httptest.NewRecorder()
+	h.ServeHTTP(mw, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(mw.Body.String(), `mainspring_breaker_open{model="m1"} 1`) {
+		t.Fatalf("metrics should expose breaker gauge: %s", mw.Body.String())
 	}
 }
 

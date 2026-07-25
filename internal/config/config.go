@@ -41,12 +41,15 @@ type Config struct {
 	KeepAliveSeconds int               `yaml:"keep_alive_seconds"`
 	MaxLoaded        int               `yaml:"max_loaded"`
 	MaxResidentMB    int               `yaml:"max_resident_mb,omitempty"`
-	MaxInflight      int               `yaml:"max_inflight,omitempty"`  // concurrent requests per model; 0 = unbounded
-	MaxQueue         int               `yaml:"max_queue,omitempty"`     // extra waiters per model before 503
-	DrainSeconds     int               `yaml:"drain_seconds,omitempty"` // shutdown drain timeout; <=0 => 30s
-	UsageLedger      string            `yaml:"usage_ledger,omitempty"`  // JSONL path; empty => default location
-	AccessLog        string            `yaml:"access_log,omitempty"`    // JSONL access log path; empty => off, "stderr"/"stdout" accepted
-	Backend          string            `yaml:"backend,omitempty"`       // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
+	MaxInflight      int               `yaml:"max_inflight,omitempty"`             // concurrent requests per model; 0 = unbounded
+	MaxQueue         int               `yaml:"max_queue,omitempty"`                // extra waiters per model before 503
+	BreakerThreshold int               `yaml:"breaker_threshold,omitempty"`        // consecutive failures before the circuit opens; 0 = disabled
+	BreakerCooldownS int               `yaml:"breaker_cooldown_seconds,omitempty"` // seconds a tripped breaker stays open; <=0 => 30
+	HealthProbeS     int               `yaml:"health_probe_seconds,omitempty"`     // background health-probe interval; <=0 => off
+	DrainSeconds     int               `yaml:"drain_seconds,omitempty"`            // shutdown drain timeout; <=0 => 30s
+	UsageLedger      string            `yaml:"usage_ledger,omitempty"`             // JSONL path; empty => default location
+	AccessLog        string            `yaml:"access_log,omitempty"`               // JSONL access log path; empty => off, "stderr"/"stdout" accepted
+	Backend          string            `yaml:"backend,omitempty"`                  // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
 	LlamaServerPath  string            `yaml:"llama_server_path,omitempty"`
 	OllamaHost       string            `yaml:"ollama_host,omitempty"`    // e.g. http://127.0.0.1:11434
 	MLXPython        string            `yaml:"mlx_python,omitempty"`     // python interpreter for mlx_lm.server
@@ -80,6 +83,22 @@ func (c Config) DrainTimeout() time.Duration {
 		return 30 * time.Second
 	}
 	return time.Duration(c.DrainSeconds) * time.Second
+}
+
+// BreakerCooldown returns how long a tripped circuit breaker stays open.
+func (c Config) BreakerCooldown() time.Duration {
+	if c.BreakerCooldownS <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.BreakerCooldownS) * time.Second
+}
+
+// HealthProbeInterval returns the background health-probe period (0 = disabled).
+func (c Config) HealthProbeInterval() time.Duration {
+	if c.HealthProbeS <= 0 {
+		return 0
+	}
+	return time.Duration(c.HealthProbeS) * time.Second
 }
 
 // MaxBytes returns the resident byte budget (0 = no byte cap).

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
+	"github.com/ankit373/mainspring/internal/breaker"
 	"github.com/ankit373/mainspring/internal/metrics"
 	"github.com/ankit373/mainspring/internal/scheduler"
 )
@@ -30,10 +31,22 @@ type Server struct {
 	auth     *auth.Authenticator
 	metrics  *metrics.Recorder
 	gate     *gate
+	breaker  *breaker.Group
 	draining atomic.Bool
 	accessMu sync.RWMutex
 	access   *accessLogger
 }
+
+// SetBreaker enables the per-model circuit breaker: after `threshold`
+// consecutive backend failures a model's requests fast-fail with 503 until
+// `cooldown` elapses and a half-open probe succeeds. threshold<=0 disables it.
+func (s *Server) SetBreaker(threshold int, cooldown time.Duration) {
+	s.breaker = breaker.NewGroup(threshold, cooldown)
+}
+
+// Breaker exposes the breaker group (may be a disabled group) for the health
+// prober to feed probe outcomes into.
+func (s *Server) Breaker() *breaker.Group { return s.breaker }
 
 // SetAccessLog enables the structured JSONL access log, writing one line per
 // request to w. Passing nil disables it. Safe to call at startup.
@@ -60,7 +73,13 @@ func (s *Server) SetDraining(v bool) { s.draining.Store(v) }
 // New builds a Server. rec may be nil (metrics disabled). Concurrency gating is
 // off by default; enable it with SetConcurrency.
 func New(sched *scheduler.Scheduler, a *auth.Authenticator, rec *metrics.Recorder) *Server {
-	return &Server{sched: sched, auth: a, metrics: rec, gate: newGate(0, 0)}
+	return &Server{
+		sched:   sched,
+		auth:    a,
+		metrics: rec,
+		gate:    newGate(0, 0),
+		breaker: breaker.NewGroup(0, 0), // disabled until SetBreaker
+	}
 }
 
 // SetConcurrency enables per-model backpressure: at most maxInflight concurrent
@@ -101,6 +120,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 		BudgetBytes:   budget,
 	})
 	s.gate.writePrometheus(w)
+	s.breaker.WritePrometheus(w)
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -228,8 +248,16 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
+	// Circuit breaker: fast-fail while this model's backend is tripped open.
+	if !s.breaker.Allow(model) {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "circuit open: backend for "+model+" is unavailable")
+		return
+	}
+
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
+		s.breaker.OnResult(model, false)
 		writeError(w, http.StatusServiceUnavailable, "load model "+model+": "+err.Error())
 		return
 	}
@@ -239,6 +267,9 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	cap := newCapture(w, start)
 	s.proxyTo(cap, r, runner.BaseURL(), body, extra)
+	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
+	// (4xx is a client error, not the backend's fault).
+	s.breaker.OnResult(model, cap.status < 500)
 
 	prompt, completion, exact := cap.usage()
 	// Token budgets charge total consumption when we have exact usage; otherwise

@@ -24,6 +24,7 @@ import (
 	"github.com/ankit373/mainspring/internal/backend/mlx"
 	"github.com/ankit373/mainspring/internal/backend/ollama"
 	"github.com/ankit373/mainspring/internal/backend/openaiadopt"
+	"github.com/ankit373/mainspring/internal/breaker"
 	"github.com/ankit373/mainspring/internal/build"
 	"github.com/ankit373/mainspring/internal/config"
 	"github.com/ankit373/mainspring/internal/install"
@@ -442,6 +443,9 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 
 	srv := server.New(sched, authn, rec)
 	srv.SetConcurrency(cfg.MaxInflight, cfg.MaxQueue)
+	if cfg.BreakerThreshold > 0 {
+		srv.SetBreaker(cfg.BreakerThreshold, cfg.BreakerCooldown())
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)
@@ -498,6 +502,13 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Background health prober: feed loaded-runner health into the circuit
+	// breaker so a backend that goes bad trips (and recovers) without waiting for
+	// live request failures.
+	if iv := cfg.HealthProbeInterval(); iv > 0 && cfg.BreakerThreshold > 0 {
+		go runHealthProber(ctx, iv, sched, srv.Breaker())
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -521,6 +532,31 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 		fmt.Println("reclaiming loaded models…")
 		sched.Shutdown(context.Background())
 		return nil
+	}
+}
+
+// runHealthProber periodically probes each loaded runner's health and feeds the
+// result into the circuit breaker (StatusReady => success, anything else =>
+// failure). It exits when ctx is cancelled. A "down" runner trips the breaker;
+// a recovered one closes it, without waiting for live traffic to notice.
+func runHealthProber(ctx context.Context, interval time.Duration, sched *scheduler.Scheduler, brk *breaker.Group) {
+	if brk == nil || !brk.Enabled() {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			for _, ri := range sched.Loaded() {
+				pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				status := ri.Runner.Health(pctx)
+				cancel()
+				brk.OnResult(ri.ID, status == backend.StatusReady)
+			}
+		}
 	}
 }
 
