@@ -1,0 +1,74 @@
+# Mainspring
+
+> A backend-agnostic local inference server. One stable OpenAI/Anthropic-compatible API in front,
+> pluggable engines (llama.cpp, MLX, Ollama, LM Studio, llamafile, GPT4All) behind it. Build the
+> local-inference control plane, not the kernels.
+
+Mainspring is an open-source (MIT) Go server. It presents a single stable API and runs models on
+pluggable engine backends, installing/running only what a requested model needs. Its value is the
+layer *around* inference — fail-loud correctness, VRAM-residency-aware scheduling, multi-tenant
+governance, observability, and verified OpenAI/Anthropic-compat — not the compute kernels (those are
+MIT and already win; Mainspring wraps them).
+
+## What it does
+
+- One versioned API: OpenAI (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+  `/v1/models`) and Anthropic (`/v1/messages`, streaming translated).
+- Per-model backend routing: one server can serve a GGUF via llama.cpp, an MLX model, and an adopted
+  Ollama/LM Studio/llamafile/GPT4All model simultaneously.
+- Fail loud, never silently degrade: `/capabilities` reports the real backend, device, GPU offload,
+  and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
+  headers on every response.
+- VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
+  unload, optional preload at startup.
+- Standalone governance: API keys → named tenants with roles (admin/inference) and per-tenant request
+  rate limits (429 + Retry-After) and token budgets.
+- Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.
+- Observability: Prometheus `/metrics` (TTFT, tokens/sec, requests, residency, inflight/queued) and an
+  append-only JSONL usage ledger.
+- Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
+  Never installs anything unless you run `mainspring install`.
+- Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
+  ServiceMonitor, GPU node scheduling).
+- Graceful drain: `/readyz` flips to 503 on shutdown so load balancers stop routing while in-flight
+  requests finish.
+
+## Backends
+
+- Managed (subprocess, opt-in install): `llamacpp` (llama-server), `mlx` (mlx_lm.server, Apple Silicon).
+- Adopt-only (detect a running server; never installed): `ollama` (:11434), `lmstudio` (:1234),
+  `llamafile` (:8080), `gpt4all` (:4891).
+
+## CLI
+
+- `mainspring serve` — start the server (flags: --addr, --config, --model id=path, --api-key,
+  --backend, --max-loaded, --max-resident-mb, --max-inflight, --max-queue, --keep-alive, --usage-ledger).
+- `mainspring backends` — detect engines on this host (system vs managed).
+- `mainspring models` — list configured models and their resolved backend.
+- `mainspring install <backend>` — opt-in, checksum-verified engine install (--url/--sha256 or a
+  signed manifest via --pubkey/--manifest-sig).
+- `mainspring doctor` — diagnose backends, config, models, ports, accelerator.
+- `mainspring version`.
+
+## Endpoints
+
+- `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
+- `POST /v1/messages` (Anthropic, text; streaming translated)
+- `GET /v1/models`, `GET /capabilities`, `GET /metrics`, `GET /healthz`, `GET /readyz`
+
+## Non-goals
+
+- Mainspring does not build inference kernels — it wraps permissively-licensed engines.
+- No GUI dependency; headless-first daemon.
+
+## Relationship to Hydra
+
+Mainspring is an inference *head*; Hydra (https://github.com/ankit373/hydra) is a provider-neutral
+router/trust control plane above it. They meet over the standard OpenAI-compatible boundary. Hydra
+works with everything (Ollama, OpenAI, Anthropic, any OpenAI-compatible endpoint) and never depends on
+Mainspring — Mainspring is simply the head Hydra integrates with best.
+
+## Links
+
+- Repository: https://github.com/ankit373/mainspring
+- License: MIT
