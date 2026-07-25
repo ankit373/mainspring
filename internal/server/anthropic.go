@@ -145,7 +145,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	s.auth.AddTokens(tenant, charge)
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
-			Time: start, RequestID: RequestID(r.Context()),
+			Time: start, RequestID: RequestID(r.Context()), TraceID: TraceID(r.Context()),
 			Model: model, Tenant: auth.TenantOf(r.Context()),
 			Status: http.StatusOK, Stream: req.Stream,
 			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
@@ -601,5 +601,8 @@ func postJSON(ctx context.Context, url string, body []byte) (*http.Response, err
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tp := outgoingTraceparent(ctx); tp != "" {
+		req.Header.Set("traceparent", tp)
+	}
 	return proxyClient.Do(req)
 }

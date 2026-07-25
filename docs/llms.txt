@@ -43,7 +43,9 @@ MIT and already win; Mainspring wraps them).
   requests finish.
 - Request correlation: every request carries an `X-Request-ID` (accepted from the client or generated,
   echoed on the response and recorded in the usage ledger); an optional JSONL access log records every
-  request (method, path, status, duration).
+  request (method, path, status, duration). W3C `traceparent` is accepted/continued (or generated), the
+  `trace_id` is recorded alongside `request_id`, and a child traceparent is forwarded to the engine so
+  distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK.
 - Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
   in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
   are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand.
