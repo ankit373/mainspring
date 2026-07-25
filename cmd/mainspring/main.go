@@ -20,6 +20,7 @@ import (
 	"github.com/ankit373/mainspring/internal/backend/lmstudio"
 	"github.com/ankit373/mainspring/internal/backend/mlx"
 	"github.com/ankit373/mainspring/internal/backend/ollama"
+	"github.com/ankit373/mainspring/internal/backend/openaiadopt"
 	"github.com/ankit373/mainspring/internal/build"
 	"github.com/ankit373/mainspring/internal/config"
 	"github.com/ankit373/mainspring/internal/install"
@@ -72,6 +73,7 @@ func cmdBackends() *cobra.Command {
 				ollama.New(cfg.OllamaHost),
 				mlx.New(cfg.MLXPython),
 				lmstudio.New(cfg.LMStudioHost),
+				openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"), "start it with `./model.llamafile --server`"),
 			}
 			fmt.Printf("%-12s %-9s %-9s %s\n", "BACKEND", "PRESENT", "SOURCE", "DETAIL")
 			for _, b := range backends {
@@ -95,7 +97,7 @@ func cmdBackends() *cobra.Command {
 				}
 				fmt.Printf("%-12s %-9v %-9s %s\n", av.Name, av.Present, source, detail)
 			}
-			fmt.Println("\ndetect-and-adopt-only (planned): llamafile, gpt4all")
+			fmt.Println("\ndetect-and-adopt-only (planned): gpt4all")
 			return nil
 		},
 	}
@@ -382,9 +384,20 @@ func newBackendByName(name string, cfg config.Config) (backend.Backend, error) {
 		return mlx.New(cfg.MLXPython), nil
 	case "lmstudio":
 		return lmstudio.New(cfg.LMStudioHost), nil
+	case "llamafile":
+		return openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"),
+			"start it with `./model.llamafile --server --port 8080`"), nil
 	default:
-		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx|lmstudio)", name)
+		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx|lmstudio|llamafile)", name)
 	}
+}
+
+// orDefault returns v if non-empty, else def.
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 // defaultBackendName resolves the fallback backend for models that don't set one.

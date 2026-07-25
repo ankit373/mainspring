@@ -49,7 +49,8 @@ type Config struct {
 	LlamaServerPath  string   `yaml:"llama_server_path,omitempty"`
 	OllamaHost       string   `yaml:"ollama_host,omitempty"`   // e.g. http://127.0.0.1:11434
 	MLXPython        string   `yaml:"mlx_python,omitempty"`    // python interpreter for mlx_lm.server
-	LMStudioHost     string   `yaml:"lmstudio_host,omitempty"` // e.g. http://127.0.0.1:1234
+	LMStudioHost     string   `yaml:"lmstudio_host,omitempty"`  // e.g. http://127.0.0.1:1234
+	LlamafileHost    string   `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
 	Models           []Model  `yaml:"models,omitempty"`
 }
 
