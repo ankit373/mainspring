@@ -87,7 +87,7 @@
 </div></header>
 
 <div class="hero"><div class="wrap">
-  <div class="eyebrow">Local inference control plane</div>
+  <div class="eyebrow">Local inference control plane · v0.1.0</div>
   <h1>The <span class="g">mainspring</span> that drives your local AI.</h1>
   <p class="lede">One stable OpenAI/Anthropic-compatible API in front. Pluggable engines —
     llama.cpp, MLX, Ollama, LM Studio, llamafile, GPT4All — behind it. Install and run only what a
@@ -122,14 +122,15 @@
 <section id="features"><div class="wrap">
   <h2>What it does</h2>
   <div class="grid">
-    <div class="card"><h3>One API, many engines</h3><p>Per-model backend routing: serve a GGUF via llama.cpp, an MLX model, and an adopted Ollama model from one server.</p></div>
-    <div class="card"><h3>Fail loud</h3><p><code>/capabilities</code> reports the real backend, device, GPU offload, and effective context — never silently smaller than asked.</p></div>
+    <div class="card"><h3>One API, many engines</h3><p>OpenAI <em>and</em> Anthropic (<code>/v1/messages</code>, tool use + streaming). Per-model backend routing, friendly aliases, and ordered fallback chains — serve several models on different engines from one server.</p></div>
+    <div class="card"><h3>Fail loud</h3><p><code>/capabilities</code> and <code>X-Mainspring-*</code> headers report the real backend, device, GPU offload, and effective context — never silently smaller than asked.</p></div>
     <div class="card"><h3>VRAM-aware scheduling</h3><p>Single-flight load, LRU + byte-budget eviction, KeepAlive idle-unload, optional preload at startup.</p></div>
-    <div class="card"><h3>Standalone governance</h3><p>API keys → named tenants with roles and per-tenant rate limits (429 + Retry-After) and token budgets.</p></div>
-    <div class="card"><h3>Backpressure</h3><p>Per-model in-flight limit + bounded queue. Returns 503 instead of letting latency collapse.</p></div>
-    <div class="card"><h3>Observability</h3><p>Prometheus <code>/metrics</code> (TTFT, tokens/sec, residency, inflight/queued) + a JSONL usage ledger.</p></div>
+    <div class="card"><h3>Reliability</h3><p>Per-model in-flight limit + bounded queue (503 backpressure), a circuit breaker with a background health probe, and a structured error taxonomy (stable <code>code</code> per class).</p></div>
+    <div class="card"><h3>Standalone governance</h3><p>API-key tenants with roles, per-tenant rate limits (429 + Retry-After) and token budgets, with real streaming token accounting.</p></div>
+    <div class="card"><h3>Observability &amp; tracing</h3><p>Prometheus <code>/metrics</code>, a JSONL usage ledger, <code>X-Request-ID</code> + W3C <code>traceparent</code> propagation, and an optional access log.</p></div>
+    <div class="card"><h3>Operability</h3><p>SIGHUP hot-reload, an admin API (drain / reload / model load-unload), TLS, graceful drain, and a <code>/v1/quality</code> routing signal a router can consume.</p></div>
     <div class="card"><h3>Verified install</h3><p>Opt-in only. SHA-256-pinned artifacts, optional ed25519 signed manifests. Never installs silently.</p></div>
-    <div class="card"><h3>Deploy anywhere</h3><p>Single static binary, distroless image, Helm chart (HPA, ServiceMonitor, GPU nodes). Graceful drain via <code>/readyz</code>.</p></div>
+    <div class="card"><h3>Deploy anywhere</h3><p>Single static binary, distroless image, Helm chart (HPA, ServiceMonitor, GPU nodes).</p></div>
   </div>
 </div></section>
 
@@ -181,11 +182,13 @@ curl localhost:11500/capabilities</pre>
         <li><code>POST /v1/chat/completions</code></li>
         <li><code>POST /v1/completions</code></li>
         <li><code>POST /v1/embeddings</code></li>
-        <li><code>POST /v1/messages</code> — Anthropic (streaming translated)</li>
+        <li><code>POST /v1/messages</code> — Anthropic (tool use + streaming)</li>
         <li><code>GET /v1/models</code></li>
         <li><code>GET /capabilities</code> — fail-loud device/offload/ctx</li>
+        <li><code>GET /v1/quality</code> — per-model routing signal</li>
         <li><code>GET /metrics</code> — Prometheus</li>
         <li><code>GET /healthz</code> · <code>GET /readyz</code></li>
+        <li><code>POST /admin/{drain,reload,models/{id}/load,models/{id}/unload}</code></li>
       </ul>
     </div>
     <div>
