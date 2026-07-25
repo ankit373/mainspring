@@ -495,6 +495,14 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	}
 	// Wire the admin reload endpoint to the same reload path SIGHUP uses.
 	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, sched, authn) })
+	// Per-request timeouts: global default + per-model overrides.
+	perModelTimeout := map[string]time.Duration{}
+	for _, m := range cfg.Models {
+		if m.TimeoutS > 0 {
+			perModelTimeout[m.ID] = time.Duration(m.TimeoutS) * time.Second
+		}
+	}
+	srv.SetTimeouts(cfg.RequestTimeout(), perModelTimeout)
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)

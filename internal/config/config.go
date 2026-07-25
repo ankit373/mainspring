@@ -20,7 +20,8 @@ type Model struct {
 	Path      string   `yaml:"path"`
 	Ctx       int      `yaml:"ctx,omitempty"`
 	GPULayers int      `yaml:"gpu_layers,omitempty"`
-	Preload   bool     `yaml:"preload,omitempty"` // load at startup instead of on first request
+	Preload   bool     `yaml:"preload,omitempty"`         // load at startup instead of on first request
+	TimeoutS  int      `yaml:"timeout_seconds,omitempty"` // per-model request timeout; 0 = use server default
 	Args      []string `yaml:"args,omitempty"`
 }
 
@@ -60,8 +61,9 @@ type Config struct {
 	LlamafileHost    string            `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
 	GPT4AllHost      string            `yaml:"gpt4all_host,omitempty"`   // e.g. http://127.0.0.1:4891
 	Models           []Model           `yaml:"models,omitempty"`
-	Aliases          map[string]string `yaml:"aliases,omitempty"`         // friendly name -> model id (or another alias)
-	DiscoverModels   bool              `yaml:"discover_models,omitempty"` // auto-expose models from present adopt backends
+	Aliases          map[string]string `yaml:"aliases,omitempty"`                 // friendly name -> model id (or another alias)
+	DiscoverModels   bool              `yaml:"discover_models,omitempty"`         // auto-expose models from present adopt backends
+	RequestTimeoutS  int               `yaml:"request_timeout_seconds,omitempty"` // default per-request timeout; 0 = unbounded
 }
 
 // Default returns the baseline configuration.
@@ -103,6 +105,14 @@ func (c Config) HealthProbeInterval() time.Duration {
 		return 0
 	}
 	return time.Duration(c.HealthProbeS) * time.Second
+}
+
+// RequestTimeout returns the default per-request timeout (0 = unbounded).
+func (c Config) RequestTimeout() time.Duration {
+	if c.RequestTimeoutS <= 0 {
+		return 0
+	}
+	return time.Duration(c.RequestTimeoutS) * time.Second
 }
 
 // TLSEnabled reports whether both a cert and key are configured (=> serve HTTPS).

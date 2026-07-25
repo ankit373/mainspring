@@ -387,6 +387,46 @@ func TestTraceparentForwardedAndLogged(t *testing.T) {
 	}
 }
 
+func TestRequestTimeoutReturns504(t *testing.T) {
+	// Engine sleeps longer than the per-model timeout, honoring cancellation.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(3 * time.Second):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"late"}}]}`)
+		case <-r.Context().Done(): // client (mainspring) cancelled on deadline
+			return
+		}
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	srv := server.New(sched, auth.New(nil), rec)
+	srv.SetTimeouts(0, map[string]time.Duration{"m1": 150 * time.Millisecond})
+	h := srv.Handler()
+
+	start := time.Now()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m1","messages":[]}`)))
+	if w.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 on timeout, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"timeout"`) {
+		t.Fatalf("timeout error should carry code timeout: %s", w.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("timeout should fire fast (~150ms), took %v", elapsed)
+	}
+}
+
 func TestCircuitBreakerTripsAndReports(t *testing.T) {
 	// Engine that always 500s so the breaker trips.
 	mux := http.NewServeMux()
