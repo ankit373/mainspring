@@ -138,7 +138,8 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	s.auth.AddTokens(tenant, charge)
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
-			Time: start, Model: model, Tenant: auth.TenantOf(r.Context()),
+			Time: start, RequestID: RequestID(r.Context()),
+			Model: model, Tenant: auth.TenantOf(r.Context()),
 			Status: http.StatusOK, Stream: req.Stream,
 			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
 			PromptTokens: prompt, TokensEst: completion, Exact: exact,

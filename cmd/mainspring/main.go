@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -406,6 +407,12 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	srv := server.New(sched, authn, rec)
 	srv.SetConcurrency(cfg.MaxInflight, cfg.MaxQueue)
 
+	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)
+	} else if alClose != nil {
+		defer alClose()
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Handler(),
@@ -517,6 +524,33 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// configureAccessLog wires the server's structured access log from the config
+// value: "" disables it, "stderr"/"stdout" stream to those, any other value is a
+// file path (parent dirs created). It returns a close func for the file (nil
+// otherwise) so the caller can defer cleanup.
+func configureAccessLog(srv *server.Server, dest string) (func(), error) {
+	switch dest {
+	case "":
+		return nil, nil
+	case "stderr":
+		srv.SetAccessLog(os.Stderr)
+		return nil, nil
+	case "stdout":
+		srv.SetAccessLog(os.Stdout)
+		return nil, nil
+	default:
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(dest, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		srv.SetAccessLog(f)
+		return func() { _ = f.Close() }, nil
+	}
 }
 
 // defaultBackendName resolves the fallback backend for models that don't set one.

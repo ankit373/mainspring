@@ -194,6 +194,61 @@ func TestModelAliasResolvesAndRewritesBody(t *testing.T) {
 	}
 }
 
+func TestRequestIDEchoedAndGenerated(t *testing.T) {
+	eng := fakeEngine(t)
+	h := newTestServer(t, &engineBackend{baseURL: eng.URL}, nil)
+
+	// Client-supplied id is echoed.
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("X-Request-ID", "client-42")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("X-Request-ID"); got != "client-42" {
+		t.Fatalf("client id not echoed: %q", got)
+	}
+
+	// Absent id is generated.
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if got := w2.Header().Get("X-Request-ID"); len(got) < 4 {
+		t.Fatalf("id not generated: %q", got)
+	}
+
+	// A malicious id is dropped in favor of a generated one.
+	req3 := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req3.Header.Set("X-Request-ID", "evil\nInjected: 1")
+	w3 := httptest.NewRecorder()
+	h.ServeHTTP(w3, req3)
+	if strings.Contains(w3.Header().Get("X-Request-ID"), "\n") {
+		t.Fatal("newline id must not be echoed")
+	}
+}
+
+func TestAccessLogEmitsJSONL(t *testing.T) {
+	eng := fakeEngine(t)
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	srv := server.New(sched, auth.New(nil), rec)
+	var buf strings.Builder
+	srv.SetAccessLog(&buf)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("X-Request-ID", "logtest-1")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	line := buf.String()
+	if !strings.Contains(line, `"request_id":"logtest-1"`) ||
+		!strings.Contains(line, `"path":"/healthz"`) ||
+		!strings.Contains(line, `"status":200`) {
+		t.Fatalf("access log line malformed: %s", line)
+	}
+}
+
 func TestUnknownAndMissingModel(t *testing.T) {
 	eng := fakeEngine(t)
 	h := newTestServer(t, &engineBackend{baseURL: eng.URL}, nil)
