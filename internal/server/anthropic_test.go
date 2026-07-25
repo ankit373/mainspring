@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,6 +76,96 @@ func TestMessagesStreaming(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "event-stream") {
 		t.Fatalf("expected SSE content-type, got %q", ct)
+	}
+}
+
+// toolEngineServer builds a /v1/messages handler backed by a fake OpenAI engine
+// that returns a tool call (non-stream) or streams one (SSE) when it sees tools.
+func toolEngineServer(t *testing.T) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		stream := strings.Contains(string(body), `"stream":true`)
+		if stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl := w.(http.Flusher)
+			// Tool call streamed in fragments across two chunks.
+			frames := []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}`,
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"paris\"}"}}]},"finish_reason":"tool_calls"}]}`,
+			}
+			for _, f := range frames {
+				_, _ = io.WriteString(w, "data: "+f+"\n\n")
+				fl.Flush()
+			}
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			fl.Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	return server.New(sched, auth.New(nil), rec).Handler()
+}
+
+func TestMessagesToolUseNonStreaming(t *testing.T) {
+	h := toolEngineServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"m1","max_tokens":64,"tools":[{"name":"get_weather","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"weather in paris?"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["stop_reason"] != "tool_use" {
+		t.Fatalf("stop_reason=%v, want tool_use", resp["stop_reason"])
+	}
+	content := resp["content"].([]any)
+	var found map[string]any
+	for _, c := range content {
+		if b := c.(map[string]any); b["type"] == "tool_use" {
+			found = b
+		}
+	}
+	if found == nil {
+		t.Fatalf("no tool_use block: %v", content)
+	}
+	if found["name"] != "get_weather" {
+		t.Fatalf("tool name=%v", found["name"])
+	}
+	input := found["input"].(map[string]any)
+	if input["city"] != "paris" {
+		t.Fatalf("tool input=%v", input)
+	}
+}
+
+func TestMessagesToolUseStreaming(t *testing.T) {
+	h := toolEngineServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"m1","max_tokens":64,"stream":true,"tools":[{"name":"get_weather"}],"messages":[{"role":"user","content":"weather?"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	body := w.Body.String()
+	for _, want := range []string{
+		`"type":"tool_use"`, `"name":"get_weather"`, "input_json_delta",
+		`"partial_json"`, "event: content_block_stop", `"stop_reason":"tool_use"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("tool stream missing %q:\n%s", want, body)
+		}
 	}
 }
 
