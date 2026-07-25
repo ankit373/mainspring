@@ -68,6 +68,12 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		clampModels = append(clampModels, m)
 	}
 
+	// Models with precise (exact-tokenization) guardrail enabled.
+	preciseModels := make([]string, 0, len(s.preciseCtx))
+	for m := range s.preciseCtx {
+		preciseModels = append(preciseModels, m)
+	}
+
 	// Cost-rate presence (per model) — booleans, never the dollar values.
 	priced := make(map[string]bool, len(s.costRates))
 	for m := range s.costRates {
@@ -93,6 +99,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"concurrency":     concurrency,
 		"context_guard":   guard,
 		"clamp_models":    clampModels,
+		"precise_models":  preciseModels,
 		"model_fallbacks": s.modelFallbacks,
 		"cost_rates_set":  priced,
 	})

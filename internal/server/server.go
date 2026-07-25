@@ -42,6 +42,7 @@ type Server struct {
 	ctxPolicies    map[string]ContextPolicy // per-model context guardrail (nil = off)
 	modelFallbacks map[string][]string      // per-model fallback chains (nil = none)
 	clampLimits    map[string]int           // per-model ctx window for max_tokens clamping (nil = off)
+	preciseCtx     map[string]bool          // per-model exact-tokenization guardrail (nil = estimate only)
 	coalesce       *flightGroup             // single-flight de-dup of identical in-flight requests (nil = off)
 
 	retryMax     int           // additional upstream attempts after the first (0 = no retry)
@@ -277,9 +278,17 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	body = s.applyClamp(w, model, body)
 
 	// Context guardrail: reject (or warn) an over-context request before doing any
-	// work, rather than letting the engine silently truncate it.
+	// work, rather than letting the engine silently truncate it. Prompt tokens are
+	// counted exactly when precise_context is on and the model is resident on a
+	// tokenizing engine, otherwise estimated; the method is reported on a header.
 	if pol, ok := s.ctxPolicies[model]; ok && pol.Limit > 0 {
-		if over, reason := contextOverage(body, pol.Limit); over {
+		promptTok, exact := s.guardPromptTokens(r.Context(), model, body)
+		method := "estimated"
+		if exact {
+			method = "exact"
+		}
+		w.Header().Set("X-Mainspring-Context-Method", method)
+		if over, reason := contextOverageDetail(body, pol.Limit, promptTok, exact); over {
 			if pol.Enforce {
 				writeErr(w, codeContextLength, reason)
 				return

@@ -43,6 +43,10 @@ type Model struct {
 	// true shrinks an over-budget max_tokens to fit; false disables it. nil =
 	// inherit global. Needs Ctx > 0.
 	ClampMaxTokens *bool `yaml:"clamp_max_tokens,omitempty"`
+
+	// PreciseContext overrides the server-wide precise_context for this model.
+	// nil = inherit global.
+	PreciseContext *bool `yaml:"precise_context,omitempty"`
 }
 
 // Tenant is a named principal with an API key, role, and quotas.
@@ -87,6 +91,7 @@ type Config struct {
 	CacheMaxEntries  int               `yaml:"cache_max_entries,omitempty"`       // opt-in response cache size; 0 = disabled
 	CacheTTLS        int               `yaml:"cache_ttl_seconds,omitempty"`       // response-cache entry lifetime; <=0 => 300s
 	EnforceContext   bool              `yaml:"enforce_context,omitempty"`         // reject requests exceeding a model's context window (needs model ctx > 0)
+	PreciseContext   bool              `yaml:"precise_context,omitempty"`         // count guardrail prompt tokens exactly when the model is resident on a tokenizing engine
 	ClampMaxTokens   bool              `yaml:"clamp_max_tokens,omitempty"`        // shrink an over-budget max_tokens to fit the context window (needs model ctx > 0)
 	RetryMax         int               `yaml:"retry_max,omitempty"`               // additional upstream attempts after the first on transient failure; 0 = no retry
 	RetryBackoffMs   int               `yaml:"retry_backoff_ms,omitempty"`        // base of the exponential retry backoff; <=0 => 100ms when retry enabled
