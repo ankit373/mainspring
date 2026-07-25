@@ -536,6 +536,10 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if len(ctxPolicies) > 0 {
 		srv.SetContextGuard(ctxPolicies)
 	}
+	// Bounded retry of transient upstream failures (disabled unless retry_max > 0).
+	if cfg.RetryMax > 0 {
+		srv.SetRetry(cfg.RetryMax, cfg.RetryBackoff())
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)

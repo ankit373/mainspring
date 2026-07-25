@@ -41,6 +41,9 @@ type Server struct {
 	costRates   map[string]CostRate      // per-model USD pricing (nil = all free)
 	ctxPolicies map[string]ContextPolicy // per-model context guardrail (nil = off)
 
+	retryMax     int           // additional upstream attempts after the first (0 = no retry)
+	retryBackoff time.Duration // base of the exponential retry backoff
+
 	defaultTimeout time.Duration            // per-request timeout (0 = unbounded)
 	timeouts       map[string]time.Duration // per-model overrides (real ids)
 }
