@@ -13,6 +13,7 @@ type errorCode string
 
 const (
 	codeInvalidRequest     errorCode = "invalid_request"
+	codeContextLength      errorCode = "context_length_exceeded"
 	codeMethodNotAllowed   errorCode = "method_not_allowed"
 	codeModelNotFound      errorCode = "model_not_found"
 	codeUnauthorized       errorCode = "unauthorized"
@@ -33,6 +34,7 @@ var codeMeta = map[errorCode]struct {
 	typ    string
 }{
 	codeInvalidRequest:     {http.StatusBadRequest, "invalid_request_error"},
+	codeContextLength:      {http.StatusBadRequest, "invalid_request_error"},
 	codeMethodNotAllowed:   {http.StatusMethodNotAllowed, "invalid_request_error"},
 	codeModelNotFound:      {http.StatusNotFound, "not_found_error"},
 	codeUnauthorized:       {http.StatusUnauthorized, "authentication_error"},

@@ -28,6 +28,11 @@ type Model struct {
 	// adopting a metered API backend or to model cost for routing/accounting.
 	InputUSDPerMTok  float64 `yaml:"input_usd_per_mtok,omitempty"`
 	OutputUSDPerMTok float64 `yaml:"output_usd_per_mtok,omitempty"`
+
+	// EnforceContext overrides the server-wide enforce_context for this model:
+	// true rejects over-context requests, false only warns. nil = inherit global.
+	// The guardrail needs Ctx > 0 (the model's context window) to be active.
+	EnforceContext *bool `yaml:"enforce_context,omitempty"`
 }
 
 // Tenant is a named principal with an API key, role, and quotas.
@@ -71,6 +76,7 @@ type Config struct {
 	RequestTimeoutS  int               `yaml:"request_timeout_seconds,omitempty"` // default per-request timeout; 0 = unbounded
 	CacheMaxEntries  int               `yaml:"cache_max_entries,omitempty"`       // opt-in response cache size; 0 = disabled
 	CacheTTLS        int               `yaml:"cache_ttl_seconds,omitempty"`       // response-cache entry lifetime; <=0 => 300s
+	EnforceContext   bool              `yaml:"enforce_context,omitempty"`         // reject requests exceeding a model's context window (needs model ctx > 0)
 }
 
 // Default returns the baseline configuration.

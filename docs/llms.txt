@@ -37,6 +37,11 @@ MIT and already win; Mainspring wraps them).
 - Circuit breaker + health probe: after N consecutive backend failures a model's requests fast-fail with
   503 (no timeout paid) until a cooldown elapses and a half-open probe succeeds; an optional background
   health probe trips/recovers the breaker without waiting for live traffic. State in /metrics and /v1/quality.
+- Context guardrail (opt-in): when a model's context window is known, `enforce_context` rejects a
+  request that cannot fit (400 `context_length_exceeded`) instead of letting the engine silently
+  truncate it. The requested-output check (`max_tokens` > context) is exact; the prompt-size check is a
+  conservative tokenizer-free estimate. A per-model override can downgrade enforcement to a warning
+  header (`X-Mainspring-Context-Warning`). Turns the fail-loud context *warning* into an enforceable limit.
 - Response cache (opt-in): identical deterministic (temperature 0) non-streaming requests are served
   from a bounded TTL+LRU cache without touching the backend; hits carry `X-Mainspring-Cache: hit` and
   are counted in /metrics (`mainspring_cache_hits_total`). Streaming and non-zero-temperature requests

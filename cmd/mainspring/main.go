@@ -517,6 +517,25 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if len(costRates) > 0 {
 		srv.SetCostRates(costRates)
 	}
+	// Context guardrail: reject/warn requests that exceed a model's context
+	// window. Active per model only when its ctx is known (>0) and enforcement is
+	// on globally or overridden true for that model.
+	ctxPolicies := map[string]server.ContextPolicy{}
+	for _, m := range cfg.Models {
+		if m.Ctx <= 0 {
+			continue
+		}
+		enforce := cfg.EnforceContext
+		if m.EnforceContext != nil {
+			enforce = *m.EnforceContext
+		}
+		if cfg.EnforceContext || (m.EnforceContext != nil && *m.EnforceContext) {
+			ctxPolicies[m.ID] = server.ContextPolicy{Limit: m.Ctx, Enforce: enforce}
+		}
+	}
+	if len(ctxPolicies) > 0 {
+		srv.SetContextGuard(ctxPolicies)
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)
