@@ -216,19 +216,27 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	cap := newCapture(w, start)
 	s.proxyTo(cap, r, runner.BaseURL(), body, extra)
 
-	tokens := cap.tokensEstimate()
-	s.auth.AddTokens(tenant, tokens)
+	prompt, completion, exact := cap.usage()
+	// Token budgets charge total consumption when we have exact usage; otherwise
+	// only the (estimated) output count is known.
+	charge := completion
+	if exact {
+		charge = prompt + completion
+	}
+	s.auth.AddTokens(tenant, charge)
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
-			Time:       start,
-			Model:      peek.Model,
-			Tenant:     auth.TenantOf(r.Context()),
-			Status:     cap.status,
-			Stream:     cap.stream,
-			DurationMs: float64(time.Since(start).Microseconds()) / 1000.0,
-			TTFTMs:     cap.ttftMs(),
-			Bytes:      cap.bytes,
-			TokensEst:  tokens,
+			Time:         start,
+			Model:        model,
+			Tenant:       auth.TenantOf(r.Context()),
+			Status:       cap.status,
+			Stream:       cap.stream,
+			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
+			TTFTMs:       cap.ttftMs(),
+			Bytes:        cap.bytes,
+			PromptTokens: prompt,
+			TokensEst:    completion,
+			Exact:        exact,
 		})
 	}
 }

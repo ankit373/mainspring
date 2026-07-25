@@ -18,24 +18,27 @@ import (
 
 // Event is one completed inference request.
 type Event struct {
-	Time       time.Time `json:"time"`
-	Model      string    `json:"model"`
-	Tenant     string    `json:"tenant,omitempty"`
-	Status     int       `json:"status"`
-	Stream     bool      `json:"stream"`
-	DurationMs float64   `json:"duration_ms"`
-	TTFTMs     float64   `json:"ttft_ms,omitempty"` // 0 when not applicable
-	Bytes      int64     `json:"bytes"`
-	TokensEst  int64     `json:"tokens_est"`
+	Time         time.Time `json:"time"`
+	Model        string    `json:"model"`
+	Tenant       string    `json:"tenant,omitempty"`
+	Status       int       `json:"status"`
+	Stream       bool      `json:"stream"`
+	DurationMs   float64   `json:"duration_ms"`
+	TTFTMs       float64   `json:"ttft_ms,omitempty"` // 0 when not applicable
+	Bytes        int64     `json:"bytes"`
+	PromptTokens int64     `json:"prompt_tokens,omitempty"` // real, when upstream reports usage
+	TokensEst    int64     `json:"tokens_est"`              // output tokens: real when Exact, else estimated
+	Exact        bool      `json:"exact_usage,omitempty"`   // true when counts came from an upstream usage object
 }
 
 type modelStat struct {
-	requests  map[int]int64 // status -> count
-	durSumMs  float64
-	durCount  int64
-	ttftSumMs float64
-	ttftCount int64
-	tokens    int64
+	requests     map[int]int64 // status -> count
+	durSumMs     float64
+	durCount     int64
+	ttftSumMs    float64
+	ttftCount    int64
+	tokens       int64
+	promptTokens int64
 }
 
 // Recorder aggregates events and appends them to a ledger file.
@@ -92,6 +95,7 @@ func (r *Recorder) Record(ev Event) {
 		st.ttftCount++
 	}
 	st.tokens += ev.TokensEst
+	st.promptTokens += ev.PromptTokens
 	r.mu.Unlock()
 
 	r.appendLedger(ev)
@@ -133,7 +137,8 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 		rows = append(rows, rowT{
 			model: m, statuses: cp,
 			durSum: st.durSumMs, ttftSum: st.ttftSumMs,
-			durCount: st.durCount, ttftCount: st.ttftCount, tokens: st.tokens,
+			durCount: st.durCount, ttftCount: st.ttftCount,
+			tokens: st.tokens, promptTokens: st.promptTokens,
 		})
 	}
 	r.mu.Unlock()
@@ -155,7 +160,8 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 	writeCounterI(w, "mainspring_request_duration_ms_count", "Request count by model (duration observations).", rows, func(rw rowT) int64 { return rw.durCount })
 	writeCounter(w, "mainspring_ttft_ms_sum", "Total time-to-first-token in ms by model (streaming).", rows, func(rw rowT) float64 { return rw.ttftSum })
 	writeCounterI(w, "mainspring_ttft_ms_count", "TTFT observations by model.", rows, func(rw rowT) int64 { return rw.ttftCount })
-	writeCounterI(w, "mainspring_tokens_estimated_total", "Estimated output tokens by model.", rows, func(rw rowT) int64 { return rw.tokens })
+	writeCounterI(w, "mainspring_tokens_estimated_total", "Output tokens by model (real when upstream reports usage, else estimated).", rows, func(rw rowT) int64 { return rw.tokens })
+	writeCounterI(w, "mainspring_prompt_tokens_total", "Prompt (input) tokens by model (real; 0 when upstream reports no usage).", rows, func(rw rowT) int64 { return rw.promptTokens })
 
 	fmt.Fprint(w, "# HELP mainspring_loaded_models Currently resident models.\n# TYPE mainspring_loaded_models gauge\n")
 	fmt.Fprintf(w, "mainspring_loaded_models %d\n", g.LoadedModels)
@@ -166,10 +172,10 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 }
 
 type rowT = struct {
-	model                       string
-	statuses                    map[int]int64
-	durSum, ttftSum             float64
-	durCount, ttftCount, tokens int64
+	model                                     string
+	statuses                                  map[int]int64
+	durSum, ttftSum                           float64
+	durCount, ttftCount, tokens, promptTokens int64
 }
 
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {

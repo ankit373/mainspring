@@ -26,8 +26,9 @@ MIT and already win; Mainspring wraps them).
 - Standalone governance: API keys → named tenants with roles (admin/inference) and per-tenant request
   rate limits (429 + Retry-After) and token budgets.
 - Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.
-- Observability: Prometheus `/metrics` (TTFT, tokens/sec, requests, residency, inflight/queued) and an
-  append-only JSONL usage ledger.
+- Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, requests, residency, inflight/queued)
+  and an append-only JSONL usage ledger. Token counts are real when the upstream reports a usage object
+  (non-stream body, or the streaming `include_usage` final chunk) and estimated otherwise.
 - Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
   Never installs anything unless you run `mainspring install`.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,

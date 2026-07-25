@@ -52,13 +52,24 @@ func (c *captureWriter) Write(p []byte) (int, error) {
 	c.bytes += int64(len(p))
 	if c.stream {
 		c.sseFrames += int64(bytes.Count(p, []byte("data:")))
-	} else if len(c.tail) < tailCap {
-		c.tail = append(c.tail, p...)
-		if len(c.tail) > tailCap {
-			c.tail = c.tail[:tailCap]
-		}
 	}
+	// Keep a rolling window of the last tailCap bytes for both modes. usage is at
+	// the end of a non-stream body and in the final include_usage SSE chunk, so a
+	// trailing window (not a prefix) is what lets us read it without buffering all.
+	c.appendTail(p)
 	return c.ResponseWriter.Write(p)
+}
+
+// appendTail keeps the last tailCap bytes seen, with bounded backing memory.
+func (c *captureWriter) appendTail(p []byte) {
+	if len(p) >= tailCap {
+		c.tail = append(c.tail[:0], p[len(p)-tailCap:]...)
+		return
+	}
+	c.tail = append(c.tail, p...)
+	if len(c.tail) > tailCap {
+		c.tail = append(c.tail[:0], c.tail[len(c.tail)-tailCap:]...)
+	}
 }
 
 // Flush forwards to the underlying flusher so SSE streaming still works.
@@ -68,23 +79,34 @@ func (c *captureWriter) Flush() {
 	}
 }
 
-var completionTokensRe = regexp.MustCompile(`"completion_tokens"\s*:\s*(\d+)`)
+var (
+	completionTokensRe = regexp.MustCompile(`"completion_tokens"\s*:\s*(\d+)`)
+	promptTokensRe     = regexp.MustCompile(`"prompt_tokens"\s*:\s*(\d+)`)
+)
 
-// tokensEstimate returns a rough output-token count: parsed usage for
-// non-streaming responses, else SSE data-frame count minus the [DONE] frame.
-func (c *captureWriter) tokensEstimate() int64 {
-	if !c.stream {
-		if m := completionTokensRe.FindSubmatch(c.tail); m != nil {
-			if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
-				return n
-			}
+// usage returns the request's token usage. When the upstream reported a usage
+// object — in the non-stream body, or in the streaming final chunk emitted for
+// stream_options.include_usage — the real prompt/completion counts are returned
+// with exact=true. Otherwise completion falls back to the SSE frame estimate and
+// prompt is unknown (0), exact=false.
+func (c *captureWriter) usage() (prompt, completion int64, exact bool) {
+	if m := completionTokensRe.FindSubmatch(c.tail); m != nil {
+		if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
+			completion, exact = n, true
 		}
-		return 0
 	}
-	if c.sseFrames > 1 {
-		return c.sseFrames - 1 // subtract the [DONE] frame
+	if m := promptTokensRe.FindSubmatch(c.tail); m != nil {
+		if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
+			prompt = n
+		}
 	}
-	return 0
+	if exact {
+		return prompt, completion, true
+	}
+	if c.stream && c.sseFrames > 1 {
+		return 0, c.sseFrames - 1, false // subtract the [DONE] frame
+	}
+	return 0, 0, false
 }
 
 // ttftMs is the time-to-first-token in ms (streaming only; 0 otherwise).
