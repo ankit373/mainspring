@@ -198,6 +198,55 @@ func TestUnknownModel(t *testing.T) {
 	}
 }
 
+func TestAliasResolution(t *testing.T) {
+	s := New(bmap(&fakeBackend{}), specs("real-a"),
+		Options{MaxLoaded: 1, Aliases: map[string]string{"gpt-4o": "real-a", "fast": "gpt-4o"}})
+
+	if got, ok := s.Resolve("gpt-4o"); !ok || got != "real-a" {
+		t.Fatalf("direct alias => %q,%v; want real-a,true", got, ok)
+	}
+	if got, ok := s.Resolve("fast"); !ok || got != "real-a" {
+		t.Fatalf("chained alias => %q,%v; want real-a,true", got, ok)
+	}
+	if got, ok := s.Resolve("real-a"); !ok || got != "real-a" {
+		t.Fatalf("real id resolve should be idempotent, got %q,%v", got, ok)
+	}
+	if _, ok := s.Resolve("missing"); ok {
+		t.Fatal("unknown name must not resolve")
+	}
+	if !s.Known("gpt-4o") || s.Known("missing") {
+		t.Fatal("Known must follow alias resolution")
+	}
+
+	// An alias loads the underlying real model.
+	r, err := s.EnsureLoaded(context.Background(), "fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.(*fakeRunner).id != "real-a" {
+		t.Fatalf("alias loaded %q, want real-a", r.(*fakeRunner).id)
+	}
+}
+
+func TestAliasValidation(t *testing.T) {
+	// Unknown target.
+	bad := New(bmap(&fakeBackend{}), specs("a"), Options{Aliases: map[string]string{"x": "nope"}})
+	if err := bad.Validate(); err == nil {
+		t.Fatal("alias to unknown target must fail Validate")
+	}
+	// Cycle.
+	cyc := New(bmap(&fakeBackend{}), specs("a"),
+		Options{Aliases: map[string]string{"x": "y", "y": "x"}})
+	if err := cyc.Validate(); err == nil {
+		t.Fatal("alias cycle must fail Validate")
+	}
+	// Valid.
+	ok := New(bmap(&fakeBackend{}), specs("a"), Options{Aliases: map[string]string{"x": "a"}})
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid alias failed Validate: %v", err)
+	}
+}
+
 func TestShutdownStopsAll(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 2})

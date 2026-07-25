@@ -83,27 +83,32 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing required field: model")
 		return
 	}
-	if !s.sched.Known(req.Model) {
+	// Resolve aliases. The upstream call and metrics key on the real id; the
+	// client-facing response echoes the requested name (Anthropic convention).
+	requested := req.Model
+	model, ok := s.sched.Resolve(req.Model)
+	if !ok {
 		writeError(w, http.StatusNotFound, "model not found: "+req.Model)
 		return
 	}
+	req.Model = model
 
 	tenant, _ := auth.FromContext(r.Context())
 	if !s.auth.AllowTokens(tenant) {
 		writeError(w, http.StatusTooManyRequests, "token budget exceeded")
 		return
 	}
-	release, ok := s.gate.acquire(r.Context(), req.Model)
+	release, ok := s.gate.acquire(r.Context(), model)
 	if !ok {
 		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests for "+req.Model)
+		writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests for "+model)
 		return
 	}
 	defer release()
 
-	runner, err := s.sched.EnsureLoaded(r.Context(), req.Model)
+	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "load model "+req.Model+": "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "load model "+model+": "+err.Error())
 		return
 	}
 	for k, v := range s.failLoudHeaders(r.Context(), runner) {
@@ -119,15 +124,15 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var tokens int64
 	if req.Stream {
-		tokens = s.messagesStream(w, r.Context(), runner.BaseURL(), oaiBody, req.Model)
+		tokens = s.messagesStream(w, r.Context(), runner.BaseURL(), oaiBody, requested)
 	} else {
-		tokens = s.messagesJSON(w, r.Context(), runner.BaseURL(), oaiBody, req.Model)
+		tokens = s.messagesJSON(w, r.Context(), runner.BaseURL(), oaiBody, requested)
 	}
 
 	s.auth.AddTokens(tenant, tokens)
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
-			Time: start, Model: req.Model, Tenant: auth.TenantOf(r.Context()),
+			Time: start, Model: model, Tenant: auth.TenantOf(r.Context()),
 			Status: http.StatusOK, Stream: req.Stream,
 			DurationMs: float64(time.Since(start).Microseconds()) / 1000.0,
 			TokensEst:  tokens,

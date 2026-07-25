@@ -35,24 +35,25 @@ type Tenant struct {
 
 // Config is the full server configuration.
 type Config struct {
-	Addr             string   `yaml:"addr"`
-	APIKeys          []string `yaml:"api_keys,omitempty"`
-	Tenants          []Tenant `yaml:"tenants,omitempty"`
-	KeepAliveSeconds int      `yaml:"keep_alive_seconds"`
-	MaxLoaded        int      `yaml:"max_loaded"`
-	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`
-	MaxInflight      int      `yaml:"max_inflight,omitempty"` // concurrent requests per model; 0 = unbounded
-	MaxQueue         int      `yaml:"max_queue,omitempty"`    // extra waiters per model before 503
-	DrainSeconds     int      `yaml:"drain_seconds,omitempty"` // shutdown drain timeout; <=0 => 30s
-	UsageLedger      string   `yaml:"usage_ledger,omitempty"` // JSONL path; empty => default location
-	Backend          string   `yaml:"backend,omitempty"`      // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
-	LlamaServerPath  string   `yaml:"llama_server_path,omitempty"`
-	OllamaHost       string   `yaml:"ollama_host,omitempty"`   // e.g. http://127.0.0.1:11434
-	MLXPython        string   `yaml:"mlx_python,omitempty"`    // python interpreter for mlx_lm.server
-	LMStudioHost     string   `yaml:"lmstudio_host,omitempty"`  // e.g. http://127.0.0.1:1234
-	LlamafileHost    string   `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
-	GPT4AllHost      string   `yaml:"gpt4all_host,omitempty"`   // e.g. http://127.0.0.1:4891
-	Models           []Model  `yaml:"models,omitempty"`
+	Addr             string            `yaml:"addr"`
+	APIKeys          []string          `yaml:"api_keys,omitempty"`
+	Tenants          []Tenant          `yaml:"tenants,omitempty"`
+	KeepAliveSeconds int               `yaml:"keep_alive_seconds"`
+	MaxLoaded        int               `yaml:"max_loaded"`
+	MaxResidentMB    int               `yaml:"max_resident_mb,omitempty"`
+	MaxInflight      int               `yaml:"max_inflight,omitempty"`  // concurrent requests per model; 0 = unbounded
+	MaxQueue         int               `yaml:"max_queue,omitempty"`     // extra waiters per model before 503
+	DrainSeconds     int               `yaml:"drain_seconds,omitempty"` // shutdown drain timeout; <=0 => 30s
+	UsageLedger      string            `yaml:"usage_ledger,omitempty"`  // JSONL path; empty => default location
+	Backend          string            `yaml:"backend,omitempty"`       // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
+	LlamaServerPath  string            `yaml:"llama_server_path,omitempty"`
+	OllamaHost       string            `yaml:"ollama_host,omitempty"`    // e.g. http://127.0.0.1:11434
+	MLXPython        string            `yaml:"mlx_python,omitempty"`     // python interpreter for mlx_lm.server
+	LMStudioHost     string            `yaml:"lmstudio_host,omitempty"`  // e.g. http://127.0.0.1:1234
+	LlamafileHost    string            `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
+	GPT4AllHost      string            `yaml:"gpt4all_host,omitempty"`   // e.g. http://127.0.0.1:4891
+	Models           []Model           `yaml:"models,omitempty"`
+	Aliases          map[string]string `yaml:"aliases,omitempty"` // friendly name -> model id (or another alias)
 }
 
 // Default returns the baseline configuration.

@@ -383,7 +383,11 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		KeepAlive: cfg.KeepAlive(),
 		MaxLoaded: cfg.MaxLoaded,
 		MaxBytes:  cfg.MaxBytes(),
+		Aliases:   cfg.Aliases,
 	})
+	if err := sched.Validate(); err != nil {
+		return fmt.Errorf("invalid model aliases: %w", err)
+	}
 	authn := buildAuth(cfg)
 
 	ledgerPath := cfg.UsageLedger

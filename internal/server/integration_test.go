@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -144,6 +145,52 @@ func TestFailLoudWarningPropagates(t *testing.T) {
 	}
 	if !strings.Contains(w.Header().Get("X-Mainspring-Warning"), "CPU") {
 		t.Fatalf("expected CPU-fallback warning header, got %q", w.Header().Get("X-Mainspring-Warning"))
+	}
+}
+
+func TestModelAliasResolvesAndRewritesBody(t *testing.T) {
+	// Engine records the "model" it actually received so we can assert the alias
+	// was rewritten to the real id before proxying.
+	var gotModel string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var p struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &p)
+		gotModel = p.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2, Aliases: map[string]string{"gpt-4o": "m1"}},
+	)
+	rec, _ := metrics.New("")
+	h := server.New(sched, auth.New(nil), rec).Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if gotModel != "m1" {
+		t.Fatalf("upstream received model=%q, want the resolved id m1", gotModel)
+	}
+
+	// /v1/models lists the alias alongside the real model.
+	mreq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	mw := httptest.NewRecorder()
+	h.ServeHTTP(mw, mreq)
+	if !strings.Contains(mw.Body.String(), "gpt-4o") || !strings.Contains(mw.Body.String(), "m1") {
+		t.Fatalf("/v1/models should list alias and real id: %s", mw.Body.String())
 	}
 }
 
