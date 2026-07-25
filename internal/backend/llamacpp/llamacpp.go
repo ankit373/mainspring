@@ -198,7 +198,7 @@ type runner struct {
 
 var healthClient = &http.Client{Timeout: 2 * time.Second}
 
-func (r *runner) BaseURL() string   { return r.baseURL }
+func (r *runner) BaseURL() string    { return r.baseURL }
 func (r *runner) MemoryBytes() int64 { return r.mem }
 
 // waitReady polls /health until the server is ready, the process dies, or ctx
@@ -321,7 +321,7 @@ func (r *runner) propsCtx(ctx context.Context) int {
 		return 0
 	}
 	var p struct {
-		NCtx                       int `json:"n_ctx"`
+		NCtx                      int `json:"n_ctx"`
 		DefaultGenerationSettings struct {
 			NCtx int `json:"n_ctx"`
 		} `json:"default_generation_settings"`
@@ -399,4 +399,3 @@ func atoi(s string) int {
 	}
 	return n
 }
-

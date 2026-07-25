@@ -60,7 +60,8 @@ type Config struct {
 	LlamafileHost    string            `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
 	GPT4AllHost      string            `yaml:"gpt4all_host,omitempty"`   // e.g. http://127.0.0.1:4891
 	Models           []Model           `yaml:"models,omitempty"`
-	Aliases          map[string]string `yaml:"aliases,omitempty"` // friendly name -> model id (or another alias)
+	Aliases          map[string]string `yaml:"aliases,omitempty"`         // friendly name -> model id (or another alias)
+	DiscoverModels   bool              `yaml:"discover_models,omitempty"` // auto-expose models from present adopt backends
 }
 
 // Default returns the baseline configuration.

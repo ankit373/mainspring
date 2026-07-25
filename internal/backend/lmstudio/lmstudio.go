@@ -66,6 +66,9 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 	return &runner{host: b.Host, spec: spec}, nil
 }
 
+// ListModels enumerates the models the LM Studio server currently exposes.
+func (b *Backend) ListModels(ctx context.Context) ([]string, error) { return b.listModels(ctx) }
+
 func (b *Backend) listModels(ctx context.Context) ([]string, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, b.Host+"/v1/models", nil)
 	resp, err := client.Do(req)
