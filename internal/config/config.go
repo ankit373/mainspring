@@ -15,7 +15,8 @@ import (
 // Model is one servable model entry.
 type Model struct {
 	ID        string   `yaml:"id"`
-	Backend   string   `yaml:"backend,omitempty"` // per-model backend; empty => server default
+	Backend   string   `yaml:"backend,omitempty"`   // primary backend; empty => server default
+	Fallbacks []string `yaml:"fallbacks,omitempty"` // ordered backends to fail over to
 	Path      string   `yaml:"path"`
 	Ctx       int      `yaml:"ctx,omitempty"`
 	GPULayers int      `yaml:"gpu_layers,omitempty"`

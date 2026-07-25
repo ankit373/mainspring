@@ -312,6 +312,39 @@ func TestQualityRequiresAdmin(t *testing.T) {
 	}
 }
 
+// downBackend fails every Start (a dead engine) for failover tests.
+type downBackend struct{}
+
+func (b *downBackend) Name() string { return "down" }
+func (b *downBackend) Detect(context.Context) backend.Availability {
+	return backend.Availability{Name: "down", Present: false}
+}
+func (b *downBackend) Start(context.Context, backend.ModelSpec) (backend.Runner, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func TestFailoverServesFromFallbackBackend(t *testing.T) {
+	eng := fakeEngine(t)
+	sched := scheduler.New(
+		map[string]backend.Backend{"primary": &downBackend{}, "backup": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "primary", Fallbacks: []string{"backup"}}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	h := server.New(sched, auth.New(nil), rec).Handler()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m1","messages":[]}`)))
+	if w.Code != 200 {
+		t.Fatalf("failover should serve 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	// The surviving backend is surfaced fail-loud.
+	if w.Header().Get("X-Mainspring-Backend") != "fake" {
+		t.Fatalf("X-Mainspring-Backend should reflect the serving backend, got %q", w.Header().Get("X-Mainspring-Backend"))
+	}
+}
+
 func TestCircuitBreakerTripsAndReports(t *testing.T) {
 	// Engine that always 500s so the breaker trips.
 	mux := http.NewServeMux()
