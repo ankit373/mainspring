@@ -394,6 +394,30 @@ func (s *Scheduler) idleEvict(modelID string) {
 	_ = r.Stop(context.Background())
 }
 
+// Unload evicts a specific model if resident, stopping its runner and reclaiming
+// its memory. It resolves aliases first. It returns true if a model was
+// unloaded, false if it was not resident. The model can be reloaded on the next
+// request.
+func (s *Scheduler) Unload(modelID string) bool {
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
+	s.mu.Lock()
+	l, ok := s.running[modelID]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	if l.timer != nil {
+		l.timer.Stop()
+	}
+	delete(s.running, modelID)
+	r := l.runner
+	s.mu.Unlock()
+	_ = r.Stop(context.Background())
+	return true
+}
+
 // touch marks a loaded model as recently used (caller holds s.mu).
 func (s *Scheduler) touch(l *loaded) {
 	l.lastUsed = time.Now()

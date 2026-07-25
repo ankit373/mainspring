@@ -35,6 +35,7 @@ type Server struct {
 	draining atomic.Bool
 	accessMu sync.RWMutex
 	access   *accessLogger
+	reloadFn func() error // wired by main for POST /admin/reload
 }
 
 // SetBreaker enables the per-model circuit breaker: after `threshold`
@@ -102,6 +103,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/completions", s.inference)
 	mux.HandleFunc("/v1/embeddings", s.inference)
 	mux.HandleFunc("/v1/messages", s.messages) // Anthropic Messages API
+	// Admin API (management actions; admin-gated, audited via the access log).
+	mux.HandleFunc("POST /admin/drain", s.adminDrain)
+	mux.HandleFunc("POST /admin/reload", s.adminReload)
+	mux.HandleFunc("POST /admin/models/{id}/load", s.adminLoad)
+	mux.HandleFunc("POST /admin/models/{id}/unload", s.adminUnload)
 	// requestID is outermost so every request — including auth rejections and
 	// health checks — gets a correlation id and an access-log line.
 	return s.requestID(s.auth.Wrap(mux))

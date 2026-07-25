@@ -73,6 +73,8 @@ MIT and already win; Mainspring wraps them).
 - `GET /v1/models`, `GET /capabilities`, `GET /metrics`, `GET /healthz`, `GET /readyz`
 - `GET /v1/quality` (optional Hydra routing signal: per-model resident/device/degraded/effective_ctx/
   inflight/queue_depth/ttft_ms_p50; admin-gated)
+- Admin API (admin-gated, audited via the access log): `POST /admin/drain[?on=false]`, `POST /admin/reload`,
+  `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload`
 
 ## Errors
 
