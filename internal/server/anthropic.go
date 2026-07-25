@@ -62,6 +62,34 @@ type contentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // string or []block
 	IsError   bool            `json:"is_error,omitempty"`
+	// image
+	Source *imageSource `json:"source,omitempty"`
+}
+
+// imageSource is an Anthropic image block's source (base64 or url).
+type imageSource struct {
+	Type      string `json:"type"` // "base64" | "url"
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// imageSourceToURL renders an Anthropic image source as an OpenAI image_url
+// value: a data: URI for base64 sources, or the URL passed through. Returns ""
+// for an unusable source.
+func imageSourceToURL(s *imageSource) string {
+	if s == nil {
+		return ""
+	}
+	switch s.Type {
+	case "base64":
+		if s.MediaType != "" && s.Data != "" {
+			return "data:" + s.MediaType + ";base64," + s.Data
+		}
+	case "url":
+		return s.URL
+	}
+	return ""
 }
 
 // messages handles POST /v1/messages (Anthropic Messages API).
@@ -251,11 +279,24 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 	var out []map[string]any
 	var text strings.Builder
 	var toolCalls []map[string]any
+	var parts []map[string]any // ordered text+image content parts (user turns)
+	hasImage := false
 
 	for _, b := range blocks {
 		switch b.Type {
 		case "text", "":
 			text.WriteString(b.Text)
+			if b.Text != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": b.Text})
+			}
+		case "image":
+			if url := imageSourceToURL(b.Source); url != "" {
+				hasImage = true
+				parts = append(parts, map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": url},
+				})
+			}
 		case "tool_use":
 			args := string(b.Input)
 			if args == "" {
@@ -270,7 +311,7 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 				},
 			})
 		case "tool_result":
-			// Each tool_result becomes its own OpenAI tool message.
+			// Each tool_result becomes its own OpenAI tool message (text only).
 			out = append(out, map[string]any{
 				"role":         "tool",
 				"tool_call_id": b.ToolUseID,
@@ -279,7 +320,7 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 		}
 	}
 
-	// Assistant turn with text and/or tool calls.
+	// Assistant turn with text and/or tool calls (assistants don't send images).
 	if m.Role == "assistant" {
 		msg := map[string]any{"role": "assistant"}
 		if text.Len() > 0 {
@@ -292,6 +333,13 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 		}
 		// Prepend the assistant message before any (unlikely) tool blocks.
 		return append([]map[string]any{msg}, out...), nil
+	}
+
+	// User turn carrying images: emit multimodal content parts (text + image_url,
+	// in original order) instead of a collapsed string.
+	if hasImage {
+		out = append(out, map[string]any{"role": "user", "content": parts})
+		return out, nil
 	}
 
 	// User turn: emit tool messages first (they answer a prior assistant turn),
