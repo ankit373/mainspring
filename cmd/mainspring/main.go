@@ -349,11 +349,17 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		fmt.Println("\nshutting down — reclaiming loaded models…")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// Graceful drain: flip readiness so load balancers stop routing, let
+		// in-flight requests finish (http.Server.Shutdown), then reclaim models.
+		srv.SetDraining(true)
+		fmt.Println("\ndraining in-flight requests…")
+		shutCtx, cancel := context.WithTimeout(context.Background(), cfg.DrainTimeout())
 		defer cancel()
-		_ = httpSrv.Shutdown(shutCtx)
-		sched.Shutdown(shutCtx)
+		if err := httpSrv.Shutdown(shutCtx); err != nil {
+			fmt.Println("drain timed out; forcing shutdown")
+		}
+		fmt.Println("reclaiming loaded models…")
+		sched.Shutdown(context.Background())
 		return nil
 	}
 }

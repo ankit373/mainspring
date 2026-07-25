@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/ankit373/mainspring/internal/auth"
@@ -24,11 +25,16 @@ const maxRequestBody = 64 << 20
 
 // Server serves the OpenAI-compatible API.
 type Server struct {
-	sched   *scheduler.Scheduler
-	auth    *auth.Authenticator
-	metrics *metrics.Recorder
-	gate    *gate
+	sched    *scheduler.Scheduler
+	auth     *auth.Authenticator
+	metrics  *metrics.Recorder
+	gate     *gate
+	draining atomic.Bool
 }
+
+// SetDraining marks the server as draining: readiness (/readyz) starts failing so
+// load balancers stop routing new traffic while in-flight requests finish.
+func (s *Server) SetDraining(v bool) { s.draining.Store(v) }
 
 // New builds a Server. rec may be nil (metrics disabled). Concurrency gating is
 // off by default; enable it with SetConcurrency.
@@ -47,6 +53,7 @@ func (s *Server) SetConcurrency(maxInflight, maxQueue int) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.healthz)
+	mux.HandleFunc("/readyz", s.readyz)
 	mux.HandleFunc("/metrics", s.metricsHandler)
 	mux.HandleFunc("/capabilities", s.capabilities)
 	mux.HandleFunc("/v1/models", s.models)
@@ -73,6 +80,15 @@ func (s *Server) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// readyz is the readiness probe: 200 normally, 503 while draining.
+func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
+	if s.draining.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 // models implements GET /v1/models.

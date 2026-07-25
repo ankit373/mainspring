@@ -95,8 +95,10 @@ func (a *Authenticator) lookup(presented string) *Tenant {
 	return found
 }
 
-// exempt paths bypass auth entirely: liveness and metrics scraping.
-func exempt(path string) bool { return path == "/healthz" || path == "/metrics" }
+// exempt paths bypass auth entirely: liveness, readiness, and metrics scraping.
+func exempt(path string) bool {
+	return path == "/healthz" || path == "/readyz" || path == "/metrics"
+}
 
 // Wrap authenticates the request, enforces the per-tenant request rate, and
 // stashes the tenant in the context for downstream token-budget checks.
