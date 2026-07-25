@@ -64,6 +64,8 @@ type Config struct {
 	Aliases          map[string]string `yaml:"aliases,omitempty"`                 // friendly name -> model id (or another alias)
 	DiscoverModels   bool              `yaml:"discover_models,omitempty"`         // auto-expose models from present adopt backends
 	RequestTimeoutS  int               `yaml:"request_timeout_seconds,omitempty"` // default per-request timeout; 0 = unbounded
+	CacheMaxEntries  int               `yaml:"cache_max_entries,omitempty"`       // opt-in response cache size; 0 = disabled
+	CacheTTLS        int               `yaml:"cache_ttl_seconds,omitempty"`       // response-cache entry lifetime; <=0 => 300s
 }
 
 // Default returns the baseline configuration.
@@ -117,6 +119,15 @@ func (c Config) RequestTimeout() time.Duration {
 
 // TLSEnabled reports whether both a cert and key are configured (=> serve HTTPS).
 func (c Config) TLSEnabled() bool { return c.TLSCert != "" && c.TLSKey != "" }
+
+// CacheTTL returns the response-cache entry lifetime (defaults to 5m when the
+// cache is enabled without an explicit TTL).
+func (c Config) CacheTTL() time.Duration {
+	if c.CacheTTLS <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(c.CacheTTLS) * time.Second
+}
 
 // MaxBytes returns the resident byte budget (0 = no byte cap).
 func (c Config) MaxBytes() int64 {
