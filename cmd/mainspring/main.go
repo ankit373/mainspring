@@ -507,6 +507,16 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if cfg.CacheMaxEntries > 0 {
 		srv.SetCache(cfg.CacheTTL(), cfg.CacheMaxEntries)
 	}
+	// Per-model USD pricing for cost accounting (0 = free/local).
+	costRates := map[string]server.CostRate{}
+	for _, m := range cfg.Models {
+		if m.InputUSDPerMTok > 0 || m.OutputUSDPerMTok > 0 {
+			costRates[m.ID] = server.NewCostRate(m.InputUSDPerMTok, m.OutputUSDPerMTok)
+		}
+	}
+	if len(costRates) > 0 {
+		srv.SetCostRates(costRates)
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)

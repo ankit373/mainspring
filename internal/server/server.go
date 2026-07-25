@@ -28,16 +28,17 @@ const maxRequestBody = 64 << 20
 
 // Server serves the OpenAI-compatible API.
 type Server struct {
-	sched    *scheduler.Scheduler
-	auth     *auth.Authenticator
-	metrics  *metrics.Recorder
-	gate     *gate
-	breaker  *breaker.Group
-	draining atomic.Bool
-	accessMu sync.RWMutex
-	access   *accessLogger
-	reloadFn func() error // wired by main for POST /admin/reload
-	cache    *cache.LRU   // opt-in response cache (nil = disabled)
+	sched     *scheduler.Scheduler
+	auth      *auth.Authenticator
+	metrics   *metrics.Recorder
+	gate      *gate
+	breaker   *breaker.Group
+	draining  atomic.Bool
+	accessMu  sync.RWMutex
+	access    *accessLogger
+	reloadFn  func() error        // wired by main for POST /admin/reload
+	cache     *cache.LRU          // opt-in response cache (nil = disabled)
+	costRates map[string]CostRate // per-model USD pricing (nil = all free)
 
 	defaultTimeout time.Duration            // per-request timeout (0 = unbounded)
 	timeouts       map[string]time.Duration // per-model overrides (real ids)
@@ -293,6 +294,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 				PromptTokens: cached.Prompt,
 				TokensEst:    cached.Completion,
 				Exact:        cached.Exact,
+				CostUSD:      s.costFor(model, cached.Prompt, cached.Completion, cached.Exact),
 			})
 		}
 		return
@@ -376,6 +378,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			PromptTokens: prompt,
 			TokensEst:    completion,
 			Exact:        exact,
+			CostUSD:      s.costFor(model, prompt, completion, exact),
 		})
 	}
 }

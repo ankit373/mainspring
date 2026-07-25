@@ -32,6 +32,7 @@ type Event struct {
 	PromptTokens int64     `json:"prompt_tokens,omitempty"` // real, when upstream reports usage
 	TokensEst    int64     `json:"tokens_est"`              // output tokens: real when Exact, else estimated
 	Exact        bool      `json:"exact_usage,omitempty"`   // true when counts came from an upstream usage object
+	CostUSD      float64   `json:"cost_usd,omitempty"`      // computed spend for this request (0 when no rate configured / no exact usage)
 }
 
 // ttftRingSize bounds the recent-TTFT reservoir kept per model for quantiles.
@@ -45,6 +46,7 @@ type modelStat struct {
 	ttftCount    int64
 	tokens       int64
 	promptTokens int64
+	costUSD      float64
 
 	// ttftRing is a bounded ring of recent TTFT samples (ms) for a p50 estimate.
 	ttftRing   []float64
@@ -115,6 +117,7 @@ func (r *Recorder) Record(ev Event) {
 	}
 	st.tokens += ev.TokensEst
 	st.promptTokens += ev.PromptTokens
+	st.costUSD += ev.CostUSD
 	r.mu.Unlock()
 
 	r.appendLedger(ev)
@@ -156,6 +159,19 @@ func (r *Recorder) TTFTp50(model string) float64 {
 	return samples[len(samples)/2]
 }
 
+// Costs returns accumulated USD spend per model and the grand total. Models with
+// no configured rate contribute 0.
+func (r *Recorder) Costs() (perModel map[string]float64, total float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	perModel = make(map[string]float64, len(r.stats))
+	for m, st := range r.stats {
+		perModel[m] = st.costUSD
+		total += st.costUSD
+	}
+	return perModel, total
+}
+
 // Gauges are point-in-time values supplied at scrape time (e.g. residency).
 type Gauges struct {
 	LoadedModels  int
@@ -183,6 +199,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 			durSum: st.durSumMs, ttftSum: st.ttftSumMs,
 			durCount: st.durCount, ttftCount: st.ttftCount,
 			tokens: st.tokens, promptTokens: st.promptTokens,
+			costUSD: st.costUSD,
 		})
 	}
 	r.mu.Unlock()
@@ -206,6 +223,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 	writeCounterI(w, "mainspring_ttft_ms_count", "TTFT observations by model.", rows, func(rw rowT) int64 { return rw.ttftCount })
 	writeCounterI(w, "mainspring_tokens_estimated_total", "Output tokens by model (real when upstream reports usage, else estimated).", rows, func(rw rowT) int64 { return rw.tokens })
 	writeCounterI(w, "mainspring_prompt_tokens_total", "Prompt (input) tokens by model (real; 0 when upstream reports no usage).", rows, func(rw rowT) int64 { return rw.promptTokens })
+	writeCounter(w, "mainspring_cost_usd_total", "Computed spend in USD by model (0 when no rate configured).", rows, func(rw rowT) float64 { return rw.costUSD })
 
 	fmt.Fprint(w, "# HELP mainspring_loaded_models Currently resident models.\n# TYPE mainspring_loaded_models gauge\n")
 	fmt.Fprintf(w, "mainspring_loaded_models %d\n", g.LoadedModels)
@@ -220,6 +238,7 @@ type rowT = struct {
 	statuses                                  map[int]int64
 	durSum, ttftSum                           float64
 	durCount, ttftCount, tokens, promptTokens int64
+	costUSD                                   float64
 }
 
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {

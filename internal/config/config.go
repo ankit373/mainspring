@@ -23,6 +23,11 @@ type Model struct {
 	Preload   bool     `yaml:"preload,omitempty"`         // load at startup instead of on first request
 	TimeoutS  int      `yaml:"timeout_seconds,omitempty"` // per-model request timeout; 0 = use server default
 	Args      []string `yaml:"args,omitempty"`
+
+	// USD pricing per one million tokens (0 = free, the local default). Set when
+	// adopting a metered API backend or to model cost for routing/accounting.
+	InputUSDPerMTok  float64 `yaml:"input_usd_per_mtok,omitempty"`
+	OutputUSDPerMTok float64 `yaml:"output_usd_per_mtok,omitempty"`
 }
 
 // Tenant is a named principal with an API key, role, and quotas.

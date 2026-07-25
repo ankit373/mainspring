@@ -46,6 +46,8 @@ layer around them **fail loud, VRAM-aware, and governed**.
   bounded TTL+LRU cache without re-running the model; hits carry `X-Mainspring-Cache: hit`.
 - **Standalone governance** — API-key tenants with roles (admin/inference), per-tenant rate + token
   budgets, and **real** streaming token accounting.
+- **Cost accounting** — optional per-model USD pricing turns real usage into spend, surfaced in the
+  usage ledger, a `mainspring_cost_usd_total` metric, and `/v1/quality` (a real cost signal for routing).
 - **Operability** — Prometheus `/metrics`, JSONL usage ledger, `X-Request-ID` + W3C `traceparent`
   propagation, optional access log, **SIGHUP hot-reload**, an **admin API** (drain / reload / model
   load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a router (Hydra) can consume.
