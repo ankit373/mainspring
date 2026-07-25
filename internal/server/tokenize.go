@@ -36,6 +36,54 @@ func (s *Server) countTokens(ctx context.Context, model, text string) (int, bool
 	return charTokens(utf8.RuneCountInString(text)), false
 }
 
+// precisePromptTokens counts a request's prompt tokens exactly using the model's
+// real tokenizer, when the model is resident and supports it (ok=true). It sums
+// the tokenized text of each message (plus the fixed per-message chat-template
+// overhead), the system prompt, and any legacy completion prompt. ok=false (no
+// forced load, or a tokenizer error) tells the caller to fall back to the
+// estimate.
+func (s *Server) precisePromptTokens(ctx context.Context, model string, body []byte) (int, bool) {
+	tc, ok := s.residentTokenCounter(model)
+	if !ok {
+		return 0, false
+	}
+	var req struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		Prompt json.RawMessage `json:"prompt"`
+		System string          `json:"system"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return 0, false
+	}
+	total := 0
+	count := func(text string) bool {
+		if text == "" {
+			return true
+		}
+		n, err := tc.CountTokens(ctx, text)
+		if err != nil {
+			return false
+		}
+		total += n
+		return true
+	}
+	if !count(req.System) {
+		return 0, false
+	}
+	for _, m := range req.Messages {
+		total += perMessageOverhead
+		if !count(contentText(m.Content)) {
+			return 0, false
+		}
+	}
+	if !count(contentText(req.Prompt)) {
+		return 0, false
+	}
+	return total, true
+}
+
 // tokenize implements POST /v1/tokenize — a utility that counts tokens for a
 // piece of text against a model, exact when the engine can tokenize, estimated
 // otherwise. Body: {"model": "...", "input": "..."}.

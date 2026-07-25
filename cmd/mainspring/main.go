@@ -536,6 +536,20 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if len(ctxPolicies) > 0 {
 		srv.SetContextGuard(ctxPolicies)
 	}
+	// Precise (exact-tokenization) guardrail: per-model, active when precise is on
+	// globally or overridden true for that model and the model has a known ctx.
+	precise := map[string]bool{}
+	for _, m := range cfg.Models {
+		if m.Ctx <= 0 {
+			continue
+		}
+		if cfg.PreciseContext || (m.PreciseContext != nil && *m.PreciseContext) {
+			precise[m.ID] = true
+		}
+	}
+	if len(precise) > 0 {
+		srv.SetPreciseContext(precise)
+	}
 	// max_tokens clamping: per-model window, active when clamping is on globally
 	// or overridden true for that model and the model has a known ctx.
 	clampLimits := map[string]int{}

@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -28,6 +30,24 @@ func (s *Server) SetContextGuard(policies map[string]ContextPolicy) {
 	s.ctxPolicies = policies
 }
 
+// SetPreciseContext enables exact prompt tokenization for the guardrail on the
+// given models (keyed by resolved model id). It refines enforce_context: when a
+// model is precise AND resident on a tokenizing engine, the guardrail counts
+// prompt tokens exactly instead of estimating. Safe to call at startup.
+func (s *Server) SetPreciseContext(models map[string]bool) { s.preciseCtx = models }
+
+// guardPromptTokens returns the prompt token count for the guardrail: exact via
+// the model's tokenizer when precise is enabled and the model is resident on a
+// supporting engine, otherwise the character-based estimate.
+func (s *Server) guardPromptTokens(ctx context.Context, model string, body []byte) (int, bool) {
+	if s.preciseCtx[model] {
+		if n, ok := s.precisePromptTokens(ctx, model, body); ok {
+			return n, true
+		}
+	}
+	return estimatePromptTokens(body), false
+}
+
 // tokensPerCharDenom estimates tokens from characters: modern BPE tokenizers
 // average ~4 characters per token for English/code, so chars/4 is a reasonable,
 // slightly conservative proxy without shipping a tokenizer per model.
@@ -41,29 +61,47 @@ const perMessageOverhead = 4
 // human-readable reason. maxTokens alone exceeding the limit is exact; the
 // combined prompt-estimate + maxTokens check is approximate (see estimate note).
 func contextOverage(body []byte, limit int) (bool, string) {
+	return contextOverageDetail(body, limit, estimatePromptTokens(body), false)
+}
+
+// contextOverageDetail is the core check with the prompt-token count supplied by
+// the caller: exact when counted with the model's real tokenizer, else an
+// estimate. The reason text labels which was used so the client can tell an
+// exact rejection from a heuristic one.
+func contextOverageDetail(body []byte, limit, promptTokens int, exact bool) (bool, string) {
+	maxTok := maxTokensRequested(body)
+
+	// The requested output alone cannot exceed the whole window (always exact).
+	if maxTok > limit {
+		return true, fmt.Sprintf("max_tokens %d exceeds model context window of %d tokens", maxTok, limit)
+	}
+
+	// Prompt tokens + requested output must fit the window.
+	if promptTokens+maxTok > limit {
+		qual := "estimated prompt (~%d tokens)"
+		if exact {
+			qual = "prompt (%d tokens)"
+		}
+		return true, fmt.Sprintf(qual+" + max_tokens %d exceeds model context window of %d tokens", promptTokens, maxTok, limit)
+	}
+	return false, ""
+}
+
+// maxTokensRequested returns the requested output budget (max_tokens, else
+// max_completion_tokens, else 0).
+func maxTokensRequested(body []byte) int {
 	var req struct {
 		MaxTokens           *int `json:"max_tokens"`
 		MaxCompletionTokens *int `json:"max_completion_tokens"`
 	}
 	_ = json.Unmarshal(body, &req)
-	maxTok := 0
 	if req.MaxTokens != nil {
-		maxTok = *req.MaxTokens
-	} else if req.MaxCompletionTokens != nil {
-		maxTok = *req.MaxCompletionTokens
+		return *req.MaxTokens
 	}
-
-	// Exact: the requested output alone cannot exceed the whole window.
-	if maxTok > limit {
-		return true, fmt.Sprintf("max_tokens %d exceeds model context window of %d tokens", maxTok, limit)
+	if req.MaxCompletionTokens != nil {
+		return *req.MaxCompletionTokens
 	}
-
-	// Estimated: prompt tokens + requested output must fit the window.
-	promptEst := estimatePromptTokens(body)
-	if promptEst+maxTok > limit {
-		return true, fmt.Sprintf("estimated prompt (~%d tokens) + max_tokens %d exceeds model context window of %d tokens", promptEst, maxTok, limit)
-	}
-	return false, ""
+	return 0
 }
 
 // estimatePromptTokens is a tokenizer-free, conservative estimate of the input
@@ -95,25 +133,32 @@ func estimatePromptTokens(body []byte) int {
 // contentTokens estimates tokens for a message content field that may be a bare
 // string or an array of typed parts (text/image_url/...).
 func contentTokens(raw json.RawMessage) int {
+	return charTokens(utf8.RuneCountInString(contentText(raw)))
+}
+
+// contentText extracts the plain text of a message content field (a bare string,
+// or the concatenated text parts of a multimodal array). Non-text parts (e.g.
+// images) contribute nothing.
+func contentText(raw json.RawMessage) string {
 	if len(raw) == 0 {
-		return 0
+		return ""
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return charTokens(utf8.RuneCountInString(s))
+		return s
 	}
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if json.Unmarshal(raw, &parts) == nil {
-		n := 0
+		var b strings.Builder
 		for _, p := range parts {
-			n += charTokens(utf8.RuneCountInString(p.Text))
+			b.WriteString(p.Text)
 		}
-		return n
+		return b.String()
 	}
-	return 0
+	return ""
 }
 
 func charTokens(chars int) int {
