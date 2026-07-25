@@ -107,8 +107,15 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
+	if !s.breaker.Allow(model) {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "circuit open: backend for "+model+" is unavailable")
+		return
+	}
+
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
+		s.breaker.OnResult(model, false)
 		writeError(w, http.StatusServiceUnavailable, "load model "+model+": "+err.Error())
 		return
 	}

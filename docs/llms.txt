@@ -26,6 +26,9 @@ MIT and already win; Mainspring wraps them).
 - Standalone governance: API keys → named tenants with roles (admin/inference) and per-tenant request
   rate limits (429 + Retry-After) and token budgets.
 - Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.
+- Circuit breaker + health probe: after N consecutive backend failures a model's requests fast-fail with
+  503 (no timeout paid) until a cooldown elapses and a half-open probe succeeds; an optional background
+  health probe trips/recovers the breaker without waiting for live traffic. State in /metrics and /v1/quality.
 - Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, requests, residency, inflight/queued)
   and an append-only JSONL usage ledger. Token counts are real when the upstream reports a usage object
   (non-stream body, or the streaming `include_usage` final chunk) and estimated otherwise.

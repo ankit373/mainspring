@@ -30,6 +30,7 @@ type modelQuality struct {
 	Inflight     int      `json:"inflight"`
 	QueueDepth   int      `json:"queue_depth"`
 	TTFTp50Ms    float64  `json:"ttft_ms_p50"`
+	Breaker      string   `json:"breaker"` // "closed" | "open" | "half_open"
 }
 
 // quality implements GET /v1/quality. Gated like /capabilities: an authenticated
@@ -61,6 +62,7 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 			RequestedCtx: sp.CtxSize,
 			Inflight:     inflight,
 			QueueDepth:   queued,
+			Breaker:      s.breaker.State(sp.ID).String(),
 		}
 		if s.metrics != nil {
 			mq.TTFTp50Ms = s.metrics.TTFTp50(sp.ID)
