@@ -133,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/embeddings", s.inference)
 	mux.HandleFunc("/v1/messages", s.messages) // Anthropic Messages API
 	// Admin API (management actions; admin-gated, audited via the access log).
+	mux.HandleFunc("GET /admin/config", s.adminConfig)
 	mux.HandleFunc("POST /admin/drain", s.adminDrain)
 	mux.HandleFunc("POST /admin/reload", s.adminReload)
 	mux.HandleFunc("POST /admin/models/{id}/load", s.adminLoad)
