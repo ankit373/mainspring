@@ -33,6 +33,11 @@ type Model struct {
 	// true rejects over-context requests, false only warns. nil = inherit global.
 	// The guardrail needs Ctx > 0 (the model's context window) to be active.
 	EnforceContext *bool `yaml:"enforce_context,omitempty"`
+
+	// ModelFallbacks is an ordered list of *other model ids* (or aliases) to serve
+	// this request from when this model is unavailable (circuit open / load fail).
+	// Distinct from Fallbacks, which fails over to another backend for THIS model.
+	ModelFallbacks []string `yaml:"model_fallbacks,omitempty"`
 }
 
 // Tenant is a named principal with an API key, role, and quotas.

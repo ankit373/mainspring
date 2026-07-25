@@ -540,6 +540,17 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if cfg.RetryMax > 0 {
 		srv.SetRetry(cfg.RetryMax, cfg.RetryBackoff())
 	}
+	// Model-level fallback chains: serve from another model when the primary is
+	// unavailable (circuit open / load failure).
+	modelFallbacks := map[string][]string{}
+	for _, m := range cfg.Models {
+		if len(m.ModelFallbacks) > 0 {
+			modelFallbacks[m.ID] = m.ModelFallbacks
+		}
+	}
+	if len(modelFallbacks) > 0 {
+		srv.SetModelFallbacks(modelFallbacks)
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)

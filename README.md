@@ -42,7 +42,8 @@ layer around them **fail loud, VRAM-aware, and governed**.
   unload, optional preload.
 - **Reliability** — per-model concurrency limit + bounded queue (503 backpressure), a **circuit breaker**
   with a background health probe, **retry-with-backoff** on transient upstream failures (safe for streams),
-  and a structured error taxonomy (stable `code` per failure class).
+  **model-level fallback chains** (a different model answers when the primary is down), and a structured
+  error taxonomy (stable `code` per failure class).
 - **Opt-in response cache** — identical deterministic (temperature 0) non-streaming requests return from a
   bounded TTL+LRU cache without re-running the model; hits carry `X-Mainspring-Cache: hit`.
 - **Context guardrail** — optional `enforce_context` rejects over-context requests (`context_length_exceeded`)

@@ -28,18 +28,19 @@ const maxRequestBody = 64 << 20
 
 // Server serves the OpenAI-compatible API.
 type Server struct {
-	sched       *scheduler.Scheduler
-	auth        *auth.Authenticator
-	metrics     *metrics.Recorder
-	gate        *gate
-	breaker     *breaker.Group
-	draining    atomic.Bool
-	accessMu    sync.RWMutex
-	access      *accessLogger
-	reloadFn    func() error             // wired by main for POST /admin/reload
-	cache       *cache.LRU               // opt-in response cache (nil = disabled)
-	costRates   map[string]CostRate      // per-model USD pricing (nil = all free)
-	ctxPolicies map[string]ContextPolicy // per-model context guardrail (nil = off)
+	sched          *scheduler.Scheduler
+	auth           *auth.Authenticator
+	metrics        *metrics.Recorder
+	gate           *gate
+	breaker        *breaker.Group
+	draining       atomic.Bool
+	accessMu       sync.RWMutex
+	access         *accessLogger
+	reloadFn       func() error             // wired by main for POST /admin/reload
+	cache          *cache.LRU               // opt-in response cache (nil = disabled)
+	costRates      map[string]CostRate      // per-model USD pricing (nil = all free)
+	ctxPolicies    map[string]ContextPolicy // per-model context guardrail (nil = off)
+	modelFallbacks map[string][]string      // per-model fallback chains (nil = none)
 
 	retryMax     int           // additional upstream attempts after the first (0 = no retry)
 	retryBackoff time.Duration // base of the exponential retry backoff
@@ -316,53 +317,67 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Concurrency gate: bound in-flight requests per model, backpressure over it.
-	release, ok := s.gate.acquire(r.Context(), model)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
+	// Select a servable model: try the requested one, then its fallback chain.
+	// A candidate is skipped only for a pre-serve failure (circuit open or load
+	// error); gate saturation is backpressure, not a fallback trigger.
+	var (
+		runner  backend.Runner
+		release func()
+		served  string
+	)
+	for _, cand := range s.candidatesFor(model) {
+		rr, rel, busy, okc := s.acquireRunner(r, cand)
+		if busy {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
+			return
+		}
+		if okc {
+			runner, release, served = rr, rel, cand
+			break
+		}
+	}
+	if runner == nil {
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, codeCircuitOpen, "no available backend for "+model+" or its fallbacks")
 		return
 	}
 	defer release()
 
-	// Circuit breaker: fast-fail while this model's backend is tripped open.
-	if !s.breaker.Allow(model) {
-		w.Header().Set("Retry-After", "5")
-		writeErr(w, codeCircuitOpen, "circuit open: backend for "+model+" is unavailable")
-		return
-	}
-
-	// Per-request timeout: bound total generation time (0 = unbounded).
-	if d := s.timeoutFor(model); d > 0 {
+	// Per-request timeout for the model that will actually serve (0 = unbounded).
+	if d := s.timeoutFor(served); d > 0 {
 		tctx, cancel := context.WithTimeout(r.Context(), d)
 		defer cancel()
 		r = r.WithContext(tctx)
 	}
 
-	runner, err := s.sched.EnsureLoaded(r.Context(), model)
-	if err != nil {
-		s.breaker.OnResult(model, false)
-		writeErr(w, codeBackendUnavailable, "load model "+model+": "+err.Error())
-		return
-	}
-
+	// If a fallback answered, point the upstream body at it and tell the client.
+	upBody := body
 	extra := s.failLoudHeaders(r.Context(), runner)
+	if served != model {
+		upBody = rewriteModelField(body, served)
+		if extra == nil {
+			extra = map[string]string{}
+		}
+		extra["X-Mainspring-Served-Model"] = served
+	}
 
 	start := time.Now()
 	cap := newCapture(w, start)
-	// Record the full body only when this request is a cache candidate (miss on
-	// an enabled, cacheable request → cacheKey is non-empty).
-	if cacheKey != "" {
+	// Record the full body only when this request is a cache candidate served by
+	// the primary model (fallback outputs are not cached under the primary key).
+	if cacheKey != "" && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
-	s.proxyTo(cap, r, runner.BaseURL(), body, extra)
+	s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
 	// (4xx is a client error, not the backend's fault).
-	s.breaker.OnResult(model, cap.status < 500)
+	s.breaker.OnResult(served, cap.status < 500)
 
 	prompt, completion, exact := cap.usage()
-	// Store a successful, non-streaming, within-cap response for future hits.
-	if cacheKey != "" && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
+	// Store a successful, non-streaming, within-cap response for future hits
+	// (only when the primary model served — never a fallback's output).
+	if cacheKey != "" && served == model && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
 		s.cache.Put(cacheKey, cache.Value{
 			Status:     cap.status,
 			Header:     cap.snapHeader,
@@ -384,7 +399,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			Time:         start,
 			RequestID:    RequestID(r.Context()),
 			TraceID:      TraceID(r.Context()),
-			Model:        model,
+			Model:        served,
 			Tenant:       auth.TenantOf(r.Context()),
 			Status:       cap.status,
 			Stream:       cap.stream,
@@ -394,7 +409,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			PromptTokens: prompt,
 			TokensEst:    completion,
 			Exact:        exact,
-			CostUSD:      s.costFor(model, prompt, completion, exact),
+			CostUSD:      s.costFor(served, prompt, completion, exact),
 		})
 	}
 }
