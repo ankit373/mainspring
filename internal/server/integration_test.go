@@ -190,6 +190,34 @@ func TestAuthEnforcedOnInference(t *testing.T) {
 	}
 }
 
+func TestReadyzReflectsDraining(t *testing.T) {
+	eng := fakeEngine(t)
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	srv := server.New(sched, auth.New(nil), rec)
+	h := srv.Handler()
+
+	get := func(path string) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		return w.Code
+	}
+	if get("/readyz") != http.StatusOK {
+		t.Fatal("readyz should be 200 before draining")
+	}
+	srv.SetDraining(true)
+	if get("/readyz") != http.StatusServiceUnavailable {
+		t.Fatal("readyz should be 503 while draining")
+	}
+	if get("/healthz") != http.StatusOK {
+		t.Fatal("healthz should stay 200 while draining")
+	}
+}
+
 func TestMetricsEndpoint(t *testing.T) {
 	eng := fakeEngine(t)
 	h := newTestServer(t, &engineBackend{baseURL: eng.URL}, nil)

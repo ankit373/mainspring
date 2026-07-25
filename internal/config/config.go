@@ -43,6 +43,7 @@ type Config struct {
 	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`
 	MaxInflight      int      `yaml:"max_inflight,omitempty"` // concurrent requests per model; 0 = unbounded
 	MaxQueue         int      `yaml:"max_queue,omitempty"`    // extra waiters per model before 503
+	DrainSeconds     int      `yaml:"drain_seconds,omitempty"` // shutdown drain timeout; <=0 => 30s
 	UsageLedger      string   `yaml:"usage_ledger,omitempty"` // JSONL path; empty => default location
 	Backend          string   `yaml:"backend,omitempty"`      // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
 	LlamaServerPath  string   `yaml:"llama_server_path,omitempty"`
@@ -67,6 +68,14 @@ func (c Config) KeepAlive() time.Duration {
 		return 0
 	}
 	return time.Duration(c.KeepAliveSeconds) * time.Second
+}
+
+// DrainTimeout returns how long to wait for in-flight requests on shutdown.
+func (c Config) DrainTimeout() time.Duration {
+	if c.DrainSeconds <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.DrainSeconds) * time.Second
 }
 
 // MaxBytes returns the resident byte budget (0 = no byte cap).
