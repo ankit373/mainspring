@@ -50,6 +50,8 @@ type Config struct {
 	DrainSeconds     int               `yaml:"drain_seconds,omitempty"`            // shutdown drain timeout; <=0 => 30s
 	UsageLedger      string            `yaml:"usage_ledger,omitempty"`             // JSONL path; empty => default location
 	AccessLog        string            `yaml:"access_log,omitempty"`               // JSONL access log path; empty => off, "stderr"/"stdout" accepted
+	TLSCert          string            `yaml:"tls_cert,omitempty"`                 // PEM cert path; with tls_key => serve HTTPS
+	TLSKey           string            `yaml:"tls_key,omitempty"`                  // PEM key path
 	Backend          string            `yaml:"backend,omitempty"`                  // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
 	LlamaServerPath  string            `yaml:"llama_server_path,omitempty"`
 	OllamaHost       string            `yaml:"ollama_host,omitempty"`    // e.g. http://127.0.0.1:11434
@@ -101,6 +103,9 @@ func (c Config) HealthProbeInterval() time.Duration {
 	}
 	return time.Duration(c.HealthProbeS) * time.Second
 }
+
+// TLSEnabled reports whether both a cert and key are configured (=> serve HTTPS).
+func (c Config) TLSEnabled() bool { return c.TLSCert != "" && c.TLSKey != "" }
 
 // MaxBytes returns the resident byte budget (0 = no byte cap).
 func (c Config) MaxBytes() int64 {

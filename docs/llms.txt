@@ -38,7 +38,7 @@ MIT and already win; Mainspring wraps them).
 - Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
   Never installs anything unless you run `mainspring install`.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
-  ServiceMonitor, GPU node scheduling).
+  ServiceMonitor, GPU node scheduling). Optional TLS (tls_cert/tls_key => HTTPS, TLS 1.2 minimum).
 - Graceful drain: `/readyz` flips to 503 on shutdown so load balancers stop routing while in-flight
   requests finish.
 - Request correlation: every request carries an `X-Request-ID` (accepted from the client or generated,
@@ -57,7 +57,8 @@ MIT and already win; Mainspring wraps them).
 ## CLI
 
 - `mainspring serve` — start the server (flags: --addr, --config, --model id=path, --api-key,
-  --backend, --max-loaded, --max-resident-mb, --max-inflight, --max-queue, --keep-alive, --usage-ledger).
+  --backend, --max-loaded, --max-resident-mb, --max-inflight, --max-queue, --keep-alive, --usage-ledger,
+  --tls-cert, --tls-key).
 - `mainspring backends` — detect engines on this host (system vs managed).
 - `mainspring models` — list configured models and their resolved backend.
 - `mainspring install <backend>` — opt-in, checksum-verified engine install (--url/--sha256 or a
