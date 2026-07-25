@@ -13,7 +13,7 @@ MIT and already win; Mainspring wraps them).
 ## What it does
 
 - One versioned API: OpenAI (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-  `/v1/models`) and Anthropic (`/v1/messages`, streaming translated).
+  `/v1/models`) and Anthropic (`/v1/messages`, tool use + streaming translated).
 - Per-model backend routing: one server can serve a GGUF via llama.cpp, an MLX model, and an adopted
   Ollama/LM Studio/llamafile/GPT4All model simultaneously.
 - Fail loud, never silently degrade: `/capabilities` reports the real backend, device, GPU offload,
@@ -53,7 +53,7 @@ MIT and already win; Mainspring wraps them).
 ## Endpoints
 
 - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
-- `POST /v1/messages` (Anthropic, text; streaming translated)
+- `POST /v1/messages` (Anthropic, text + tool use; streaming translated, incl. input_json_delta)
 - `GET /v1/models`, `GET /capabilities`, `GET /metrics`, `GET /healthz`, `GET /readyz`
 
 ## Non-goals
