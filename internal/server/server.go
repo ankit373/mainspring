@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", s.inference)
 	mux.HandleFunc("/v1/completions", s.inference)
 	mux.HandleFunc("/v1/embeddings", s.inference)
+	mux.HandleFunc("/v1/messages", s.messages) // Anthropic Messages API
 	return s.auth.Wrap(mux)
 }
 
