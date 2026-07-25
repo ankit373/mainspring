@@ -536,6 +536,20 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if len(ctxPolicies) > 0 {
 		srv.SetContextGuard(ctxPolicies)
 	}
+	// max_tokens clamping: per-model window, active when clamping is on globally
+	// or overridden true for that model and the model has a known ctx.
+	clampLimits := map[string]int{}
+	for _, m := range cfg.Models {
+		if m.Ctx <= 0 {
+			continue
+		}
+		if cfg.ClampMaxTokens || (m.ClampMaxTokens != nil && *m.ClampMaxTokens) {
+			clampLimits[m.ID] = m.Ctx
+		}
+	}
+	if len(clampLimits) > 0 {
+		srv.SetClampLimits(clampLimits)
+	}
 	// Bounded retry of transient upstream failures (disabled unless retry_max > 0).
 	if cfg.RetryMax > 0 {
 		srv.SetRetry(cfg.RetryMax, cfg.RetryBackoff())

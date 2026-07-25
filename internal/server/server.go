@@ -41,6 +41,7 @@ type Server struct {
 	costRates      map[string]CostRate      // per-model USD pricing (nil = all free)
 	ctxPolicies    map[string]ContextPolicy // per-model context guardrail (nil = off)
 	modelFallbacks map[string][]string      // per-model fallback chains (nil = none)
+	clampLimits    map[string]int           // per-model ctx window for max_tokens clamping (nil = off)
 	coalesce       *flightGroup             // single-flight de-dup of identical in-flight requests (nil = off)
 
 	retryMax     int           // additional upstream attempts after the first (0 = no retry)
@@ -270,6 +271,10 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	if model != peek.Model {
 		body = rewriteModelField(body, model)
 	}
+
+	// Graceful clamp: shrink an over-budget max_tokens to fit the window before
+	// the guardrail gets a chance to reject the request.
+	body = s.applyClamp(w, model, body)
 
 	// Context guardrail: reject (or warn) an over-context request before doing any
 	// work, rather than letting the engine silently truncate it.
