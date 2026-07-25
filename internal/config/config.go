@@ -77,6 +77,8 @@ type Config struct {
 	CacheMaxEntries  int               `yaml:"cache_max_entries,omitempty"`       // opt-in response cache size; 0 = disabled
 	CacheTTLS        int               `yaml:"cache_ttl_seconds,omitempty"`       // response-cache entry lifetime; <=0 => 300s
 	EnforceContext   bool              `yaml:"enforce_context,omitempty"`         // reject requests exceeding a model's context window (needs model ctx > 0)
+	RetryMax         int               `yaml:"retry_max,omitempty"`               // additional upstream attempts after the first on transient failure; 0 = no retry
+	RetryBackoffMs   int               `yaml:"retry_backoff_ms,omitempty"`        // base of the exponential retry backoff; <=0 => 100ms when retry enabled
 }
 
 // Default returns the baseline configuration.
@@ -130,6 +132,15 @@ func (c Config) RequestTimeout() time.Duration {
 
 // TLSEnabled reports whether both a cert and key are configured (=> serve HTTPS).
 func (c Config) TLSEnabled() bool { return c.TLSCert != "" && c.TLSKey != "" }
+
+// RetryBackoff returns the base retry backoff (defaults to 100ms when retry is
+// enabled without an explicit value).
+func (c Config) RetryBackoff() time.Duration {
+	if c.RetryBackoffMs <= 0 {
+		return 100 * time.Millisecond
+	}
+	return time.Duration(c.RetryBackoffMs) * time.Millisecond
+}
 
 // CacheTTL returns the response-cache entry lifetime (defaults to 5m when the
 // cache is enabled without an explicit TTL).

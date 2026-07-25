@@ -34,6 +34,9 @@ MIT and already win; Mainspring wraps them).
 - Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.
 - Per-request timeout: an optional global default + per-model override bounds total generation time; on
   expiry the upstream call is cancelled and a 504 `timeout` is returned (0 = unbounded).
+- Upstream retry: transient backend failures (connection errors, 502/503/504) are retried with
+  exponential backoff, always decided *before any byte reaches the client* so it is safe for streaming
+  too; `X-Mainspring-Retries: N` reports how many retries a request took. Disabled by default (`retry_max`).
 - Circuit breaker + health probe: after N consecutive backend failures a model's requests fast-fail with
   503 (no timeout paid) until a cooldown elapses and a half-open probe succeeds; an optional background
   health probe trips/recovers the breaker without waiting for live traffic. State in /metrics and /v1/quality.
