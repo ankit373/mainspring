@@ -22,6 +22,7 @@ import (
 type Scheduler struct {
 	backends  map[string]backend.Backend
 	specs     map[string]backend.ModelSpec
+	aliases   map[string]string // friendly name -> target (spec id or another alias)
 	keepAlive time.Duration
 	maxLoaded int
 	maxBytes  int64
@@ -35,10 +36,14 @@ type Scheduler struct {
 
 // Options configures a Scheduler.
 type Options struct {
-	KeepAlive time.Duration // idle-unload delay; <=0 disables idle unloading
-	MaxLoaded int           // max models resident by count; <=0 => 1
-	MaxBytes  int64         // max resident bytes across all models; <=0 => no byte cap
+	KeepAlive time.Duration     // idle-unload delay; <=0 disables idle unloading
+	MaxLoaded int               // max models resident by count; <=0 => 1
+	MaxBytes  int64             // max resident bytes across all models; <=0 => no byte cap
+	Aliases   map[string]string // friendly name -> target model id (or another alias)
 }
+
+// maxAliasDepth bounds transitive alias resolution, which also detects cycles.
+const maxAliasDepth = 16
 
 type loaded struct {
 	runner   backend.Runner
@@ -63,9 +68,14 @@ func New(backends map[string]backend.Backend, specs []backend.ModelSpec, opts Op
 	for _, s := range specs {
 		m[s.ID] = s
 	}
+	al := make(map[string]string, len(opts.Aliases))
+	for name, target := range opts.Aliases {
+		al[name] = target
+	}
 	return &Scheduler{
 		backends:  backends,
 		specs:     m,
+		aliases:   al,
 		keepAlive: opts.KeepAlive,
 		maxLoaded: opts.MaxLoaded,
 		maxBytes:  opts.MaxBytes,
@@ -74,9 +84,50 @@ func New(backends map[string]backend.Backend, specs []backend.ModelSpec, opts Op
 	}
 }
 
-// Known reports whether a model id is configured.
+// Resolve maps a requested model name (which may be an alias, possibly chained)
+// to a real, configured model id. It returns false if the name is neither a
+// configured model nor an alias that resolves to one within maxAliasDepth (the
+// cycle guard). Resolving a real id is idempotent.
+func (s *Scheduler) Resolve(name string) (string, bool) {
+	cur := name
+	for i := 0; i < maxAliasDepth; i++ {
+		if _, ok := s.specs[cur]; ok {
+			return cur, true
+		}
+		next, ok := s.aliases[cur]
+		if !ok {
+			return "", false
+		}
+		cur = next
+	}
+	return "", false // exceeded depth => cycle or too-long chain
+}
+
+// Aliases returns a copy of the configured alias table (friendly name -> target).
+func (s *Scheduler) Aliases() map[string]string {
+	out := make(map[string]string, len(s.aliases))
+	for k, v := range s.aliases {
+		out[k] = v
+	}
+	return out
+}
+
+// Validate checks that every configured alias resolves to a real model within
+// the cycle guard. It is meant to be called once at startup so misconfiguration
+// fails loud rather than surfacing as a 404 at request time.
+func (s *Scheduler) Validate() error {
+	for name := range s.aliases {
+		if _, ok := s.Resolve(name); !ok {
+			return fmt.Errorf("alias %q does not resolve to a known model (unknown target or cycle)", name)
+		}
+	}
+	return nil
+}
+
+// Known reports whether a model id is configured or is an alias that resolves
+// to a configured model.
 func (s *Scheduler) Known(id string) bool {
-	_, ok := s.specs[id]
+	_, ok := s.Resolve(id)
 	return ok
 }
 
@@ -93,6 +144,11 @@ func (s *Scheduler) Models() []backend.ModelSpec {
 // LRU model if at capacity) if necessary. Concurrent callers for the same model
 // share one load.
 func (s *Scheduler) EnsureLoaded(ctx context.Context, modelID string) (backend.Runner, error) {
+	// Resolve aliases so residency keys on the real id (two aliases pointing at
+	// one model share a single load) and direct callers need not pre-resolve.
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
 	// Fast path: already loaded.
 	s.mu.Lock()
 	if l, ok := s.running[modelID]; ok {

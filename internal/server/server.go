@@ -100,9 +100,13 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 		OwnedBy string `json:"owned_by"`
 	}
 	specs := s.sched.Models()
-	data := make([]model, 0, len(specs))
+	aliases := s.sched.Aliases()
+	data := make([]model, 0, len(specs)+len(aliases))
 	for _, sp := range specs {
 		data = append(data, model{ID: sp.ID, Object: "model", OwnedBy: "mainspring"})
+	}
+	for name := range aliases {
+		data = append(data, model{ID: name, Object: "model", OwnedBy: "mainspring"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -173,9 +177,15 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing required field: model")
 		return
 	}
-	if !s.sched.Known(peek.Model) {
+	// Resolve aliases to the real model id; the gate, loader, metrics, and the
+	// upstream request body all key on the resolved id.
+	model, ok := s.sched.Resolve(peek.Model)
+	if !ok {
 		writeError(w, http.StatusNotFound, "model not found: "+peek.Model)
 		return
+	}
+	if model != peek.Model {
+		body = rewriteModelField(body, model)
 	}
 
 	// Per-tenant token budget (enforced pre-request; accrued after).
@@ -186,17 +196,17 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Concurrency gate: bound in-flight requests per model, backpressure over it.
-	release, ok := s.gate.acquire(r.Context(), peek.Model)
+	release, ok := s.gate.acquire(r.Context(), model)
 	if !ok {
 		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests for "+peek.Model)
+		writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests for "+model)
 		return
 	}
 	defer release()
 
-	runner, err := s.sched.EnsureLoaded(r.Context(), peek.Model)
+	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "load model "+peek.Model+": "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "load model "+model+": "+err.Error())
 		return
 	}
 
@@ -269,4 +279,25 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{
 		"error": map[string]string{"message": msg, "type": "invalid_request_error"},
 	})
+}
+
+// rewriteModelField rewrites the top-level "model" field of a JSON request body
+// to realID, used when the client referenced an alias. On any parse failure it
+// returns the body unchanged (the alias reaches the backend, which for the
+// single-model managed backends is harmless).
+func rewriteModelField(body []byte, realID string) []byte {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	rid, err := json.Marshal(realID)
+	if err != nil {
+		return body
+	}
+	m["model"] = rid
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }

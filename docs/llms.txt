@@ -16,6 +16,8 @@ MIT and already win; Mainspring wraps them).
   `/v1/models`) and Anthropic (`/v1/messages`, tool use + streaming translated).
 - Per-model backend routing: one server can serve a GGUF via llama.cpp, an MLX model, and an adopted
   Ollama/LM Studio/llamafile/GPT4All model simultaneously.
+- Model aliases: map a friendly name (e.g. `gpt-4o`) to a real model id (chainable, cycle-checked at
+  startup); aliases appear in `/v1/models` and resolve on every inference path.
 - Fail loud, never silently degrade: `/capabilities` reports the real backend, device, GPU offload,
   and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
   headers on every response.
