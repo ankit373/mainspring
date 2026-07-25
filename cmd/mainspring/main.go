@@ -74,6 +74,7 @@ func cmdBackends() *cobra.Command {
 				mlx.New(cfg.MLXPython),
 				lmstudio.New(cfg.LMStudioHost),
 				openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"), "start it with `./model.llamafile --server`"),
+				openaiadopt.New("gpt4all", orDefault(cfg.GPT4AllHost, "http://127.0.0.1:4891"), "enable the API server in GPT4All settings"),
 			}
 			fmt.Printf("%-12s %-9s %-9s %s\n", "BACKEND", "PRESENT", "SOURCE", "DETAIL")
 			for _, b := range backends {
@@ -97,7 +98,7 @@ func cmdBackends() *cobra.Command {
 				}
 				fmt.Printf("%-12s %-9v %-9s %s\n", av.Name, av.Present, source, detail)
 			}
-			fmt.Println("\ndetect-and-adopt-only (planned): gpt4all")
+			fmt.Println("\nadopt-only backends detect a running local OpenAI server; Mainspring never installs them.")
 			return nil
 		},
 	}
@@ -387,8 +388,11 @@ func newBackendByName(name string, cfg config.Config) (backend.Backend, error) {
 	case "llamafile":
 		return openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"),
 			"start it with `./model.llamafile --server --port 8080`"), nil
+	case "gpt4all":
+		return openaiadopt.New("gpt4all", orDefault(cfg.GPT4AllHost, "http://127.0.0.1:4891"),
+			"enable the API server in GPT4All → Settings → Application"), nil
 	default:
-		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx|lmstudio|llamafile)", name)
+		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx|lmstudio|llamafile|gpt4all)", name)
 	}
 }
 
