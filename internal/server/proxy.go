@@ -45,6 +45,10 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 	if a := r.Header.Get("Accept"); a != "" {
 		outReq.Header.Set("Accept", a)
 	}
+	// Forward the child trace context so the upstream engine joins the trace.
+	if tp := outgoingTraceparent(r.Context()); tp != "" {
+		outReq.Header.Set("traceparent", tp)
+	}
 
 	resp, err := proxyClient.Do(outReq)
 	if err != nil {

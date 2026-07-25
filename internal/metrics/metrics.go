@@ -20,6 +20,7 @@ import (
 type Event struct {
 	Time         time.Time `json:"time"`
 	RequestID    string    `json:"request_id,omitempty"`
+	TraceID      string    `json:"trace_id,omitempty"`
 	Model        string    `json:"model"`
 	Tenant       string    `json:"tenant,omitempty"`
 	Status       int       `json:"status"`

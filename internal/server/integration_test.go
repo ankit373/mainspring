@@ -345,6 +345,48 @@ func TestFailoverServesFromFallbackBackend(t *testing.T) {
 	}
 }
 
+func TestTraceparentForwardedAndLogged(t *testing.T) {
+	// Engine records the traceparent it received.
+	var gotTP string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		gotTP = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	srv := server.New(sched, auth.New(nil), rec)
+	var alog strings.Builder
+	srv.SetAccessLog(&alog)
+	h := srv.Handler()
+
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m1","messages":[]}`))
+	req.Header.Set("traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	// The upstream got a child traceparent that continues the same trace.
+	if !strings.HasPrefix(gotTP, "00-"+traceID+"-") {
+		t.Fatalf("upstream traceparent should continue the trace, got %q", gotTP)
+	}
+	if strings.Contains(gotTP, "00f067aa0ba902b7") {
+		t.Fatal("upstream traceparent must carry our span id, not the client's")
+	}
+	// The access log carries the trace id for correlation.
+	if !strings.Contains(alog.String(), `"trace_id":"`+traceID+`"`) {
+		t.Fatalf("access log should carry trace_id: %s", alog.String())
+	}
+}
+
 func TestCircuitBreakerTripsAndReports(t *testing.T) {
 	// Engine that always 500s so the breaker trips.
 	mux := http.NewServeMux()

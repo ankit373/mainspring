@@ -289,6 +289,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		s.metrics.Record(metrics.Event{
 			Time:         start,
 			RequestID:    RequestID(r.Context()),
+			TraceID:      TraceID(r.Context()),
 			Model:        model,
 			Tenant:       auth.TenantOf(r.Context()),
 			Status:       cap.status,

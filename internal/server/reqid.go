@@ -62,6 +62,8 @@ func (s *Server) requestID(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", id)
 		r = r.WithContext(context.WithValue(r.Context(), requestIDKey, id))
+		// Establish/continue the W3C trace context for this request.
+		r = withTrace(r)
 
 		al := s.accessLog()
 		if al == nil {
@@ -74,6 +76,7 @@ func (s *Server) requestID(next http.Handler) http.Handler {
 		al.log(accessEntry{
 			Time:       start,
 			RequestID:  id,
+			TraceID:    TraceID(r.Context()),
 			Method:     r.Method,
 			Path:       r.URL.Path,
 			Status:     rec.status,
@@ -120,6 +123,7 @@ func (r *statusRecorder) Flush() {
 type accessEntry struct {
 	Time       time.Time `json:"time"`
 	RequestID  string    `json:"request_id"`
+	TraceID    string    `json:"trace_id,omitempty"`
 	Method     string    `json:"method"`
 	Path       string    `json:"path"`
 	Status     int       `json:"status"`
