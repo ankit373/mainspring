@@ -44,6 +44,9 @@ MIT and already win; Mainspring wraps them).
 - Circuit breaker + health probe: after N consecutive backend failures a model's requests fast-fail with
   503 (no timeout paid) until a cooldown elapses and a half-open probe succeeds; an optional background
   health probe trips/recovers the breaker without waiting for live traffic. State in /metrics and /v1/quality.
+- Token counting: `POST /v1/tokenize {model, input}` returns `{tokens, exact}` — the model's real token
+  count (exact) when the model is resident on an engine that exposes a tokenizer (llama.cpp `/tokenize`),
+  otherwise the character-based estimate (exact:false). No forced load; no extra dependency.
 - Context guardrail (opt-in): when a model's context window is known, `enforce_context` rejects a
   request that cannot fit (400 `context_length_exceeded`) instead of letting the engine silently
   truncate it. The requested-output check (`max_tokens` > context) is exact; the prompt-size check is a

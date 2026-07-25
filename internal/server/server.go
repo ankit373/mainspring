@@ -131,6 +131,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", s.inference)
 	mux.HandleFunc("/v1/completions", s.inference)
 	mux.HandleFunc("/v1/embeddings", s.inference)
+	mux.HandleFunc("/v1/tokenize", s.tokenize) // token-counting utility
 	mux.HandleFunc("/v1/messages", s.messages) // Anthropic Messages API
 	// Admin API (management actions; admin-gated, audited via the access log).
 	mux.HandleFunc("GET /admin/config", s.adminConfig)
