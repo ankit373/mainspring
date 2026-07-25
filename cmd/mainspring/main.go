@@ -5,9 +5,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -38,7 +40,7 @@ func main() {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().String("config", "", "config file (default: ~/.config/mainspring/config.yaml)")
-	root.AddCommand(cmdServe(), cmdBackends(), cmdModels(), cmdInstall(), cmdVersion())
+	root.AddCommand(cmdServe(), cmdBackends(), cmdModels(), cmdInstall(), cmdDoctor(), cmdVersion())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -68,16 +70,8 @@ func cmdBackends() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
 
-			backends := []backend.Backend{
-				llamacpp.New(cfg.LlamaServerPath),
-				ollama.New(cfg.OllamaHost),
-				mlx.New(cfg.MLXPython),
-				lmstudio.New(cfg.LMStudioHost),
-				openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"), "start it with `./model.llamafile --server`"),
-				openaiadopt.New("gpt4all", orDefault(cfg.GPT4AllHost, "http://127.0.0.1:4891"), "enable the API server in GPT4All settings"),
-			}
 			fmt.Printf("%-12s %-9s %-9s %s\n", "BACKEND", "PRESENT", "SOURCE", "DETAIL")
-			for _, b := range backends {
+			for _, b := range allBackends(cfg) {
 				av := b.Detect(ctx)
 				if _, ok := install.ManagedPath(av.Name); ok {
 					av.Managed = true
@@ -101,6 +95,111 @@ func cmdBackends() *cobra.Command {
 			fmt.Println("\nadopt-only backends detect a running local OpenAI server; Mainspring never installs them.")
 			return nil
 		},
+	}
+}
+
+func cmdDoctor() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose the Mainspring environment (backends, config, models, ports)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fmt.Println(build.String())
+			cfg, err := config.Load(configPath(cmd))
+			if err != nil {
+				fmt.Printf("✗ config: %v\n", err)
+				return nil
+			}
+			fmt.Println("✓ config loaded")
+
+			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			defer cancel()
+
+			present := map[string]bool{}
+			fmt.Println("\nbackends:")
+			for _, b := range allBackends(cfg) {
+				av := b.Detect(ctx)
+				present[av.Name] = av.Present
+				mark := "✗"
+				detail := av.Reason
+				if av.Present {
+					mark = "✓"
+					detail = av.Version
+					if _, ok := install.ManagedPath(av.Name); ok {
+						detail += " (managed)"
+					}
+				}
+				fmt.Printf("  %s %-10s %s\n", mark, av.Name, detail)
+			}
+
+			fmt.Println("\nmodels:")
+			if len(cfg.Models) == 0 {
+				fmt.Println("  (none configured)")
+			}
+			for _, line := range checkModels(cfg, present) {
+				fmt.Println("  " + line)
+			}
+
+			fmt.Println("\nserver:")
+			if portFree(cfg.Addr) {
+				fmt.Printf("  ✓ listen address %s is free\n", cfg.Addr)
+			} else {
+				fmt.Printf("  ✗ listen address %s is in use\n", cfg.Addr)
+			}
+			fmt.Printf("  · accelerator: %s\n", gpuHint())
+			return nil
+		},
+	}
+}
+
+// checkModels resolves each configured model's backend and reports whether that
+// backend is present and (for local-file backends) whether the weights exist.
+func checkModels(cfg config.Config, present map[string]bool) []string {
+	fallback := defaultBackendName(cfg)
+	var lines []string
+	for _, m := range cfg.Models {
+		b := m.Backend
+		if b == "" {
+			b = fallback
+		}
+		switch {
+		case !present[b]:
+			lines = append(lines, fmt.Sprintf("✗ %s → %s (backend not available)", m.ID, b))
+		case (b == "llamacpp" || b == "mlx") && m.Path != "" && !pathExists(m.Path):
+			lines = append(lines, fmt.Sprintf("✗ %s → %s (weights not found: %s)", m.ID, b, m.Path))
+		default:
+			lines = append(lines, fmt.Sprintf("✓ %s → %s", m.ID, b))
+		}
+	}
+	return lines
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// portFree reports whether addr can be bound (i.e. is currently free).
+func portFree(addr string) bool {
+	if addr == "" {
+		addr = ":11500"
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+// gpuHint gives a best-effort accelerator note for this platform.
+func gpuHint() string {
+	switch {
+	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
+		return "Apple Silicon (Metal) — use backend llamacpp or mlx"
+	case runtime.GOOS == "linux":
+		return "Linux — check `nvidia-smi` (CUDA) or ROCm; ensure the engine build has GPU support"
+	default:
+		return runtime.GOOS + "/" + runtime.GOARCH
 	}
 }
 
@@ -364,6 +463,18 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		fmt.Println("reclaiming loaded models…")
 		sched.Shutdown(context.Background())
 		return nil
+	}
+}
+
+// allBackends constructs every known backend adapter (for detection/listing).
+func allBackends(cfg config.Config) []backend.Backend {
+	return []backend.Backend{
+		llamacpp.New(cfg.LlamaServerPath),
+		ollama.New(cfg.OllamaHost),
+		mlx.New(cfg.MLXPython),
+		lmstudio.New(cfg.LMStudioHost),
+		openaiadopt.New("llamafile", orDefault(cfg.LlamafileHost, "http://127.0.0.1:8080"), "start it with `./model.llamafile --server`"),
+		openaiadopt.New("gpt4all", orDefault(cfg.GPT4AllHost, "http://127.0.0.1:4891"), "enable the API server in GPT4All settings"),
 	}
 }
 
