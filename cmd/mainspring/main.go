@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -276,6 +277,8 @@ func cmdServe() *cobra.Command {
 		backendName string
 		ollamaHost  string
 		llamaServer string
+		tlsCert     string
+		tlsKey      string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -319,6 +322,12 @@ func cmdServe() *cobra.Command {
 			if cmd.Flags().Changed("llama-server") {
 				cfg.LlamaServerPath = llamaServer
 			}
+			if cmd.Flags().Changed("tls-cert") {
+				cfg.TLSCert = tlsCert
+			}
+			if cmd.Flags().Changed("tls-key") {
+				cfg.TLSKey = tlsKey
+			}
 			for _, mf := range modelFlags {
 				m, err := parseModelFlag(mf)
 				if err != nil {
@@ -345,6 +354,8 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | ollama | mlx")
 	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "", "Ollama daemon URL when --backend ollama")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate path (with --tls-key => serve HTTPS)")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "PEM private key path")
 	return cmd
 }
 
@@ -477,9 +488,16 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	if cfg.TLSEnabled() {
+		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
 
+	scheme := "http"
+	if cfg.TLSEnabled() {
+		scheme = "https"
+	}
 	fmt.Println(build.String())
-	fmt.Printf("serving %d model(s) on %s\n", len(specs), cfg.Addr)
+	fmt.Printf("serving %d model(s) on %s (%s)\n", len(specs), cfg.Addr, scheme)
 	if ledgerPath != "" {
 		fmt.Printf("metrics: %s/metrics   usage ledger: %s\n", cfg.Addr, ledgerPath)
 	} else {
@@ -530,8 +548,14 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+		var serveErr error
+		if cfg.TLSEnabled() {
+			serveErr = httpSrv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey)
+		} else {
+			serveErr = httpSrv.ListenAndServe()
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			errCh <- serveErr
 		}
 	}()
 
