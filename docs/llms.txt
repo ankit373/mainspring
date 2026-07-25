@@ -107,8 +107,9 @@ MIT and already win; Mainspring wraps them).
   inflight/queue_depth/ttft_ms_p50; admin-gated)
 - Admin API (admin-gated, audited via the access log): `GET /admin/config` (effective runtime settings —
   timeouts, retry, breaker, cache, coalesce, guardrail, concurrency, fallbacks; secret-free by construction),
-  `POST /admin/drain[?on=false]`, `POST /admin/reload`, `POST /admin/models/{id}/load`,
-  `POST /admin/models/{id}/unload`
+  `GET /admin/usage` (per-tenant consumption actuals — requests, prompt/output tokens, USD cost; open-mode
+  traffic bucketed as "(anonymous)"), `POST /admin/drain[?on=false]`, `POST /admin/reload`,
+  `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload`
 
 ## Errors
 

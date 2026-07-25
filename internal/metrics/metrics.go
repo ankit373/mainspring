@@ -60,20 +60,33 @@ type modelStat struct {
 	ttftFilled bool
 }
 
+// tenantStat is a per-principal consumption rollup (actuals, complementing the
+// per-tenant token *budget* enforced in the auth layer).
+type tenantStat struct {
+	requests     int64
+	promptTokens int64
+	outputTokens int64
+	costUSD      float64
+}
+
 // Recorder aggregates events and appends them to a ledger file.
 type Recorder struct {
-	mu    sync.Mutex
-	stats map[string]*modelStat
+	mu      sync.Mutex
+	stats   map[string]*modelStat
+	tenants map[string]*tenantStat
 
 	ledgerMu sync.Mutex
 	ledger   io.WriteCloser
 }
 
+// anonymousTenant is the rollup bucket for unauthenticated (open-mode) requests.
+const anonymousTenant = "(anonymous)"
+
 // New returns a Recorder. If ledgerPath is non-empty, events are appended there
 // as JSONL (parent dirs created). A failure to open the ledger is returned; the
 // recorder still works for in-memory metrics.
 func New(ledgerPath string) (*Recorder, error) {
-	r := &Recorder{stats: make(map[string]*modelStat)}
+	r := &Recorder{stats: make(map[string]*modelStat), tenants: make(map[string]*tenantStat)}
 	if ledgerPath == "" {
 		return r, nil
 	}
@@ -131,6 +144,20 @@ func (r *Recorder) Record(ev Event) {
 	if ev.Fallback {
 		st.fallback++
 	}
+
+	tname := ev.Tenant
+	if tname == "" {
+		tname = anonymousTenant
+	}
+	ts := r.tenants[tname]
+	if ts == nil {
+		ts = &tenantStat{}
+		r.tenants[tname] = ts
+	}
+	ts.requests++
+	ts.promptTokens += ev.PromptTokens
+	ts.outputTokens += ev.TokensEst
+	ts.costUSD += ev.CostUSD
 	r.mu.Unlock()
 
 	r.appendLedger(ev)
@@ -183,6 +210,38 @@ func (r *Recorder) Costs() (perModel map[string]float64, total float64) {
 		total += st.costUSD
 	}
 	return perModel, total
+}
+
+// TenantUsage is one principal's consumption rollup.
+type TenantUsage struct {
+	Tenant       string  `json:"tenant"`
+	Requests     int64   `json:"requests"`
+	PromptTokens int64   `json:"prompt_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+// TenantUsage returns per-tenant consumption, sorted by tenant name.
+func (r *Recorder) TenantUsage() []TenantUsage {
+	r.mu.Lock()
+	names := make([]string, 0, len(r.tenants))
+	for n := range r.tenants {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]TenantUsage, 0, len(names))
+	for _, n := range names {
+		ts := r.tenants[n]
+		out = append(out, TenantUsage{
+			Tenant:       n,
+			Requests:     ts.requests,
+			PromptTokens: ts.promptTokens,
+			OutputTokens: ts.outputTokens,
+			CostUSD:      ts.costUSD,
+		})
+	}
+	r.mu.Unlock()
+	return out
 }
 
 // Gauges are point-in-time values supplied at scrape time (e.g. residency).
