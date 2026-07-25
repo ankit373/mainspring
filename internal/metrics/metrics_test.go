@@ -62,6 +62,30 @@ func TestResilienceCounters(t *testing.T) {
 	}
 }
 
+func TestTenantUsageRollup(t *testing.T) {
+	r, _ := New("")
+	now := time.Unix(1700000000, 0)
+	r.Record(Event{Time: now, Model: "m1", Tenant: "alice", Status: 200, PromptTokens: 10, TokensEst: 5, CostUSD: 0.01})
+	r.Record(Event{Time: now, Model: "m1", Tenant: "alice", Status: 200, PromptTokens: 20, TokensEst: 8, CostUSD: 0.02})
+	r.Record(Event{Time: now, Model: "m1", Status: 200, PromptTokens: 3, TokensEst: 2}) // no tenant → anonymous
+
+	usage := r.TenantUsage()
+	if len(usage) != 2 {
+		t.Fatalf("got %d tenants, want 2: %+v", len(usage), usage)
+	}
+	// Sorted by name: "(anonymous)" sorts before "alice".
+	if usage[0].Tenant != anonymousTenant || usage[0].Requests != 1 {
+		t.Fatalf("anonymous rollup wrong: %+v", usage[0])
+	}
+	a := usage[1]
+	if a.Tenant != "alice" || a.Requests != 2 || a.PromptTokens != 30 || a.OutputTokens != 13 {
+		t.Fatalf("alice rollup wrong: %+v", a)
+	}
+	if a.CostUSD < 0.0299 || a.CostUSD > 0.0301 {
+		t.Fatalf("alice cost = %v, want ~0.03", a.CostUSD)
+	}
+}
+
 func TestTTFTp50(t *testing.T) {
 	r, _ := New("")
 	if r.TTFTp50("none") != 0 {
