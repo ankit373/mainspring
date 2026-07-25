@@ -141,6 +141,13 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-request timeout: bound total generation time (0 = unbounded).
+	if d := s.timeoutFor(model); d > 0 {
+		tctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		r = r.WithContext(tctx)
+	}
+
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
 		s.breaker.OnResult(model, false)
@@ -410,6 +417,10 @@ type oaiToolCall struct {
 func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			writeErr(w, codeTimeout, "request timed out")
+			return 0, 0, false
+		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
 		return 0, 0, false
 	}
@@ -496,6 +507,10 @@ func argsToInput(args string) json.RawMessage {
 func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			writeErr(w, codeTimeout, "request timed out")
+			return 0, 0, false
+		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
 		return 0, 0, false
 	}

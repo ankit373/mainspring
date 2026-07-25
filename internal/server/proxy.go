@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"time"
@@ -52,6 +53,10 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 
 	resp, err := proxyClient.Do(outReq)
 	if err != nil {
+		if r.Context().Err() == context.DeadlineExceeded {
+			writeErr(w, codeTimeout, "request timed out")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
 		return
 	}

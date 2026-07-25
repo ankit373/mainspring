@@ -36,6 +36,26 @@ type Server struct {
 	accessMu sync.RWMutex
 	access   *accessLogger
 	reloadFn func() error // wired by main for POST /admin/reload
+
+	defaultTimeout time.Duration            // per-request timeout (0 = unbounded)
+	timeouts       map[string]time.Duration // per-model overrides (real ids)
+}
+
+// SetTimeouts configures the per-request generation timeout: a default applied
+// to every model, with optional per-model (real id) overrides. A duration of 0
+// means unbounded. Safe to call at startup.
+func (s *Server) SetTimeouts(def time.Duration, perModel map[string]time.Duration) {
+	s.defaultTimeout = def
+	s.timeouts = perModel
+}
+
+// timeoutFor returns the request timeout for a resolved model id (per-model
+// override if set, else the default; 0 = unbounded).
+func (s *Server) timeoutFor(model string) time.Duration {
+	if d, ok := s.timeouts[model]; ok {
+		return d
+	}
+	return s.defaultTimeout
 }
 
 // SetBreaker enables the per-model circuit breaker: after `threshold`
@@ -259,6 +279,13 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "5")
 		writeErr(w, codeCircuitOpen, "circuit open: backend for "+model+" is unavailable")
 		return
+	}
+
+	// Per-request timeout: bound total generation time (0 = unbounded).
+	if d := s.timeoutFor(model); d > 0 {
+		tctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		r = r.WithContext(tctx)
 	}
 
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
