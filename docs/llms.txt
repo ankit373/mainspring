@@ -73,6 +73,14 @@ MIT and already win; Mainspring wraps them).
 - `GET /v1/quality` (optional Hydra routing signal: per-model resident/device/degraded/effective_ctx/
   inflight/queue_depth/ttft_ms_p50; admin-gated)
 
+## Errors
+
+All errors are OpenAI-shaped `{"error":{"message","type","code"}}` with a stable machine-branchable
+`code`: `invalid_request`, `method_not_allowed`, `model_not_found`, `unauthorized`, `forbidden`,
+`rate_limited`, `token_budget_exceeded`, `server_busy`, `circuit_open`, `backend_unavailable`,
+`upstream_error`, `timeout`, `internal_error`. Same-status/different-cause conditions (503) are
+distinguished by `code` (server_busy vs circuit_open vs backend_unavailable).
+
 ## Non-goals
 
 - Mainspring does not build inference kernels — it wraps permissively-licensed engines.

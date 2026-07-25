@@ -376,9 +376,16 @@ func TestCircuitBreakerTripsAndReports(t *testing.T) {
 		t.Fatalf("first call should proxy the 500, got %d", c)
 	}
 	post() // second failure => opens
-	// Now the breaker fast-fails with 503 (no upstream call).
-	if c := post(); c != http.StatusServiceUnavailable {
-		t.Fatalf("open breaker should fast-fail 503, got %d", c)
+	// Now the breaker fast-fails with 503 (no upstream call) and the taxonomy
+	// code distinguishes it from a busy/backend-down 503.
+	fw := httptest.NewRecorder()
+	h.ServeHTTP(fw, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m1","messages":[]}`)))
+	if fw.Code != http.StatusServiceUnavailable {
+		t.Fatalf("open breaker should fast-fail 503, got %d", fw.Code)
+	}
+	if !strings.Contains(fw.Body.String(), `"code":"circuit_open"`) {
+		t.Fatalf("open-breaker error should carry code circuit_open: %s", fw.Body.String())
 	}
 
 	// /v1/quality reports the open breaker.

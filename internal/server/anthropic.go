@@ -96,27 +96,27 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 
 	tenant, _ := auth.FromContext(r.Context())
 	if !s.auth.AllowTokens(tenant) {
-		writeError(w, http.StatusTooManyRequests, "token budget exceeded")
+		writeErr(w, codeTokenBudget, "token budget exceeded")
 		return
 	}
 	release, ok := s.gate.acquire(r.Context(), model)
 	if !ok {
 		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests for "+model)
+		writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
 		return
 	}
 	defer release()
 
 	if !s.breaker.Allow(model) {
 		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, "circuit open: backend for "+model+" is unavailable")
+		writeErr(w, codeCircuitOpen, "circuit open: backend for "+model+" is unavailable")
 		return
 	}
 
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
 		s.breaker.OnResult(model, false)
-		writeError(w, http.StatusServiceUnavailable, "load model "+model+": "+err.Error())
+		writeErr(w, codeBackendUnavailable, "load model "+model+": "+err.Error())
 		return
 	}
 	for k, v := range s.failLoudHeaders(r.Context(), runner) {
