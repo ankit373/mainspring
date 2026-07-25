@@ -249,6 +249,68 @@ func TestAccessLogEmitsJSONL(t *testing.T) {
 	}
 }
 
+func TestQualityEndpoint(t *testing.T) {
+	eng := fakeEngine(t)
+	h := newTestServer(t, &engineBackend{baseURL: eng.URL}, nil)
+
+	// Before any request, the model is configured but not resident.
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/quality", nil))
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var q struct {
+		Object string `json:"object"`
+		Models []struct {
+			ID       string `json:"id"`
+			Resident bool   `json:"resident"`
+			Backend  string `json:"backend"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &q); err != nil {
+		t.Fatal(err)
+	}
+	if q.Object != "quality" || len(q.Models) != 1 || q.Models[0].ID != "m1" {
+		t.Fatalf("unexpected quality body: %s", w.Body.String())
+	}
+	if q.Models[0].Resident {
+		t.Fatal("model should not be resident before any request")
+	}
+
+	// After an inference call, the model becomes resident with a real device.
+	ireq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m1","messages":[]}`))
+	h.ServeHTTP(httptest.NewRecorder(), ireq)
+
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/v1/quality", nil))
+	if !strings.Contains(w2.Body.String(), `"resident":true`) ||
+		!strings.Contains(w2.Body.String(), `"device":"metal"`) {
+		t.Fatalf("resident model quality missing device/resident: %s", w2.Body.String())
+	}
+}
+
+func TestQualityRequiresAdmin(t *testing.T) {
+	eng := fakeEngine(t)
+	// Inference-role tenant must be forbidden from the routing-signal endpoint.
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	a := auth.NewTenants([]auth.Tenant{{Name: "user", Key: "k", Role: auth.RoleInference}})
+	h := server.New(sched, a, rec).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/quality", nil)
+	req.Header.Set("Authorization", "Bearer k")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("inference role should be forbidden, got %d", w.Code)
+	}
+}
+
 func TestUnknownAndMissingModel(t *testing.T) {
 	eng := fakeEngine(t)
 	h := newTestServer(t, &engineBackend{baseURL: eng.URL}, nil)
