@@ -25,7 +25,10 @@ type Event struct {
 	Tenant       string    `json:"tenant,omitempty"`
 	Status       int       `json:"status"`
 	Stream       bool      `json:"stream"`
-	Cached       bool      `json:"cached,omitempty"` // served from the response cache (no backend hit)
+	Cached       bool      `json:"cached,omitempty"`    // served from the response cache (no backend hit)
+	Coalesced    bool      `json:"coalesced,omitempty"` // served by sharing an in-flight leader's result
+	Fallback     bool      `json:"fallback,omitempty"`  // served by a fallback model (not the requested one)
+	Retries      int       `json:"retries,omitempty"`   // upstream retries this request incurred
 	DurationMs   float64   `json:"duration_ms"`
 	TTFTMs       float64   `json:"ttft_ms,omitempty"` // 0 when not applicable
 	Bytes        int64     `json:"bytes"`
@@ -47,6 +50,9 @@ type modelStat struct {
 	tokens       int64
 	promptTokens int64
 	costUSD      float64
+	retries      int64
+	coalesced    int64
+	fallback     int64
 
 	// ttftRing is a bounded ring of recent TTFT samples (ms) for a p50 estimate.
 	ttftRing   []float64
@@ -118,6 +124,13 @@ func (r *Recorder) Record(ev Event) {
 	st.tokens += ev.TokensEst
 	st.promptTokens += ev.PromptTokens
 	st.costUSD += ev.CostUSD
+	st.retries += int64(ev.Retries)
+	if ev.Coalesced {
+		st.coalesced++
+	}
+	if ev.Fallback {
+		st.fallback++
+	}
 	r.mu.Unlock()
 
 	r.appendLedger(ev)
@@ -199,7 +212,10 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 			durSum: st.durSumMs, ttftSum: st.ttftSumMs,
 			durCount: st.durCount, ttftCount: st.ttftCount,
 			tokens: st.tokens, promptTokens: st.promptTokens,
-			costUSD: st.costUSD,
+			costUSD:   st.costUSD,
+			retries:   st.retries,
+			coalesced: st.coalesced,
+			fallback:  st.fallback,
 		})
 	}
 	r.mu.Unlock()
@@ -224,6 +240,9 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 	writeCounterI(w, "mainspring_tokens_estimated_total", "Output tokens by model (real when upstream reports usage, else estimated).", rows, func(rw rowT) int64 { return rw.tokens })
 	writeCounterI(w, "mainspring_prompt_tokens_total", "Prompt (input) tokens by model (real; 0 when upstream reports no usage).", rows, func(rw rowT) int64 { return rw.promptTokens })
 	writeCounter(w, "mainspring_cost_usd_total", "Computed spend in USD by model (0 when no rate configured).", rows, func(rw rowT) float64 { return rw.costUSD })
+	writeCounterI(w, "mainspring_retries_total", "Upstream retries by model (transient-failure retries).", rows, func(rw rowT) int64 { return rw.retries })
+	writeCounterI(w, "mainspring_coalesced_total", "Requests served by coalescing onto an in-flight leader, by model.", rows, func(rw rowT) int64 { return rw.coalesced })
+	writeCounterI(w, "mainspring_fallback_total", "Requests served by a fallback model, by (serving) model.", rows, func(rw rowT) int64 { return rw.fallback })
 
 	fmt.Fprint(w, "# HELP mainspring_loaded_models Currently resident models.\n# TYPE mainspring_loaded_models gauge\n")
 	fmt.Fprintf(w, "mainspring_loaded_models %d\n", g.LoadedModels)
@@ -239,6 +258,7 @@ type rowT = struct {
 	durSum, ttftSum                           float64
 	durCount, ttftCount, tokens, promptTokens int64
 	costUSD                                   float64
+	retries, coalesced, fallback              int64
 }
 
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {

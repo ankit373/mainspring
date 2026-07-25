@@ -41,6 +41,27 @@ func TestRecordAndPrometheus(t *testing.T) {
 	}
 }
 
+func TestResilienceCounters(t *testing.T) {
+	r, _ := New("")
+	now := time.Unix(1700000000, 0)
+	r.Record(Event{Time: now, Model: "m1", Status: 200, Retries: 2, Fallback: true})
+	r.Record(Event{Time: now, Model: "m1", Status: 200, Retries: 1, Coalesced: true})
+	r.Record(Event{Time: now, Model: "m1", Status: 200}) // no resilience events
+
+	var buf bytes.Buffer
+	r.WritePrometheus(&buf, Gauges{})
+	out := buf.String()
+	for _, want := range []string{
+		`mainspring_retries_total{model="m1"} 3`,   // 2 + 1
+		`mainspring_coalesced_total{model="m1"} 1`, // one coalesced
+		`mainspring_fallback_total{model="m1"} 1`,  // one fallback
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("prometheus output missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
 func TestTTFTp50(t *testing.T) {
 	r, _ := New("")
 	if r.TTFTp50("none") != 0 {

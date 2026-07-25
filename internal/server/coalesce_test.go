@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,6 +84,13 @@ func TestCoalesceIdenticalRequests(t *testing.T) {
 	sameBodies.Range(func(_, _ any) bool { count++; return true })
 	if count != 1 {
 		t.Fatalf("callers saw %d distinct bodies, want 1", count)
+	}
+
+	// The coalesced count surfaces through /metrics (end-to-end wiring).
+	mw := httptest.NewRecorder()
+	h.ServeHTTP(mw, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(mw.Body.String(), `mainspring_coalesced_total{model="m1"} 9`) {
+		t.Fatalf("metrics missing coalesced counter:\n%s", mw.Body.String())
 	}
 }
 

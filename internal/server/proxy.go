@@ -61,13 +61,14 @@ func retryableStatus(code int) bool {
 // Transient failures (connection errors, retryable statuses) are retried with
 // exponential backoff up to s.retryMax additional attempts. Retry is always
 // decided *before* any byte reaches the client, so it is safe for both
-// streaming and non-streaming responses.
-func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string, body []byte, extra map[string]string) {
+// streaming and non-streaming responses. It returns the number of retries the
+// request incurred (0 when it succeeded first try).
+func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string, body []byte, extra map[string]string) int {
 	attempts := s.retryMax + 1
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 && !sleepBackoff(r.Context(), s.retryBackoff, attempt) {
 			writeErr(w, codeTimeout, "request timed out")
-			return
+			return attempt
 		}
 		last := attempt == attempts-1
 
@@ -75,13 +76,13 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 		if err != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				writeErr(w, codeTimeout, "request timed out")
-				return
+				return attempt
 			}
 			if !last {
 				continue // transient connection error → retry
 			}
 			writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-			return
+			return attempt
 		}
 
 		if !last && retryableStatus(resp.StatusCode) {
@@ -97,7 +98,7 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 		}
 		s.commitResponse(w, resp, extra)
 		_ = resp.Body.Close()
-		return
+		return attempt
 	}
 }
 
