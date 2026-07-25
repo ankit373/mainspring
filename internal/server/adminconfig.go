@@ -62,6 +62,12 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		guard[m] = map[string]any{"limit": p.Limit, "enforce": p.Enforce}
 	}
 
+	// Models with max_tokens clamping enabled.
+	clampModels := make([]string, 0, len(s.clampLimits))
+	for m := range s.clampLimits {
+		clampModels = append(clampModels, m)
+	}
+
 	// Cost-rate presence (per model) — booleans, never the dollar values.
 	priced := make(map[string]bool, len(s.costRates))
 	for m := range s.costRates {
@@ -86,6 +92,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"coalesce":        map[string]any{"enabled": s.coalesce != nil},
 		"concurrency":     concurrency,
 		"context_guard":   guard,
+		"clamp_models":    clampModels,
 		"model_fallbacks": s.modelFallbacks,
 		"cost_rates_set":  priced,
 	})

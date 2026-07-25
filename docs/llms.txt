@@ -47,6 +47,9 @@ MIT and already win; Mainspring wraps them).
 - Token counting: `POST /v1/tokenize {model, input}` returns `{tokens, exact}` — the model's real token
   count (exact) when the model is resident on an engine that exposes a tokenizer (llama.cpp `/tokenize`),
   otherwise the character-based estimate (exact:false). No forced load; no extra dependency.
+- Graceful clamp (opt-in): `clamp_max_tokens` shrinks an over-budget `max_tokens`/`max_completion_tokens`
+  to the room left in the context window and proceeds (header `X-Mainspring-Clamped: <from>-><to>`),
+  instead of rejecting — runs before the guardrail; a request with no room left falls through to it.
 - Context guardrail (opt-in): when a model's context window is known, `enforce_context` rejects a
   request that cannot fit (400 `context_length_exceeded`) instead of letting the engine silently
   truncate it. The requested-output check (`max_tokens` > context) is exact; the prompt-size check is a
