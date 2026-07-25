@@ -108,6 +108,50 @@ func TestAnthropicMessageToolResult(t *testing.T) {
 	}
 }
 
+func TestImageSourceToURL(t *testing.T) {
+	if got := imageSourceToURL(&imageSource{Type: "base64", MediaType: "image/png", Data: "AAAA"}); got != "data:image/png;base64,AAAA" {
+		t.Fatalf("base64 => %q", got)
+	}
+	if got := imageSourceToURL(&imageSource{Type: "url", URL: "https://x/i.png"}); got != "https://x/i.png" {
+		t.Fatalf("url => %q", got)
+	}
+	if imageSourceToURL(nil) != "" || imageSourceToURL(&imageSource{Type: "base64"}) != "" {
+		t.Fatal("incomplete/nil source should yield empty url")
+	}
+}
+
+func TestAnthropicMessageImageContent(t *testing.T) {
+	// A user turn with text + a base64 image becomes an OpenAI multimodal content
+	// array, preserving order (text part first, then image_url).
+	msg := anthropicMessage{Role: "user", Content: json.RawMessage(
+		`[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"Zm9v"}}]`)}
+	got, err := anthropicMessageToOpenAI(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0]["role"] != "user" {
+		t.Fatalf("expected one user message, got %v", got)
+	}
+	parts, ok := got[0]["content"].([]map[string]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("content should be a 2-part array: %v", got[0]["content"])
+	}
+	if parts[0]["type"] != "text" || parts[1]["type"] != "image_url" {
+		t.Fatalf("parts out of order or wrong type: %v", parts)
+	}
+	iu := parts[1]["image_url"].(map[string]any)
+	if iu["url"] != "data:image/jpeg;base64,Zm9v" {
+		t.Fatalf("image_url = %v", iu["url"])
+	}
+
+	// A text-only user turn stays a plain string (backward compatible).
+	txt := anthropicMessage{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"hi"}]`)}
+	g2, _ := anthropicMessageToOpenAI(txt)
+	if _, isStr := g2[0]["content"].(string); !isStr {
+		t.Fatalf("text-only content should stay a string, got %T", g2[0]["content"])
+	}
+}
+
 func TestArgsToInput(t *testing.T) {
 	if string(argsToInput("")) != "{}" {
 		t.Fatal("empty args should become {}")
