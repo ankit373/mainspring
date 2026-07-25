@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,20 +123,25 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	var tokens int64
+	var prompt, completion int64
+	var exact bool
 	if req.Stream {
-		tokens = s.messagesStream(w, r.Context(), runner.BaseURL(), oaiBody, requested)
+		prompt, completion, exact = s.messagesStream(w, r.Context(), runner.BaseURL(), oaiBody, requested)
 	} else {
-		tokens = s.messagesJSON(w, r.Context(), runner.BaseURL(), oaiBody, requested)
+		prompt, completion, exact = s.messagesJSON(w, r.Context(), runner.BaseURL(), oaiBody, requested)
 	}
 
-	s.auth.AddTokens(tenant, tokens)
+	charge := completion
+	if exact {
+		charge = prompt + completion
+	}
+	s.auth.AddTokens(tenant, charge)
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
 			Time: start, Model: model, Tenant: auth.TenantOf(r.Context()),
 			Status: http.StatusOK, Stream: req.Stream,
-			DurationMs: float64(time.Since(start).Microseconds()) / 1000.0,
-			TokensEst:  tokens,
+			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
+			PromptTokens: prompt, TokensEst: completion, Exact: exact,
 		})
 	}
 }
@@ -342,12 +348,14 @@ type oaiToolCall struct {
 	} `json:"function"`
 }
 
-// messagesJSON does a non-streaming upstream call and returns the Anthropic body.
-func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) int64 {
+// messagesJSON does a non-streaming upstream call and writes the Anthropic body.
+// It returns the real prompt/completion token counts and whether the upstream
+// supplied a usage object.
+func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-		return 0
+		return 0, 0, false
 	}
 	defer resp.Body.Close()
 	var oai struct {
@@ -365,7 +373,7 @@ func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseUR
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBody)).Decode(&oai); err != nil {
 		writeError(w, http.StatusBadGateway, "decode backend response: "+err.Error())
-		return 0
+		return 0, 0, false
 	}
 	content, finish := "", ""
 	var toolCalls []oaiToolCall
@@ -401,11 +409,14 @@ func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseUR
 		"stop_sequence": nil,
 		"usage":         map[string]int64{"input_tokens": oai.Usage.PromptTokens, "output_tokens": oai.Usage.CompletionTokens},
 	}
-	writeJSON(w, http.StatusOK, out)
-	if oai.Usage.CompletionTokens > 0 {
-		return oai.Usage.CompletionTokens
+	exact = oai.Usage.CompletionTokens > 0 || oai.Usage.PromptTokens > 0
+	if exact {
+		// We own the writer here, so surface usage as headers too (set before body).
+		w.Header().Set("X-Mainspring-Tokens-Input", strconv.FormatInt(oai.Usage.PromptTokens, 10))
+		w.Header().Set("X-Mainspring-Tokens-Output", strconv.FormatInt(oai.Usage.CompletionTokens, 10))
 	}
-	return 0
+	writeJSON(w, http.StatusOK, out)
+	return oai.Usage.PromptTokens, oai.Usage.CompletionTokens, exact
 }
 
 // argsToInput turns an OpenAI tool-call arguments JSON string into a JSON value
@@ -423,12 +434,14 @@ func argsToInput(args string) json.RawMessage {
 }
 
 // messagesStream translates the upstream OpenAI SSE stream into Anthropic SSE
-// events and returns the number of output tokens (deltas + tool-call fragments).
-func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) int64 {
+// events. It returns the prompt/completion token counts and whether they came
+// from an upstream usage object (stream_options.include_usage); when absent,
+// completion falls back to the number of streamed fragments.
+func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-		return 0
+		return 0, 0, false
 	}
 	defer resp.Body.Close()
 
@@ -475,8 +488,19 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int64 `json:"prompt_tokens"`
+				CompletionTokens int64 `json:"completion_tokens"`
+			} `json:"usage"`
 		}
-		if json.Unmarshal([]byte(data), &chunk) != nil || len(chunk.Choices) == 0 {
+		if json.Unmarshal([]byte(data), &chunk) != nil {
+			continue
+		}
+		// The include_usage final chunk carries usage with an empty choices list.
+		if chunk.Usage != nil {
+			prompt, completion, exact = chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, true
+		}
+		if len(chunk.Choices) == 0 {
 			continue
 		}
 		ch := chunk.Choices[0]
@@ -498,11 +522,16 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 		st.textDelta("")
 	}
 	st.closeOpen()
+	// Prefer real usage from the upstream include_usage chunk; else the fragment
+	// count is the best available output estimate.
+	if !exact {
+		completion = deltas
+	}
 	send("message_delta", map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": mapStopReason(finish), "stop_sequence": nil},
-		"usage": map[string]int64{"output_tokens": deltas}})
+		"usage": map[string]int64{"output_tokens": completion}})
 	send("message_stop", map[string]any{"type": "message_stop"})
-	return deltas
+	return prompt, completion, exact
 }
 
 // anthropicStreamState tracks which content block is currently open so text and

@@ -169,6 +169,65 @@ func TestMessagesToolUseStreaming(t *testing.T) {
 	}
 }
 
+// usageEngineServer returns a fixed usage object (non-stream) and an
+// include_usage final chunk (stream).
+func usageEngineServer(t *testing.T) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"stream":true`) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl := w.(http.Flusher)
+			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+			fl.Flush()
+			_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":3}}\n\n")
+			fl.Flush()
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			fl.Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"Hello"}}],"usage":{"prompt_tokens":12,"completion_tokens":4}}`)
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	return server.New(sched, auth.New(nil), rec).Handler()
+}
+
+func TestMessagesUsageHeaderNonStream(t *testing.T) {
+	h := usageEngineServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"m1","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("X-Mainspring-Tokens-Input"); got != "12" {
+		t.Fatalf("input token header=%q, want 12", got)
+	}
+	if got := w.Header().Get("X-Mainspring-Tokens-Output"); got != "4" {
+		t.Fatalf("output token header=%q, want 4", got)
+	}
+}
+
+func TestMessagesUsageStream(t *testing.T) {
+	h := usageEngineServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"m1","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	// The real upstream completion count (3) must appear in message_delta usage,
+	// not the raw frame count.
+	if !strings.Contains(w.Body.String(), `"output_tokens":3`) {
+		t.Fatalf("stream message_delta should carry real output_tokens=3:\n%s", w.Body.String())
+	}
+}
+
 func TestMessagesUnknownModel(t *testing.T) {
 	h := anthropicServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
