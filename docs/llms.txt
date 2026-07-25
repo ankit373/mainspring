@@ -49,6 +49,10 @@ MIT and already win; Mainspring wraps them).
   truncate it. The requested-output check (`max_tokens` > context) is exact; the prompt-size check is a
   conservative tokenizer-free estimate. A per-model override can downgrade enforcement to a warning
   header (`X-Mainspring-Context-Warning`). Turns the fail-loud context *warning* into an enforceable limit.
+- Request coalescing (opt-in): a burst of identical deterministic (temperature 0) non-streaming requests
+  in flight at once share ONE backend computation — the first is the leader, concurrent identical ones
+  wait and replay its result (`X-Mainspring-Coalesced: true`). Keyed by the same canonical hash the cache
+  uses; streaming and non-deterministic requests are never coalesced. Enable with `coalesce: true`.
 - Response cache (opt-in): identical deterministic (temperature 0) non-streaming requests are served
   from a bounded TTL+LRU cache without touching the backend; hits carry `X-Mainspring-Cache: hit` and
   are counted in /metrics (`mainspring_cache_hits_total`). Streaming and non-zero-temperature requests

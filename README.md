@@ -46,6 +46,8 @@ layer around them **fail loud, VRAM-aware, and governed**.
   error taxonomy (stable `code` per failure class).
 - **Opt-in response cache** — identical deterministic (temperature 0) non-streaming requests return from a
   bounded TTL+LRU cache without re-running the model; hits carry `X-Mainspring-Cache: hit`.
+- **Request coalescing** — a burst of identical in-flight deterministic requests shares one backend
+  computation (single-flight); followers carry `X-Mainspring-Coalesced: true`.
 - **Context guardrail** — optional `enforce_context` rejects over-context requests (`context_length_exceeded`)
   instead of letting the engine silently truncate, or downgrades to a warning header per model.
 - **Standalone governance** — API-key tenants with roles (admin/inference), per-tenant rate + token

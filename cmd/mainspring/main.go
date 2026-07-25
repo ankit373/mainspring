@@ -551,6 +551,10 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if len(modelFallbacks) > 0 {
 		srv.SetModelFallbacks(modelFallbacks)
 	}
+	// Single-flight request coalescing (disabled unless coalesce: true).
+	if cfg.Coalesce {
+		srv.SetCoalescing(true)
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)
