@@ -64,6 +64,8 @@ MIT and already win; Mainspring wraps them).
 - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
 - `POST /v1/messages` (Anthropic, text + tool use; streaming translated, incl. input_json_delta)
 - `GET /v1/models`, `GET /capabilities`, `GET /metrics`, `GET /healthz`, `GET /readyz`
+- `GET /v1/quality` (optional Hydra routing signal: per-model resident/device/degraded/effective_ctx/
+  inflight/queue_depth/ttft_ms_p50; admin-gated)
 
 ## Non-goals
 
@@ -75,7 +77,10 @@ MIT and already win; Mainspring wraps them).
 Mainspring is an inference *head*; Hydra (https://github.com/ankit373/hydra) is a provider-neutral
 router/trust control plane above it. They meet over the standard OpenAI-compatible boundary. Hydra
 works with everything (Ollama, OpenAI, Anthropic, any OpenAI-compatible endpoint) and never depends on
-Mainspring — Mainspring is simply the head Hydra integrates with best.
+Mainspring — Mainspring is simply the head Hydra integrates with best. The optional `GET /v1/quality`
+endpoint is that integration contract: a machine-readable per-model routing signal (residency, real
+device, degraded state, effective context, in-flight/queue depth, TTFT p50) a router can consume to
+route to Mainspring best. It is never required — Mainspring runs fine standalone with no router.
 
 ## Links
 

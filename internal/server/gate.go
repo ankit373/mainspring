@@ -75,6 +75,17 @@ func (g *gate) acquire(ctx context.Context, model string) (func(), bool) {
 	}
 }
 
+// stat returns the current in-flight and queued counts for one model. Both are 0
+// when gating is disabled (the counters are only maintained when enabled).
+func (g *gate) stat(model string) (inflight, queued int) {
+	if !g.enabled() {
+		return 0, 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.inflight[model], g.queued[model]
+}
+
 // writePrometheus appends inflight/queued gauges (no-op when disabled).
 func (g *gate) writePrometheus(w io.Writer) {
 	if !g.enabled() {

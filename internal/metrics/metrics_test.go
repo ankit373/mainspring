@@ -41,6 +41,20 @@ func TestRecordAndPrometheus(t *testing.T) {
 	}
 }
 
+func TestTTFTp50(t *testing.T) {
+	r, _ := New("")
+	if r.TTFTp50("none") != 0 {
+		t.Fatal("no samples => 0")
+	}
+	now := time.Unix(1700000000, 0)
+	for _, v := range []float64{10, 30, 20, 50, 40} { // median = 30
+		r.Record(Event{Time: now, Model: "m1", Status: 200, TTFTMs: v})
+	}
+	if got := r.TTFTp50("m1"); got != 30 {
+		t.Fatalf("p50 = %v, want 30", got)
+	}
+}
+
 func TestLedgerAppends(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "usage.jsonl")
 	r, err := New(path)

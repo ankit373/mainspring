@@ -32,6 +32,9 @@ type Event struct {
 	Exact        bool      `json:"exact_usage,omitempty"`   // true when counts came from an upstream usage object
 }
 
+// ttftRingSize bounds the recent-TTFT reservoir kept per model for quantiles.
+const ttftRingSize = 256
+
 type modelStat struct {
 	requests     map[int]int64 // status -> count
 	durSumMs     float64
@@ -40,6 +43,11 @@ type modelStat struct {
 	ttftCount    int64
 	tokens       int64
 	promptTokens int64
+
+	// ttftRing is a bounded ring of recent TTFT samples (ms) for a p50 estimate.
+	ttftRing   []float64
+	ttftAt     int
+	ttftFilled bool
 }
 
 // Recorder aggregates events and appends them to a ledger file.
@@ -94,6 +102,14 @@ func (r *Recorder) Record(ev Event) {
 	if ev.TTFTMs > 0 {
 		st.ttftSumMs += ev.TTFTMs
 		st.ttftCount++
+		if st.ttftRing == nil {
+			st.ttftRing = make([]float64, ttftRingSize)
+		}
+		st.ttftRing[st.ttftAt] = ev.TTFTMs
+		st.ttftAt = (st.ttftAt + 1) % ttftRingSize
+		if st.ttftAt == 0 {
+			st.ttftFilled = true
+		}
 	}
 	st.tokens += ev.TokensEst
 	st.promptTokens += ev.PromptTokens
@@ -111,6 +127,31 @@ func (r *Recorder) appendLedger(ev Event) {
 	if b, err := json.Marshal(ev); err == nil {
 		_, _ = r.ledger.Write(append(b, '\n'))
 	}
+}
+
+// TTFTp50 returns the median time-to-first-token (ms) for a model over its
+// recent samples, or 0 when there are none. It is a bounded-reservoir estimate,
+// not an exact global quantile.
+func (r *Recorder) TTFTp50(model string) float64 {
+	r.mu.Lock()
+	st := r.stats[model]
+	if st == nil || st.ttftCount == 0 {
+		r.mu.Unlock()
+		return 0
+	}
+	n := len(st.ttftRing)
+	if !st.ttftFilled {
+		n = st.ttftAt
+	}
+	samples := make([]float64, n)
+	copy(samples, st.ttftRing[:n])
+	r.mu.Unlock()
+
+	if len(samples) == 0 {
+		return 0
+	}
+	sort.Float64s(samples)
+	return samples[len(samples)/2]
 }
 
 // Gauges are point-in-time values supplied at scrape time (e.g. residency).

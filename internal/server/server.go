@@ -77,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/readyz", s.readyz)
 	mux.HandleFunc("/metrics", s.metricsHandler)
 	mux.HandleFunc("/capabilities", s.capabilities)
+	mux.HandleFunc("/v1/quality", s.quality) // optional Hydra routing signal
 	mux.HandleFunc("/v1/models", s.models)
 	mux.HandleFunc("/v1/chat/completions", s.inference)
 	mux.HandleFunc("/v1/completions", s.inference)
