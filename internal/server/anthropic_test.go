@@ -228,6 +228,81 @@ func TestMessagesUsageStream(t *testing.T) {
 	}
 }
 
+// capturingEngineServer records the raw upstream request body it receives, so a
+// test can assert on exactly what Mainspring asked the backend for.
+func capturingEngineServer(t *testing.T) (http.Handler, func() []byte) {
+	t.Helper()
+	var captured []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		if strings.Contains(string(captured), `"stream":true`) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl := w.(http.Flusher)
+			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+			fl.Flush()
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			fl.Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"Hello"}}]}`)
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	return server.New(sched, auth.New(nil), rec).Handler(), func() []byte { return captured }
+}
+
+// TestStreamingRequestsIncludeUsage proves the fix: a streaming /v1/messages
+// call must ask the upstream for stream_options.include_usage so
+// messagesStream's exact-usage path is actually reachable.
+func TestStreamingRequestsIncludeUsage(t *testing.T) {
+	h, captured := capturingEngineServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"m1","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var upstream map[string]any
+	if err := json.Unmarshal(captured(), &upstream); err != nil {
+		t.Fatalf("decode captured upstream body: %v", err)
+	}
+	opts, ok := upstream["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("upstream body missing stream_options: %v", upstream)
+	}
+	if opts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage = %v, want true", opts["include_usage"])
+	}
+}
+
+// A non-streaming request must not carry stream_options at all.
+func TestNonStreamingOmitsStreamOptions(t *testing.T) {
+	h, captured := capturingEngineServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"m1","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var upstream map[string]any
+	if err := json.Unmarshal(captured(), &upstream); err != nil {
+		t.Fatalf("decode captured upstream body: %v", err)
+	}
+	if _, ok := upstream["stream_options"]; ok {
+		t.Fatalf("non-streaming request should not carry stream_options: %v", upstream)
+	}
+}
+
 func TestMessagesUnknownModel(t *testing.T) {
 	h := anthropicServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
