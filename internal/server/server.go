@@ -130,6 +130,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/capabilities", s.capabilities)
 	mux.HandleFunc("/v1/quality", s.quality) // optional Hydra routing signal
 	mux.HandleFunc("/v1/models", s.models)
+	mux.HandleFunc("GET /v1/models/{id}", s.modelDetail)
 	mux.HandleFunc("/v1/chat/completions", s.inference)
 	mux.HandleFunc("/v1/completions", s.inference)
 	mux.HandleFunc("/v1/embeddings", s.inference)
@@ -194,6 +195,40 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 		data = append(data, model{ID: name, Object: "model", OwnedBy: "mainspring"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+// modelDetail implements GET /v1/models/{id} — the OpenAI "retrieve a model"
+// endpoint. It resolves aliases and, when the model is currently resident,
+// enriches the standard id/object/owned_by shape with the fail-loud
+// backend/device fields (non-standard, but useful at a glance — the same data
+// /v1/quality reports at scale).
+func (s *Server) modelDetail(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.sched.Resolve(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "model not found: "+r.PathValue("id"))
+		return
+	}
+	out := map[string]any{"id": id, "object": "model", "owned_by": "mainspring"}
+	for _, ri := range s.sched.Loaded() {
+		if ri.ID != id {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		c, err := ri.Runner.Capabilities(ctx)
+		cancel()
+		if err == nil {
+			out["resident"] = true
+			out["backend"] = c.Backend
+			out["device"] = c.Device
+			out["effective_ctx"] = c.EffectiveCtx
+			out["degraded"] = c.Degraded()
+		}
+		break
+	}
+	if _, ok := out["resident"]; !ok {
+		out["resident"] = false
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // capabilities implements GET /capabilities — the fail-loud endpoint. It reports

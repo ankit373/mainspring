@@ -112,7 +112,9 @@ MIT and already win; Mainspring wraps them).
 
 - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
 - `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta)
-- `GET /v1/models`, `GET /capabilities`, `GET /metrics`, `GET /healthz`, `GET /readyz`
+- `GET /v1/models`, `GET /v1/models/{id}` (OpenAI "retrieve a model"; resolves aliases; adds
+  resident/backend/device/effective_ctx/degraded when the model is loaded), `GET /capabilities`,
+  `GET /metrics`, `GET /healthz`, `GET /readyz`
 - `GET /v1/quality` (optional Hydra routing signal: per-model resident/device/degraded/effective_ctx/
   inflight/queue_depth/ttft_ms_p50; admin-gated)
 - Admin API (admin-gated, audited via the access log): `GET /admin/config` (effective runtime settings —
