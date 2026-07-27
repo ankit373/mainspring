@@ -203,6 +203,12 @@ func toOpenAIRequest(req anthropicRequest) ([]byte, error) {
 		msgs = append(msgs, converted...)
 	}
 	oai := map[string]any{"model": req.Model, "messages": msgs, "stream": req.Stream}
+	if req.Stream {
+		// Ask the upstream for a final usage chunk so messagesStream can report
+		// exact prompt/completion tokens instead of falling back to the SSE-frame
+		// estimate. Only meaningful when streaming; omitted otherwise.
+		oai["stream_options"] = map[string]bool{"include_usage": true}
+	}
 	if req.MaxTokens > 0 {
 		oai["max_tokens"] = req.MaxTokens
 	}
