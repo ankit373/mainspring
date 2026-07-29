@@ -50,6 +50,10 @@ MIT and already win; Mainspring wraps them).
 - Graceful clamp (opt-in): `clamp_max_tokens` shrinks an over-budget `max_tokens`/`max_completion_tokens`
   to the room left in the context window and proceeds (header `X-Mainspring-Clamped: <from>-><to>`),
   instead of rejecting — runs before the guardrail; a request with no room left falls through to it.
+- Embeddings-aware token counting: the guardrail, `clamp_max_tokens`, `precise_context`, and
+  `/v1/tokenize` all count an embeddings request's `input` field (bare string or array of strings), not
+  just `messages`/`prompt` — a large `/v1/embeddings` input now correctly trips the guardrail instead of
+  estimating as 0.
 - Precise guardrail (opt-in): `precise_context` refines the guardrail — when the target model is resident
   on a tokenizing engine, prompt tokens are counted *exactly* (via `/tokenize`) instead of estimated (no
   forced load; falls back to the estimate otherwise). The method is reported on `X-Mainspring-Context-Method:

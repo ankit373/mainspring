@@ -105,9 +105,9 @@ func maxTokensRequested(body []byte) int {
 }
 
 // estimatePromptTokens is a tokenizer-free, conservative estimate of the input
-// token count. It handles both the chat (messages[].content, string or
-// multimodal array) and legacy completion (prompt) shapes. Non-text parts (e.g.
-// images) contribute only their fixed per-message overhead.
+// token count. It handles the chat (messages[].content, string or multimodal
+// array), legacy completion (prompt), and embeddings (input) shapes. Non-text
+// parts (e.g. images) contribute only their fixed per-message overhead.
 func estimatePromptTokens(body []byte) int {
 	var req struct {
 		Messages []struct {
@@ -115,6 +115,7 @@ func estimatePromptTokens(body []byte) int {
 		} `json:"messages"`
 		Prompt json.RawMessage `json:"prompt"`
 		System string          `json:"system"`
+		Input  json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &req) != nil {
 		return 0
@@ -127,7 +128,29 @@ func estimatePromptTokens(body []byte) int {
 	if len(req.Prompt) > 0 {
 		total += contentTokens(req.Prompt)
 	}
+	for _, s := range inputStrings(req.Input) {
+		total += charTokens(utf8.RuneCountInString(s))
+	}
 	return total
+}
+
+// inputStrings extracts an embeddings-style `input` field as a slice of
+// strings: a bare string becomes a single-element slice, and an array of
+// strings passes through. Other shapes (e.g. pre-tokenized integer arrays) are
+// uncommon and yield nil, same as before this field was counted at all.
+func inputStrings(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return []string{s}
+	}
+	var arr []string
+	if json.Unmarshal(raw, &arr) == nil {
+		return arr
+	}
+	return nil
 }
 
 // contentTokens estimates tokens for a message content field that may be a bare
