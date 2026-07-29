@@ -39,9 +39,9 @@ func (s *Server) countTokens(ctx context.Context, model, text string) (int, bool
 // precisePromptTokens counts a request's prompt tokens exactly using the model's
 // real tokenizer, when the model is resident and supports it (ok=true). It sums
 // the tokenized text of each message (plus the fixed per-message chat-template
-// overhead), the system prompt, and any legacy completion prompt. ok=false (no
-// forced load, or a tokenizer error) tells the caller to fall back to the
-// estimate.
+// overhead), the system prompt, any legacy completion prompt, and an embeddings
+// `input` field (string or array of strings). ok=false (no forced load, or a
+// tokenizer error) tells the caller to fall back to the estimate.
 func (s *Server) precisePromptTokens(ctx context.Context, model string, body []byte) (int, bool) {
 	tc, ok := s.residentTokenCounter(model)
 	if !ok {
@@ -53,6 +53,7 @@ func (s *Server) precisePromptTokens(ctx context.Context, model string, body []b
 		} `json:"messages"`
 		Prompt json.RawMessage `json:"prompt"`
 		System string          `json:"system"`
+		Input  json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &req) != nil {
 		return 0, false
@@ -80,6 +81,11 @@ func (s *Server) precisePromptTokens(ctx context.Context, model string, body []b
 	}
 	if !count(contentText(req.Prompt)) {
 		return 0, false
+	}
+	for _, s := range inputStrings(req.Input) {
+		if !count(s) {
+			return 0, false
+		}
 	}
 	return total, true
 }
