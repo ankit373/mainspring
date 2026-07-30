@@ -55,6 +55,7 @@ type loaded struct {
 	spec     backend.ModelSpec
 	lastUsed time.Time
 	timer    *time.Timer
+	inflight int // requests actively using this runner right now; never evict while > 0
 }
 
 type loadCall struct {
@@ -273,6 +274,41 @@ func (s *Scheduler) EnsureLoaded(ctx context.Context, modelID string) (backend.R
 	return c.runner, c.err
 }
 
+// MarkBusy records that a request is actively using modelID's runner right
+// now, deferring both idle-timeout and capacity eviction until the matching
+// MarkIdle. Without this, a request whose total duration outlasts KeepAlive (or
+// that loses a capacity race to a new model) would have its runner killed out
+// from under it — idleEvict and the LRU picker have no other way to know a
+// "stale-looking" runner is still in active use. No-op if the model isn't
+// currently resident (e.g. a race with eviction) — nothing left to protect.
+func (s *Scheduler) MarkBusy(modelID string) {
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.running[modelID]; ok {
+		l.inflight++
+	}
+}
+
+// MarkIdle is the matching release for MarkBusy. It also touches the model, so
+// the idle clock starts counting from actual last-activity (when the request
+// truly finished) rather than from when it started.
+func (s *Scheduler) MarkIdle(modelID string) {
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.running[modelID]; ok {
+		if l.inflight > 0 {
+			l.inflight--
+		}
+		s.touch(l)
+	}
+}
+
 func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, error) {
 	s.specsMu.RLock()
 	spec, ok := s.specs[modelID]
@@ -364,11 +400,20 @@ func (s *Scheduler) usedBytesLocked() int64 {
 }
 
 // lruLocked returns the id of the least-recently-used model (caller holds mu).
+// lruLocked returns the least-recently-used *idle* model, skipping any with an
+// in-flight request — an active request must never be evicted to make room for
+// another. Returns "" if every resident model is currently busy (the caller
+// then admits the new one without evicting anything, over capacity but not
+// broken — the same best-effort trade-off already made when a single model is
+// larger than the whole budget).
 func (s *Scheduler) lruLocked() string {
 	var oldestID string
 	var oldest time.Time
 	first := true
 	for id, l := range s.running {
+		if l.inflight > 0 {
+			continue
+		}
 		if first || l.lastUsed.Before(oldest) {
 			oldestID, oldest, first = id, l.lastUsed, false
 		}
@@ -380,6 +425,13 @@ func (s *Scheduler) idleEvict(modelID string) {
 	s.mu.Lock()
 	l, ok := s.running[modelID]
 	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	if l.inflight > 0 {
+		// Never unload a runner mid-request; recheck after a full fresh window
+		// rather than racing the in-flight request's own completion.
+		l.timer.Reset(s.keepAlive)
 		s.mu.Unlock()
 		return
 	}

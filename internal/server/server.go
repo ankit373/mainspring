@@ -506,7 +506,12 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	if ((cacheKey != "") || coLeader) && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
+	// Mark the runner busy for the actual generation call so the scheduler's
+	// idle timer and LRU eviction never pull it out from under a long-running
+	// request (e.g. one that streams longer than KeepAlive).
+	s.sched.MarkBusy(served)
 	retries := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
+	s.sched.MarkIdle(served)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
 	// (4xx is a client error, not the backend's fault).
 	s.breaker.OnResult(served, cap.status < 500)

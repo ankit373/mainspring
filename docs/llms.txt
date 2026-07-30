@@ -28,7 +28,9 @@ MIT and already win; Mainspring wraps them).
   and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
   headers on every response.
 - VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
-  unload, optional preload at startup.
+  unload, optional preload at startup. Eviction (idle-timeout and capacity/LRU alike) never pulls a
+  runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or
+  that would otherwise be picked as the LRU victim, is protected until it actually finishes.
 - Standalone governance: API keys → named tenants with roles (admin/inference) and per-tenant request
   rate limits (429 + Retry-After) and token budgets.
 - Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.

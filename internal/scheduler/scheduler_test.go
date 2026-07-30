@@ -431,6 +431,79 @@ func TestUnloadResolvesAlias(t *testing.T) {
 	}
 }
 
+// TestIdleEvictStopsGenuinelyUnusedModel is the baseline: with no MarkBusy in
+// play, a model that goes untouched past KeepAlive is evicted as before.
+func TestIdleEvictStopsGenuinelyUnusedModel(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2, KeepAlive: 30 * time.Millisecond})
+	ra, err := s.EnsureLoaded(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if !ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("genuinely idle model should have been evicted past KeepAlive")
+	}
+}
+
+// TestMarkBusyPreventsIdleEviction proves the fix: a request whose duration
+// outlasts KeepAlive must not have its runner killed mid-flight.
+func TestMarkBusyPreventsIdleEviction(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2, KeepAlive: 30 * time.Millisecond})
+	ra, err := s.EnsureLoaded(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.MarkBusy("a")
+
+	// Sleep well past KeepAlive while "busy" — the runner must survive.
+	time.Sleep(100 * time.Millisecond)
+	if ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("runner was evicted while marked busy — a request would have broken mid-flight")
+	}
+	if loaded := s.Loaded(); len(loaded) != 1 || loaded[0].ID != "a" {
+		t.Fatalf("model should still be resident while busy, got %+v", loaded)
+	}
+
+	// Once idle, the clock restarts from MarkIdle (not from the original load),
+	// so it takes another full KeepAlive window to actually evict.
+	s.MarkIdle("a")
+	time.Sleep(100 * time.Millisecond)
+	if !ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("runner should be evicted a full KeepAlive window after MarkIdle")
+	}
+}
+
+// TestMarkBusyPreventsLRUEviction proves the fix applies to capacity-pressure
+// eviction too, not just the idle timer: a busy model must not be picked as the
+// LRU victim when a new model needs room.
+func TestMarkBusyPreventsLRUEviction(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 1}) // capacity 1
+	ra, err := s.EnsureLoaded(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.MarkBusy("a")
+
+	if _, err := s.EnsureLoaded(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	if ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("busy model 'a' must not be evicted to make room for 'b'")
+	}
+	// Over capacity temporarily, but nothing broken — both remain resident.
+	ids := map[string]bool{}
+	for _, l := range s.Loaded() {
+		ids[l.ID] = true
+	}
+	if !ids["a"] || !ids["b"] {
+		t.Fatalf("expected both a and b resident (capacity exceeded rather than breaking a's request), got %+v", ids)
+	}
+	s.MarkIdle("a")
+}
+
 func TestShutdownStopsAll(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 2})
