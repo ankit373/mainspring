@@ -143,6 +143,15 @@ func cmdDoctor() *cobra.Command {
 				fmt.Println("  " + line)
 			}
 
+			fmt.Println("\nconfig lint:")
+			if warnings := cfg.Lint(); len(warnings) == 0 {
+				fmt.Println("  ✓ no issues found")
+			} else {
+				for _, w := range warnings {
+					fmt.Println("  ⚠ " + w.String())
+				}
+			}
+
 			fmt.Println("\nserver:")
 			if portFree(cfg.Addr) {
 				fmt.Printf("  ✓ listen address %s is free\n", cfg.Addr)
@@ -411,6 +420,10 @@ func authTenants(cfg config.Config) []auth.Tenant {
 }
 
 func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
+	for _, w := range cfg.Lint() {
+		fmt.Fprintln(os.Stderr, "warning: config:", w.String())
+	}
+
 	specs := modelSpecs(cfg)
 	needed := map[string]bool{}
 	for _, sp := range specs {
