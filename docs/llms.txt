@@ -127,7 +127,8 @@ MIT and already win; Mainspring wraps them).
   timeouts, retry, breaker, cache, coalesce, guardrail, concurrency, fallbacks; secret-free by construction),
   `GET /admin/usage` (per-tenant consumption actuals — requests, prompt/output tokens, USD cost; open-mode
   traffic bucketed as "(anonymous)"), `POST /admin/drain[?on=false]`, `POST /admin/reload`,
-  `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload`
+  `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload`, `POST /admin/breaker/{id}/reset`
+  (force a tripped circuit breaker back to closed without waiting out the cooldown)
 
 ## Errors
 

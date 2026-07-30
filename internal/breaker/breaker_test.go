@@ -111,6 +111,45 @@ func TestPerKeyIsolation(t *testing.T) {
 	}
 }
 
+func TestReset(t *testing.T) {
+	g, _ := newTestGroup(1, time.Hour) // long cooldown — Reset must bypass it
+	g.OnResult("m", false)             // trip open
+	if g.State("m") != Open {
+		t.Fatal("should be open after one failure at threshold=1")
+	}
+	if g.Allow("m") {
+		t.Fatal("open breaker must fast-fail before reset")
+	}
+
+	g.Reset("m")
+	if g.State("m") != Closed {
+		t.Fatal("should be closed immediately after Reset, without waiting the cooldown")
+	}
+	if !g.Allow("m") {
+		t.Fatal("reset breaker must allow")
+	}
+	// A single subsequent failure must re-open it fresh (failure count cleared,
+	// not fast-forwarded toward the threshold).
+	g.OnResult("m", false)
+	if g.State("m") != Open {
+		t.Fatal("threshold=1: a single failure after reset must re-open")
+	}
+}
+
+func TestResetNoopWhenDisabledOrUnseen(t *testing.T) {
+	disabled := NewGroup(0, time.Minute)
+	disabled.Reset("m") // must not panic
+	if disabled.State("m") != Closed {
+		t.Fatal("disabled group must stay closed")
+	}
+
+	g, _ := newTestGroup(1, time.Minute)
+	g.Reset("never-seen") // must not panic on an unknown key
+	if g.State("never-seen") != Closed {
+		t.Fatal("unseen key must report closed")
+	}
+}
+
 func TestWritePrometheus(t *testing.T) {
 	g, _ := newTestGroup(1, time.Minute)
 	g.OnResult("m", false)
