@@ -144,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/models/{id}/load", s.adminLoad)
 	mux.HandleFunc("POST /admin/models/{id}/unload", s.adminUnload)
 	mux.HandleFunc("POST /admin/breaker/{id}/reset", s.adminBreakerReset)
+	mux.HandleFunc("POST /admin/cache/clear", s.adminCacheClear)
 	// requestID is outermost so every request — including auth rejections and
 	// health checks — gets a correlation id and an access-log line.
 	return s.requestID(s.auth.Wrap(mux))

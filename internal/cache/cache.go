@@ -121,6 +121,20 @@ func (c *LRU) removeElement(el *list.Element) {
 	delete(c.items, el.Value.(*entry).key)
 }
 
+// Clear empties every entry (e.g. after an operator swaps a model file or spots
+// a bad cached response). Hit/miss counters are left intact — they describe
+// traffic history, not the current entry set. A disabled cache (nil or
+// max<=0) is a no-op.
+func (c *LRU) Clear() {
+	if c == nil || c.max <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ll.Init()
+	c.items = make(map[string]*list.Element)
+}
+
 // Len returns the current number of live elements (including not-yet-reaped
 // expired ones).
 func (c *LRU) Len() int {

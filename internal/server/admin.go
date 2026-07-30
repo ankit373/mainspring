@@ -101,3 +101,13 @@ func (s *Server) adminBreakerReset(w http.ResponseWriter, r *http.Request) {
 	s.breaker.Reset(id)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "breaker": s.breaker.State(id).String()})
 }
+
+// adminCacheClear purges every entry from the response cache. A no-op (still
+// 200) when caching is disabled. POST /admin/cache/clear.
+func (s *Server) adminCacheClear(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.cache.Clear()
+	writeJSON(w, http.StatusOK, map[string]any{"cleared": true})
+}

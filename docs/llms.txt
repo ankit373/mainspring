@@ -128,7 +128,8 @@ MIT and already win; Mainspring wraps them).
   `GET /admin/usage` (per-tenant consumption actuals — requests, prompt/output tokens, USD cost; open-mode
   traffic bucketed as "(anonymous)"), `POST /admin/drain[?on=false]`, `POST /admin/reload`,
   `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload`, `POST /admin/breaker/{id}/reset`
-  (force a tripped circuit breaker back to closed without waiting out the cooldown)
+  (force a tripped circuit breaker back to closed without waiting out the cooldown), `POST /admin/cache/clear`
+  (purge the response cache on demand instead of waiting for TTL/LRU eviction; a no-op when caching is off)
 
 ## Errors
 
