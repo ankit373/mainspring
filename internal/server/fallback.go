@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/ankit373/mainspring/internal/backend"
 )
@@ -41,21 +42,23 @@ func (s *Server) candidatesFor(primary string) []string {
 // returned release must be called when the request finishes. busy=true means the
 // gate is saturated for this model (backpressure — not a fallback trigger, the
 // caller should stop). ok=false with busy=false means the model is unavailable
-// (circuit open or load failure) and the caller may try a fallback.
-func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Runner, release func(), busy, ok bool) {
-	rel, acquired := s.gate.acquire(r.Context(), model)
+// (circuit open or load failure) and the caller may try a fallback. wait is the
+// time spent queued for a gate slot (0 when gating is disabled or a slot was
+// immediately free), reported regardless of the final outcome.
+func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Runner, release func(), wait time.Duration, busy, ok bool) {
+	rel, wait, acquired := s.gate.acquire(r.Context(), model)
 	if !acquired {
-		return nil, nil, true, false
+		return nil, nil, wait, true, false
 	}
 	if !s.breaker.Allow(model) {
 		rel()
-		return nil, nil, false, false
+		return nil, nil, wait, false, false
 	}
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
 		s.breaker.OnResult(model, false)
 		rel()
-		return nil, nil, false, false
+		return nil, nil, wait, false, false
 	}
-	return runner, rel, false, true
+	return runner, rel, wait, false, true
 }

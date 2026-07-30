@@ -429,12 +429,14 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// A candidate is skipped only for a pre-serve failure (circuit open or load
 	// error); gate saturation is backpressure, not a fallback trigger.
 	var (
-		runner  backend.Runner
-		release func()
-		served  string
+		runner    backend.Runner
+		release   func()
+		served    string
+		queueWait time.Duration
 	)
 	for _, cand := range s.candidatesFor(model) {
-		rr, rel, busy, okc := s.acquireRunner(r, cand)
+		rr, rel, wait, busy, okc := s.acquireRunner(r, cand)
+		queueWait += wait
 		if busy {
 			w.Header().Set("Retry-After", "1")
 			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
@@ -527,6 +529,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			CostUSD:      s.costFor(served, prompt, completion, exact),
 			Retries:      retries,
 			Fallback:     served != model,
+			QueueWaitMs:  float64(queueWait.Microseconds()) / 1000.0,
 		})
 	}
 }

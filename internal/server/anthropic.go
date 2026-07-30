@@ -127,7 +127,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
 		return
 	}
-	release, ok := s.gate.acquire(r.Context(), model)
+	release, queueWait, ok := s.gate.acquire(r.Context(), model)
 	if !ok {
 		w.Header().Set("Retry-After", "1")
 		writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
@@ -185,6 +185,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 			Status: http.StatusOK, Stream: req.Stream,
 			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
 			PromptTokens: prompt, TokensEst: completion, Exact: exact,
+			QueueWaitMs: float64(queueWait.Microseconds()) / 1000.0,
 		})
 	}
 }
