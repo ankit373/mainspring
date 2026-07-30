@@ -76,9 +76,11 @@ MIT and already win; Mainspring wraps them).
   `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
   cost signal a router (Hydra) can route away from. Priced only from exact usage; never guessed.
 - Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, cost, requests, residency, inflight/queued,
-  cache hits, and resilience counters `mainspring_{retries,coalesced,fallback}_total`) and an append-only
-  JSONL usage ledger (each event records retries/coalesced/fallback too). Token counts are real when the
-  upstream reports a usage object (non-stream body, or the streaming `include_usage` final chunk), else estimated.
+  cache hits, resilience counters `mainspring_{retries,coalesced,fallback}_total`, and latency percentiles
+  `mainspring_{duration,ttft}_ms_{p50,p90,p99}` — a bounded recent-sample reservoir estimate, not a mean) and
+  an append-only JSONL usage ledger (each event records retries/coalesced/fallback too). The same p50/p90/p99
+  are in `/v1/quality` per model. Token counts are real when the upstream reports a usage object (non-stream
+  body, or the streaming `include_usage` final chunk), else estimated.
 - Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
   Never installs anything unless you run `mainspring install`.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
