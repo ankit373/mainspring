@@ -38,8 +38,56 @@ type Event struct {
 	CostUSD      float64   `json:"cost_usd,omitempty"`      // computed spend for this request (0 when no rate configured / no exact usage)
 }
 
-// ttftRingSize bounds the recent-TTFT reservoir kept per model for quantiles.
-const ttftRingSize = 256
+// quantileRingSize bounds the recent-sample reservoir kept per model for
+// percentile estimates (duration and TTFT alike).
+const quantileRingSize = 256
+
+// quantileRing is a bounded reservoir of recent float64 samples, used to
+// estimate percentiles without storing an unbounded per-model history.
+type quantileRing struct {
+	buf    []float64
+	at     int
+	filled bool
+}
+
+func (q *quantileRing) add(v float64) {
+	if q.buf == nil {
+		q.buf = make([]float64, quantileRingSize)
+	}
+	q.buf[q.at] = v
+	q.at = (q.at + 1) % quantileRingSize
+	if q.at == 0 {
+		q.filled = true
+	}
+}
+
+// samples returns a copy of the live samples (bounded by how much of the ring
+// has been written so far).
+func (q *quantileRing) samples() []float64 {
+	n := len(q.buf)
+	if !q.filled {
+		n = q.at
+	}
+	out := make([]float64, n)
+	copy(out, q.buf[:n])
+	return out
+}
+
+// percentile returns the p-th percentile (0<p<=1) of samples via nearest-rank,
+// or 0 for an empty set. Not an exact global quantile — an estimate over the
+// bounded reservoir.
+func percentile(samples []float64, p float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), samples...)
+	sort.Float64s(sorted)
+	idx := int(p * float64(len(sorted)))
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
 
 type modelStat struct {
 	requests     map[int]int64 // status -> count
@@ -54,10 +102,8 @@ type modelStat struct {
 	coalesced    int64
 	fallback     int64
 
-	// ttftRing is a bounded ring of recent TTFT samples (ms) for a p50 estimate.
-	ttftRing   []float64
-	ttftAt     int
-	ttftFilled bool
+	durRing  quantileRing // recent total-duration samples (ms)
+	ttftRing quantileRing // recent TTFT samples (ms)
 }
 
 // tenantStat is a per-principal consumption rollup (actuals, complementing the
@@ -122,17 +168,11 @@ func (r *Recorder) Record(ev Event) {
 	st.requests[ev.Status]++
 	st.durSumMs += ev.DurationMs
 	st.durCount++
+	st.durRing.add(ev.DurationMs)
 	if ev.TTFTMs > 0 {
 		st.ttftSumMs += ev.TTFTMs
 		st.ttftCount++
-		if st.ttftRing == nil {
-			st.ttftRing = make([]float64, ttftRingSize)
-		}
-		st.ttftRing[st.ttftAt] = ev.TTFTMs
-		st.ttftAt = (st.ttftAt + 1) % ttftRingSize
-		if st.ttftAt == 0 {
-			st.ttftFilled = true
-		}
+		st.ttftRing.add(ev.TTFTMs)
 	}
 	st.tokens += ev.TokensEst
 	st.promptTokens += ev.PromptTokens
@@ -174,29 +214,40 @@ func (r *Recorder) appendLedger(ev Event) {
 	}
 }
 
-// TTFTp50 returns the median time-to-first-token (ms) for a model over its
-// recent samples, or 0 when there are none. It is a bounded-reservoir estimate,
-// not an exact global quantile.
-func (r *Recorder) TTFTp50(model string) float64 {
+// Percentiles is a model's latency percentile snapshot (ms), estimated over a
+// bounded recent-sample reservoir — not an exact global quantile.
+type Percentiles struct {
+	DurationP50, DurationP90, DurationP99 float64
+	TTFTP50, TTFTP90, TTFTP99             float64
+}
+
+// LatencyPercentiles returns duration and TTFT p50/p90/p99 (ms) for a model, or
+// all zeros when there are no samples yet.
+func (r *Recorder) LatencyPercentiles(model string) Percentiles {
 	r.mu.Lock()
 	st := r.stats[model]
-	if st == nil || st.ttftCount == 0 {
+	if st == nil {
 		r.mu.Unlock()
-		return 0
+		return Percentiles{}
 	}
-	n := len(st.ttftRing)
-	if !st.ttftFilled {
-		n = st.ttftAt
-	}
-	samples := make([]float64, n)
-	copy(samples, st.ttftRing[:n])
+	dur, ttft := st.durRing.samples(), st.ttftRing.samples()
 	r.mu.Unlock()
 
-	if len(samples) == 0 {
-		return 0
+	return Percentiles{
+		DurationP50: percentile(dur, 0.5),
+		DurationP90: percentile(dur, 0.9),
+		DurationP99: percentile(dur, 0.99),
+		TTFTP50:     percentile(ttft, 0.5),
+		TTFTP90:     percentile(ttft, 0.9),
+		TTFTP99:     percentile(ttft, 0.99),
 	}
-	sort.Float64s(samples)
-	return samples[len(samples)/2]
+}
+
+// TTFTp50 returns the median time-to-first-token (ms) for a model over its
+// recent samples, or 0 when there are none. Kept for existing callers;
+// equivalent to LatencyPercentiles(model).TTFTP50.
+func (r *Recorder) TTFTp50(model string) float64 {
+	return r.LatencyPercentiles(model).TTFTP50
 }
 
 // Costs returns accumulated USD spend per model and the grand total. Models with
@@ -266,6 +317,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 		for k, v := range st.requests {
 			cp[k] = v
 		}
+		dur, ttft := st.durRing.samples(), st.ttftRing.samples()
 		rows = append(rows, rowT{
 			model: m, statuses: cp,
 			durSum: st.durSumMs, ttftSum: st.ttftSumMs,
@@ -275,6 +327,8 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 			retries:   st.retries,
 			coalesced: st.coalesced,
 			fallback:  st.fallback,
+			durP50:    percentile(dur, 0.5), durP90: percentile(dur, 0.9), durP99: percentile(dur, 0.99),
+			ttftP50: percentile(ttft, 0.5), ttftP90: percentile(ttft, 0.9), ttftP99: percentile(ttft, 0.99),
 		})
 	}
 	r.mu.Unlock()
@@ -302,6 +356,12 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 	writeCounterI(w, "mainspring_retries_total", "Upstream retries by model (transient-failure retries).", rows, func(rw rowT) int64 { return rw.retries })
 	writeCounterI(w, "mainspring_coalesced_total", "Requests served by coalescing onto an in-flight leader, by model.", rows, func(rw rowT) int64 { return rw.coalesced })
 	writeCounterI(w, "mainspring_fallback_total", "Requests served by a fallback model, by (serving) model.", rows, func(rw rowT) int64 { return rw.fallback })
+	writeGauge(w, "mainspring_duration_ms_p50", "Request duration p50 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.durP50 })
+	writeGauge(w, "mainspring_duration_ms_p90", "Request duration p90 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.durP90 })
+	writeGauge(w, "mainspring_duration_ms_p99", "Request duration p99 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.durP99 })
+	writeGauge(w, "mainspring_ttft_ms_p50", "Time-to-first-token p50 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.ttftP50 })
+	writeGauge(w, "mainspring_ttft_ms_p90", "Time-to-first-token p90 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.ttftP90 })
+	writeGauge(w, "mainspring_ttft_ms_p99", "Time-to-first-token p99 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.ttftP99 })
 
 	fmt.Fprint(w, "# HELP mainspring_loaded_models Currently resident models.\n# TYPE mainspring_loaded_models gauge\n")
 	fmt.Fprintf(w, "mainspring_loaded_models %d\n", g.LoadedModels)
@@ -318,10 +378,21 @@ type rowT = struct {
 	durCount, ttftCount, tokens, promptTokens int64
 	costUSD                                   float64
 	retries, coalesced, fallback              int64
+	durP50, durP90, durP99                    float64
+	ttftP50, ttftP90, ttftP99                 float64
 }
 
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	for _, rw := range rows {
+		fmt.Fprintf(w, "%s{model=%q} %g\n", name, esc(rw.model), val(rw))
+	}
+}
+
+// writeGauge emits a per-model gauge (a point-in-time estimate, unlike a
+// monotonic counter) — used for the latency percentiles.
+func writeGauge(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
 	for _, rw := range rows {
 		fmt.Fprintf(w, "%s{model=%q} %g\n", name, esc(rw.model), val(rw))
 	}
