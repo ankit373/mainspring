@@ -177,7 +177,33 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
 		return
 	}
+	if s.totalOutage() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// totalOutage reports whether every configured model's circuit breaker is
+// Open — a full-outage signal a load balancer or Kubernetes readinessProbe
+// should act on by routing traffic elsewhere, not something drain alone
+// covers. False whenever breaking is disabled, no models are configured, or at
+// least one model is Closed/HalfOpen (HalfOpen means recovery is actively
+// being probed, not that the service is down).
+func (s *Server) totalOutage() bool {
+	if !s.breaker.Enabled() {
+		return false
+	}
+	specs := s.sched.Models()
+	if len(specs) == 0 {
+		return false
+	}
+	for _, sp := range specs {
+		if s.breaker.State(sp.ID) != breaker.Open {
+			return false
+		}
+	}
+	return true
 }
 
 // models implements GET /v1/models.
