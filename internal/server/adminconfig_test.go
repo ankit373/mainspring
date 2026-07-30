@@ -1,0 +1,101 @@
+package server_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ankit373/mainspring/internal/auth"
+	"github.com/ankit373/mainspring/internal/backend"
+	"github.com/ankit373/mainspring/internal/metrics"
+	"github.com/ankit373/mainspring/internal/scheduler"
+	"github.com/ankit373/mainspring/internal/server"
+)
+
+func configTestServer(t *testing.T, a *auth.Authenticator) *server.Server {
+	t.Helper()
+	eng := fakeEngine(t)
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	return server.New(sched, a, rec)
+}
+
+func getJSON(h http.Handler, path, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestAdminConfigReportsEffectiveSettings(t *testing.T) {
+	srv := configTestServer(t, auth.New(nil)) // open mode
+	srv.SetRetry(3, 100*time.Millisecond)
+	srv.SetCoalescing(true)
+	srv.SetContextGuard(map[string]server.ContextPolicy{"m1": {Limit: 4096, Enforce: true}})
+	srv.SetModelFallbacks(map[string][]string{"m1": {"backup"}})
+	srv.SetCostRates(map[string]server.CostRate{"m1": server.NewCostRate(3, 15)})
+	h := srv.Handler()
+
+	w := getJSON(h, "/admin/config", "")
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if retry := cfg["retry"].(map[string]any); retry["enabled"] != true || retry["max"].(float64) != 3 {
+		t.Fatalf("retry not reported: %v", retry)
+	}
+	if co := cfg["coalesce"].(map[string]any); co["enabled"] != true {
+		t.Fatal("coalesce not reported enabled")
+	}
+	if g := cfg["context_guard"].(map[string]any); g["m1"] == nil {
+		t.Fatal("context guard for m1 missing")
+	}
+	if fb := cfg["model_fallbacks"].(map[string]any); fb["m1"] == nil {
+		t.Fatal("model fallbacks for m1 missing")
+	}
+	if priced := cfg["cost_rates_set"].(map[string]any); priced["m1"] != true {
+		t.Fatal("cost rate presence for m1 missing")
+	}
+}
+
+// The config endpoint must never leak secret material: not the API key, and not
+// the raw cost-rate dollar values (only presence booleans).
+func TestAdminConfigIsSecretFree(t *testing.T) {
+	srv := configTestServer(t, auth.New([]string{"super-secret-key"})) // key => admin role
+	srv.SetCostRates(map[string]server.CostRate{"m1": server.NewCostRate(3, 15)})
+	h := srv.Handler()
+
+	w := getJSON(h, "/admin/config", "super-secret-key")
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "super-secret-key") {
+		t.Fatal("config leaked an API key")
+	}
+	if strings.Contains(body, "in_per_mtok") || strings.Contains(body, "out_per_mtok") {
+		t.Fatal("config leaked raw cost-rate values (should be presence booleans only)")
+	}
+}
+
+func TestAdminConfigForbiddenForNonAdmin(t *testing.T) {
+	a := auth.NewTenants([]auth.Tenant{{Name: "user", Key: "userkey", Role: auth.RoleInference}})
+	h := configTestServer(t, a).Handler()
+
+	if w := getJSON(h, "/admin/config", "userkey"); w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin status = %d, want 403", w.Code)
+	}
+}

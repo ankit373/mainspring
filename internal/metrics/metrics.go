@@ -25,12 +25,17 @@ type Event struct {
 	Tenant       string    `json:"tenant,omitempty"`
 	Status       int       `json:"status"`
 	Stream       bool      `json:"stream"`
+	Cached       bool      `json:"cached,omitempty"`    // served from the response cache (no backend hit)
+	Coalesced    bool      `json:"coalesced,omitempty"` // served by sharing an in-flight leader's result
+	Fallback     bool      `json:"fallback,omitempty"`  // served by a fallback model (not the requested one)
+	Retries      int       `json:"retries,omitempty"`   // upstream retries this request incurred
 	DurationMs   float64   `json:"duration_ms"`
 	TTFTMs       float64   `json:"ttft_ms,omitempty"` // 0 when not applicable
 	Bytes        int64     `json:"bytes"`
 	PromptTokens int64     `json:"prompt_tokens,omitempty"` // real, when upstream reports usage
 	TokensEst    int64     `json:"tokens_est"`              // output tokens: real when Exact, else estimated
 	Exact        bool      `json:"exact_usage,omitempty"`   // true when counts came from an upstream usage object
+	CostUSD      float64   `json:"cost_usd,omitempty"`      // computed spend for this request (0 when no rate configured / no exact usage)
 }
 
 // ttftRingSize bounds the recent-TTFT reservoir kept per model for quantiles.
@@ -44,6 +49,10 @@ type modelStat struct {
 	ttftCount    int64
 	tokens       int64
 	promptTokens int64
+	costUSD      float64
+	retries      int64
+	coalesced    int64
+	fallback     int64
 
 	// ttftRing is a bounded ring of recent TTFT samples (ms) for a p50 estimate.
 	ttftRing   []float64
@@ -51,20 +60,33 @@ type modelStat struct {
 	ttftFilled bool
 }
 
+// tenantStat is a per-principal consumption rollup (actuals, complementing the
+// per-tenant token *budget* enforced in the auth layer).
+type tenantStat struct {
+	requests     int64
+	promptTokens int64
+	outputTokens int64
+	costUSD      float64
+}
+
 // Recorder aggregates events and appends them to a ledger file.
 type Recorder struct {
-	mu    sync.Mutex
-	stats map[string]*modelStat
+	mu      sync.Mutex
+	stats   map[string]*modelStat
+	tenants map[string]*tenantStat
 
 	ledgerMu sync.Mutex
 	ledger   io.WriteCloser
 }
 
+// anonymousTenant is the rollup bucket for unauthenticated (open-mode) requests.
+const anonymousTenant = "(anonymous)"
+
 // New returns a Recorder. If ledgerPath is non-empty, events are appended there
 // as JSONL (parent dirs created). A failure to open the ledger is returned; the
 // recorder still works for in-memory metrics.
 func New(ledgerPath string) (*Recorder, error) {
-	r := &Recorder{stats: make(map[string]*modelStat)}
+	r := &Recorder{stats: make(map[string]*modelStat), tenants: make(map[string]*tenantStat)}
 	if ledgerPath == "" {
 		return r, nil
 	}
@@ -114,6 +136,28 @@ func (r *Recorder) Record(ev Event) {
 	}
 	st.tokens += ev.TokensEst
 	st.promptTokens += ev.PromptTokens
+	st.costUSD += ev.CostUSD
+	st.retries += int64(ev.Retries)
+	if ev.Coalesced {
+		st.coalesced++
+	}
+	if ev.Fallback {
+		st.fallback++
+	}
+
+	tname := ev.Tenant
+	if tname == "" {
+		tname = anonymousTenant
+	}
+	ts := r.tenants[tname]
+	if ts == nil {
+		ts = &tenantStat{}
+		r.tenants[tname] = ts
+	}
+	ts.requests++
+	ts.promptTokens += ev.PromptTokens
+	ts.outputTokens += ev.TokensEst
+	ts.costUSD += ev.CostUSD
 	r.mu.Unlock()
 
 	r.appendLedger(ev)
@@ -155,6 +199,51 @@ func (r *Recorder) TTFTp50(model string) float64 {
 	return samples[len(samples)/2]
 }
 
+// Costs returns accumulated USD spend per model and the grand total. Models with
+// no configured rate contribute 0.
+func (r *Recorder) Costs() (perModel map[string]float64, total float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	perModel = make(map[string]float64, len(r.stats))
+	for m, st := range r.stats {
+		perModel[m] = st.costUSD
+		total += st.costUSD
+	}
+	return perModel, total
+}
+
+// TenantUsage is one principal's consumption rollup.
+type TenantUsage struct {
+	Tenant       string  `json:"tenant"`
+	Requests     int64   `json:"requests"`
+	PromptTokens int64   `json:"prompt_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+// TenantUsage returns per-tenant consumption, sorted by tenant name.
+func (r *Recorder) TenantUsage() []TenantUsage {
+	r.mu.Lock()
+	names := make([]string, 0, len(r.tenants))
+	for n := range r.tenants {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]TenantUsage, 0, len(names))
+	for _, n := range names {
+		ts := r.tenants[n]
+		out = append(out, TenantUsage{
+			Tenant:       n,
+			Requests:     ts.requests,
+			PromptTokens: ts.promptTokens,
+			OutputTokens: ts.outputTokens,
+			CostUSD:      ts.costUSD,
+		})
+	}
+	r.mu.Unlock()
+	return out
+}
+
 // Gauges are point-in-time values supplied at scrape time (e.g. residency).
 type Gauges struct {
 	LoadedModels  int
@@ -182,6 +271,10 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 			durSum: st.durSumMs, ttftSum: st.ttftSumMs,
 			durCount: st.durCount, ttftCount: st.ttftCount,
 			tokens: st.tokens, promptTokens: st.promptTokens,
+			costUSD:   st.costUSD,
+			retries:   st.retries,
+			coalesced: st.coalesced,
+			fallback:  st.fallback,
 		})
 	}
 	r.mu.Unlock()
@@ -205,6 +298,10 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 	writeCounterI(w, "mainspring_ttft_ms_count", "TTFT observations by model.", rows, func(rw rowT) int64 { return rw.ttftCount })
 	writeCounterI(w, "mainspring_tokens_estimated_total", "Output tokens by model (real when upstream reports usage, else estimated).", rows, func(rw rowT) int64 { return rw.tokens })
 	writeCounterI(w, "mainspring_prompt_tokens_total", "Prompt (input) tokens by model (real; 0 when upstream reports no usage).", rows, func(rw rowT) int64 { return rw.promptTokens })
+	writeCounter(w, "mainspring_cost_usd_total", "Computed spend in USD by model (0 when no rate configured).", rows, func(rw rowT) float64 { return rw.costUSD })
+	writeCounterI(w, "mainspring_retries_total", "Upstream retries by model (transient-failure retries).", rows, func(rw rowT) int64 { return rw.retries })
+	writeCounterI(w, "mainspring_coalesced_total", "Requests served by coalescing onto an in-flight leader, by model.", rows, func(rw rowT) int64 { return rw.coalesced })
+	writeCounterI(w, "mainspring_fallback_total", "Requests served by a fallback model, by (serving) model.", rows, func(rw rowT) int64 { return rw.fallback })
 
 	fmt.Fprint(w, "# HELP mainspring_loaded_models Currently resident models.\n# TYPE mainspring_loaded_models gauge\n")
 	fmt.Fprintf(w, "mainspring_loaded_models %d\n", g.LoadedModels)
@@ -219,6 +316,8 @@ type rowT = struct {
 	statuses                                  map[int]int64
 	durSum, ttftSum                           float64
 	durCount, ttftCount, tokens, promptTokens int64
+	costUSD                                   float64
+	retries, coalesced, fallback              int64
 }
 
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {

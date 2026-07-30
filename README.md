@@ -27,18 +27,40 @@ Mainspring's thesis: **don't build inference kernels — build the local-inferen
 Wrap the permissively-licensed engines behind one **versioned, conformance-tested** API and make the
 layer around them **fail loud, VRAM-aware, and governed**.
 
-## What it does (design goals)
+## What it does
 
-- **One stable, versioned OpenAI/Anthropic-compatible API** — validated against the real SDKs in CI.
-- **Pluggable backends** behind a `Backend`/`Runner` interface: `llamacpp` (v0), `mlx` (Apple), `ollama`
-  (adopt an existing daemon), with `lmstudio` / `llamafile` / `gpt4all` as *detect-and-adopt-only*.
-- **Fail loud, never silently degrade** — a `/capabilities` endpoint states the *actual* backend,
-  whether it fell back to CPU, and the *effective* context window (never silently smaller than asked).
-- **VRAM-residency-aware scheduling** — load / unload / swap with a KeepAlive idle timer.
-- **Standalone governance** — its own API keys and per-tenant quotas, because it must be useful when
-  deployed alone (k8s / shared GPU box), not only behind a router.
-- **Detect-first, opt-in managed install** — use whatever engine is already present; install a missing
-  one only when you enable it (signed, version-pinned, per-backend) — never silently.
+- **One stable, versioned OpenAI *and* Anthropic API** — `/v1/chat/completions`, `/completions`,
+  `/embeddings`, `/models`, and Anthropic `/v1/messages` (text **and** tool use, streaming translated) —
+  validated against the real OpenAI Python/JS SDKs in CI.
+- **Pluggable backends** behind a `Backend`/`Runner` interface: `llamacpp` and `mlx` (managed
+  subprocess) · `ollama` / `lmstudio` / `llamafile` / `gpt4all` (detect-and-adopt-only, never installed).
+  **Per-model routing, aliases, and ordered fallback chains** — one server can serve several models on
+  different engines and fail over when one is down.
+- **Fail loud, never silently degrade** — `/capabilities` and `X-Mainspring-{Backend,Device,Warning}`
+  headers state the *actual* backend, whether it fell back to CPU, and the *effective* context window.
+- **VRAM-residency-aware scheduling** — single-flight load, byte-budget + LRU eviction, KeepAlive idle
+  unload, optional preload.
+- **Reliability** — per-model concurrency limit + bounded queue (503 backpressure), a **circuit breaker**
+  with a background health probe, **retry-with-backoff** on transient upstream failures (safe for streams),
+  **model-level fallback chains** (a different model answers when the primary is down), and a structured
+  error taxonomy (stable `code` per failure class).
+- **Opt-in response cache** — identical deterministic (temperature 0) non-streaming requests return from a
+  bounded TTL+LRU cache without re-running the model; hits carry `X-Mainspring-Cache: hit`.
+- **Request coalescing** — a burst of identical in-flight deterministic requests shares one backend
+  computation (single-flight); followers carry `X-Mainspring-Coalesced: true`.
+- **Context guardrail** — optional `enforce_context` rejects over-context requests (`context_length_exceeded`)
+  instead of letting the engine silently truncate, or downgrades to a warning header per model.
+- **Standalone governance** — API-key tenants with roles (admin/inference), per-tenant rate + token
+  budgets, and **real** streaming token accounting.
+- **Cost accounting** — optional per-model USD pricing turns real usage into spend, surfaced in the
+  usage ledger, a `mainspring_cost_usd_total` metric, and `/v1/quality` (a real cost signal for routing).
+- **Operability** — Prometheus `/metrics`, JSONL usage ledger, `X-Request-ID` + W3C `traceparent`
+  propagation, optional access log, **SIGHUP hot-reload**, an **admin API** (drain / reload / model
+  load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a router (Hydra) can consume.
+- **Detect-first, opt-in managed install** — use whatever engine is present; install a missing one only
+  when you enable it (SHA-256-pinned, optionally ed25519-signed manifest) — never silently.
+- **Deploy anywhere** — a single static binary, a distroless container image, and a Helm chart
+  (HPA / ServiceMonitor / GPU node scheduling).
 
 ## Non-goals
 
@@ -48,20 +70,27 @@ layer around them **fail loud, VRAM-aware, and governed**.
 
 ## Status
 
-**Phase 0 (MVP) — in progress.** Subprocess-supervise `llama-server`, proxy the OpenAI endpoints with
-SSE streaming, fail-loud `/capabilities`, API-key auth. See `CLAUDE.md` for the phased plan.
+**v0.1.0 — released.** The full control plane is shipped: OpenAI + Anthropic APIs, six backends with
+per-model routing / aliases / fallback, VRAM-aware scheduling, governance, circuit breaker, TLS, admin
+API, request-ID + trace-context, and `/v1/quality`. `go test -race` clean across the tree. See
+[CHANGELOG.md](CHANGELOG.md) and the [releases page](https://github.com/ankit373/mainspring/releases).
 
-## Quick start (once Phase 0 lands)
+## Quick start
 
 ```bash
-# Build
+# Build from source…
 go build -o mainspring ./cmd/mainspring
+# …or grab a release binary / the container image
+#   https://github.com/ankit373/mainspring/releases
+#   ghcr.io/ankit373/mainspring:latest
 
 # See which engines are present on this host (detect-first)
 ./mainspring backends
 
-# Serve a local GGUF model over the OpenAI API
+# Serve a local GGUF via llama.cpp…
 ./mainspring serve --model qwen2.5-coder=/path/to/model.gguf --addr :11500
+# …or adopt a model from a running Ollama daemon
+./mainspring serve --backend ollama --model 'qwen2.5-coder:7b=' --addr :11500
 
 # Talk to it with any OpenAI client
 curl localhost:11500/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -71,6 +100,8 @@ curl localhost:11500/v1/chat/completions -H 'content-type: application/json' -d 
 
 # The fail-loud truth about what actually ran it
 curl localhost:11500/capabilities
+# The machine-readable routing signal (per-model resident/device/degraded/queue/breaker)
+curl localhost:11500/v1/quality
 ```
 
 ## Relationship to Hydra

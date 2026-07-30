@@ -41,6 +41,51 @@ func TestRecordAndPrometheus(t *testing.T) {
 	}
 }
 
+func TestResilienceCounters(t *testing.T) {
+	r, _ := New("")
+	now := time.Unix(1700000000, 0)
+	r.Record(Event{Time: now, Model: "m1", Status: 200, Retries: 2, Fallback: true})
+	r.Record(Event{Time: now, Model: "m1", Status: 200, Retries: 1, Coalesced: true})
+	r.Record(Event{Time: now, Model: "m1", Status: 200}) // no resilience events
+
+	var buf bytes.Buffer
+	r.WritePrometheus(&buf, Gauges{})
+	out := buf.String()
+	for _, want := range []string{
+		`mainspring_retries_total{model="m1"} 3`,   // 2 + 1
+		`mainspring_coalesced_total{model="m1"} 1`, // one coalesced
+		`mainspring_fallback_total{model="m1"} 1`,  // one fallback
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("prometheus output missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestTenantUsageRollup(t *testing.T) {
+	r, _ := New("")
+	now := time.Unix(1700000000, 0)
+	r.Record(Event{Time: now, Model: "m1", Tenant: "alice", Status: 200, PromptTokens: 10, TokensEst: 5, CostUSD: 0.01})
+	r.Record(Event{Time: now, Model: "m1", Tenant: "alice", Status: 200, PromptTokens: 20, TokensEst: 8, CostUSD: 0.02})
+	r.Record(Event{Time: now, Model: "m1", Status: 200, PromptTokens: 3, TokensEst: 2}) // no tenant → anonymous
+
+	usage := r.TenantUsage()
+	if len(usage) != 2 {
+		t.Fatalf("got %d tenants, want 2: %+v", len(usage), usage)
+	}
+	// Sorted by name: "(anonymous)" sorts before "alice".
+	if usage[0].Tenant != anonymousTenant || usage[0].Requests != 1 {
+		t.Fatalf("anonymous rollup wrong: %+v", usage[0])
+	}
+	a := usage[1]
+	if a.Tenant != "alice" || a.Requests != 2 || a.PromptTokens != 30 || a.OutputTokens != 13 {
+		t.Fatalf("alice rollup wrong: %+v", a)
+	}
+	if a.CostUSD < 0.0299 || a.CostUSD > 0.0301 {
+		t.Fatalf("alice cost = %v, want ~0.03", a.CostUSD)
+	}
+}
+
 func TestTTFTp50(t *testing.T) {
 	r, _ := New("")
 	if r.TTFTp50("none") != 0 {

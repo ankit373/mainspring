@@ -59,6 +59,9 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 	return nil, fmt.Errorf("%s: model %q not loaded — load it in %s first (Mainspring will not load it)", b.name, spec.ID, b.name)
 }
 
+// ListModels enumerates the models the adopted OpenAI-compatible server exposes.
+func (b *Backend) ListModels(ctx context.Context) ([]string, error) { return b.listModels(ctx) }
+
 func (b *Backend) listModels(ctx context.Context) ([]string, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, b.host+"/v1/models", nil)
 	resp, err := client.Do(req)

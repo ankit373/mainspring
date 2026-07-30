@@ -13,7 +13,7 @@ MIT and already win; Mainspring wraps them).
 ## What it does
 
 - One versioned API: OpenAI (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-  `/v1/models`) and Anthropic (`/v1/messages`, tool use + streaming translated).
+  `/v1/models`) and Anthropic (`/v1/messages`, tool use + images + streaming translated).
 - Per-model backend routing: one server can serve a GGUF via llama.cpp, an MLX model, and an adopted
   Ollama/LM Studio/llamafile/GPT4All model simultaneously.
 - Per-model fallback chains: a model can declare ordered `fallbacks`; if the primary backend can't
@@ -21,6 +21,9 @@ MIT and already win; Mainspring wraps them).
   `X-Mainspring-Backend`. An absent fallback backend is skipped at startup, not fatal.
 - Model aliases: map a friendly name (e.g. `gpt-4o`) to a real model id (chainable, cycle-checked at
   startup); aliases appear in `/v1/models` and resolve on every inference path.
+- Model auto-discovery (opt-in `discover_models: true`): enumerate models from present adopt backends
+  (Ollama `/api/tags`, LM Studio / llamafile / GPT4All `/v1/models`) and expose them automatically;
+  configured models win on an id clash.
 - Fail loud, never silently degrade: `/capabilities` reports the real backend, device, GPU offload,
   and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
   headers on every response.
@@ -29,12 +32,53 @@ MIT and already win; Mainspring wraps them).
 - Standalone governance: API keys → named tenants with roles (admin/inference) and per-tenant request
   rate limits (429 + Retry-After) and token budgets.
 - Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.
+- Per-request timeout: an optional global default + per-model override bounds total generation time; on
+  expiry the upstream call is cancelled and a 504 `timeout` is returned (0 = unbounded).
+- Model-level fallback: an optional per-model `model_fallbacks: [id, ...]` chain lets a *different model*
+  answer when the requested one is unavailable (circuit open / load failure). The served model is
+  reported via `X-Mainspring-Served-Model`. Fallback is only ever tried before any byte reaches the
+  client; a served 4xx/5xx is never re-routed. Distinct from backend-level fallback (same model, another engine).
+- Upstream retry: transient backend failures (connection errors, 502/503/504) are retried with
+  exponential backoff, always decided *before any byte reaches the client* so it is safe for streaming
+  too; `X-Mainspring-Retries: N` reports how many retries a request took. Disabled by default (`retry_max`).
 - Circuit breaker + health probe: after N consecutive backend failures a model's requests fast-fail with
   503 (no timeout paid) until a cooldown elapses and a half-open probe succeeds; an optional background
   health probe trips/recovers the breaker without waiting for live traffic. State in /metrics and /v1/quality.
-- Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, requests, residency, inflight/queued)
-  and an append-only JSONL usage ledger. Token counts are real when the upstream reports a usage object
-  (non-stream body, or the streaming `include_usage` final chunk) and estimated otherwise.
+- Token counting: `POST /v1/tokenize {model, input}` returns `{tokens, exact}` — the model's real token
+  count (exact) when the model is resident on an engine that exposes a tokenizer (llama.cpp `/tokenize`),
+  otherwise the character-based estimate (exact:false). No forced load; no extra dependency.
+- Graceful clamp (opt-in): `clamp_max_tokens` shrinks an over-budget `max_tokens`/`max_completion_tokens`
+  to the room left in the context window and proceeds (header `X-Mainspring-Clamped: <from>-><to>`),
+  instead of rejecting — runs before the guardrail; a request with no room left falls through to it.
+- Embeddings-aware token counting: the guardrail, `clamp_max_tokens`, `precise_context`, and
+  `/v1/tokenize` all count an embeddings request's `input` field (bare string or array of strings), not
+  just `messages`/`prompt` — a large `/v1/embeddings` input now correctly trips the guardrail instead of
+  estimating as 0.
+- Precise guardrail (opt-in): `precise_context` refines the guardrail — when the target model is resident
+  on a tokenizing engine, prompt tokens are counted *exactly* (via `/tokenize`) instead of estimated (no
+  forced load; falls back to the estimate otherwise). The method is reported on `X-Mainspring-Context-Method:
+  exact|estimated`, and the reject/warn reason says `prompt (N tokens)` vs `estimated prompt (~N tokens)`.
+- Context guardrail (opt-in): when a model's context window is known, `enforce_context` rejects a
+  request that cannot fit (400 `context_length_exceeded`) instead of letting the engine silently
+  truncate it. The requested-output check (`max_tokens` > context) is exact; the prompt-size check is a
+  conservative tokenizer-free estimate. A per-model override can downgrade enforcement to a warning
+  header (`X-Mainspring-Context-Warning`). Turns the fail-loud context *warning* into an enforceable limit.
+- Request coalescing (opt-in): a burst of identical deterministic (temperature 0) non-streaming requests
+  in flight at once share ONE backend computation — the first is the leader, concurrent identical ones
+  wait and replay its result (`X-Mainspring-Coalesced: true`). Keyed by the same canonical hash the cache
+  uses; streaming and non-deterministic requests are never coalesced. Enable with `coalesce: true`.
+- Response cache (opt-in): identical deterministic (temperature 0) non-streaming requests are served
+  from a bounded TTL+LRU cache without touching the backend; hits carry `X-Mainspring-Cache: hit` and
+  are counted in /metrics (`mainspring_cache_hits_total`). Streaming and non-zero-temperature requests
+  bypass it. Enable with `cache_max_entries` (+ optional `cache_ttl_seconds`, default 300s).
+- Cost accounting: optional per-model USD pricing (`input_usd_per_mtok` / `output_usd_per_mtok`, 0 =
+  local/free) turns real token usage into spend. Cost lands in the usage ledger (`cost_usd`), a
+  `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
+  cost signal a router (Hydra) can route away from. Priced only from exact usage; never guessed.
+- Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, cost, requests, residency, inflight/queued,
+  cache hits, and resilience counters `mainspring_{retries,coalesced,fallback}_total`) and an append-only
+  JSONL usage ledger (each event records retries/coalesced/fallback too). Token counts are real when the
+  upstream reports a usage object (non-stream body, or the streaming `include_usage` final chunk), else estimated.
 - Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
   Never installs anything unless you run `mainspring install`.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
@@ -71,11 +115,16 @@ MIT and already win; Mainspring wraps them).
 ## Endpoints
 
 - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
-- `POST /v1/messages` (Anthropic, text + tool use; streaming translated, incl. input_json_delta)
-- `GET /v1/models`, `GET /capabilities`, `GET /metrics`, `GET /healthz`, `GET /readyz`
+- `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta)
+- `GET /v1/models`, `GET /v1/models/{id}` (OpenAI "retrieve a model"; resolves aliases; adds
+  resident/backend/device/effective_ctx/degraded when the model is loaded), `GET /capabilities`,
+  `GET /metrics`, `GET /healthz`, `GET /readyz`
 - `GET /v1/quality` (optional Hydra routing signal: per-model resident/device/degraded/effective_ctx/
   inflight/queue_depth/ttft_ms_p50; admin-gated)
-- Admin API (admin-gated, audited via the access log): `POST /admin/drain[?on=false]`, `POST /admin/reload`,
+- Admin API (admin-gated, audited via the access log): `GET /admin/config` (effective runtime settings —
+  timeouts, retry, breaker, cache, coalesce, guardrail, concurrency, fallbacks; secret-free by construction),
+  `GET /admin/usage` (per-tenant consumption actuals — requests, prompt/output tokens, USD cost; open-mode
+  traffic bucketed as "(anonymous)"), `POST /admin/drain[?on=false]`, `POST /admin/reload`,
   `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload`
 
 ## Errors

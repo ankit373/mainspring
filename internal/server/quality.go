@@ -30,7 +30,8 @@ type modelQuality struct {
 	Inflight     int      `json:"inflight"`
 	QueueDepth   int      `json:"queue_depth"`
 	TTFTp50Ms    float64  `json:"ttft_ms_p50"`
-	Breaker      string   `json:"breaker"` // "closed" | "open" | "half_open"
+	Breaker      string   `json:"breaker"`  // "closed" | "open" | "half_open"
+	CostUSD      float64  `json:"cost_usd"` // accumulated spend for this model
 }
 
 // quality implements GET /v1/quality. Gated like /capabilities: an authenticated
@@ -51,6 +52,12 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var costByModel map[string]float64
+	var costTotal float64
+	if s.metrics != nil {
+		costByModel, costTotal = s.metrics.Costs()
+	}
+
 	specs := s.sched.Models()
 	models := make([]modelQuality, 0, len(specs))
 	anyDegraded := false
@@ -66,6 +73,7 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.metrics != nil {
 			mq.TTFTp50Ms = s.metrics.TTFTp50(sp.ID)
+			mq.CostUSD = costByModel[sp.ID]
 		}
 		if c, ok := capsByID[sp.ID]; ok {
 			mq.Resident = true
@@ -90,6 +98,7 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 		"resident_bytes": used,
 		"budget_bytes":   budget,
 		"loaded_count":   count,
+		"cost_usd_total": costTotal,
 	}
 	if budget > 0 {
 		server["headroom_bytes"] = budget - used

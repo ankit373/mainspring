@@ -62,6 +62,34 @@ type contentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // string or []block
 	IsError   bool            `json:"is_error,omitempty"`
+	// image
+	Source *imageSource `json:"source,omitempty"`
+}
+
+// imageSource is an Anthropic image block's source (base64 or url).
+type imageSource struct {
+	Type      string `json:"type"` // "base64" | "url"
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// imageSourceToURL renders an Anthropic image source as an OpenAI image_url
+// value: a data: URI for base64 sources, or the URL passed through. Returns ""
+// for an unusable source.
+func imageSourceToURL(s *imageSource) string {
+	if s == nil {
+		return ""
+	}
+	switch s.Type {
+	case "base64":
+		if s.MediaType != "" && s.Data != "" {
+			return "data:" + s.MediaType + ";base64," + s.Data
+		}
+	case "url":
+		return s.URL
+	}
+	return ""
 }
 
 // messages handles POST /v1/messages (Anthropic Messages API).
@@ -111,6 +139,13 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "5")
 		writeErr(w, codeCircuitOpen, "circuit open: backend for "+model+" is unavailable")
 		return
+	}
+
+	// Per-request timeout: bound total generation time (0 = unbounded).
+	if d := s.timeoutFor(model); d > 0 {
+		tctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		r = r.WithContext(tctx)
 	}
 
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
@@ -168,6 +203,12 @@ func toOpenAIRequest(req anthropicRequest) ([]byte, error) {
 		msgs = append(msgs, converted...)
 	}
 	oai := map[string]any{"model": req.Model, "messages": msgs, "stream": req.Stream}
+	if req.Stream {
+		// Ask the upstream for a final usage chunk so messagesStream can report
+		// exact prompt/completion tokens instead of falling back to the SSE-frame
+		// estimate. Only meaningful when streaming; omitted otherwise.
+		oai["stream_options"] = map[string]bool{"include_usage": true}
+	}
 	if req.MaxTokens > 0 {
 		oai["max_tokens"] = req.MaxTokens
 	}
@@ -251,11 +292,24 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 	var out []map[string]any
 	var text strings.Builder
 	var toolCalls []map[string]any
+	var parts []map[string]any // ordered text+image content parts (user turns)
+	hasImage := false
 
 	for _, b := range blocks {
 		switch b.Type {
 		case "text", "":
 			text.WriteString(b.Text)
+			if b.Text != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": b.Text})
+			}
+		case "image":
+			if url := imageSourceToURL(b.Source); url != "" {
+				hasImage = true
+				parts = append(parts, map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": url},
+				})
+			}
 		case "tool_use":
 			args := string(b.Input)
 			if args == "" {
@@ -270,7 +324,7 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 				},
 			})
 		case "tool_result":
-			// Each tool_result becomes its own OpenAI tool message.
+			// Each tool_result becomes its own OpenAI tool message (text only).
 			out = append(out, map[string]any{
 				"role":         "tool",
 				"tool_call_id": b.ToolUseID,
@@ -279,7 +333,7 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 		}
 	}
 
-	// Assistant turn with text and/or tool calls.
+	// Assistant turn with text and/or tool calls (assistants don't send images).
 	if m.Role == "assistant" {
 		msg := map[string]any{"role": "assistant"}
 		if text.Len() > 0 {
@@ -292,6 +346,13 @@ func anthropicMessageToOpenAI(m anthropicMessage) ([]map[string]any, error) {
 		}
 		// Prepend the assistant message before any (unlikely) tool blocks.
 		return append([]map[string]any{msg}, out...), nil
+	}
+
+	// User turn carrying images: emit multimodal content parts (text + image_url,
+	// in original order) instead of a collapsed string.
+	if hasImage {
+		out = append(out, map[string]any{"role": "user", "content": parts})
+		return out, nil
 	}
 
 	// User turn: emit tool messages first (they answer a prior assistant turn),
@@ -362,6 +423,10 @@ type oaiToolCall struct {
 func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			writeErr(w, codeTimeout, "request timed out")
+			return 0, 0, false
+		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
 		return 0, 0, false
 	}
@@ -448,6 +513,10 @@ func argsToInput(args string) json.RawMessage {
 func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			writeErr(w, codeTimeout, "request timed out")
+			return 0, 0, false
+		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
 		return 0, 0, false
 	}

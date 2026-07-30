@@ -8,6 +8,7 @@
 package llamacpp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -198,7 +199,7 @@ type runner struct {
 
 var healthClient = &http.Client{Timeout: 2 * time.Second}
 
-func (r *runner) BaseURL() string   { return r.baseURL }
+func (r *runner) BaseURL() string    { return r.baseURL }
 func (r *runner) MemoryBytes() int64 { return r.mem }
 
 // waitReady polls /health until the server is ready, the process dies, or ctx
@@ -321,7 +322,7 @@ func (r *runner) propsCtx(ctx context.Context) int {
 		return 0
 	}
 	var p struct {
-		NCtx                       int `json:"n_ctx"`
+		NCtx                      int `json:"n_ctx"`
 		DefaultGenerationSettings struct {
 			NCtx int `json:"n_ctx"`
 		} `json:"default_generation_settings"`
@@ -333,6 +334,35 @@ func (r *runner) propsCtx(ctx context.Context) int {
 		return p.NCtx
 	}
 	return p.DefaultGenerationSettings.NCtx
+}
+
+// CountTokens implements backend.TokenCounter using llama-server's POST
+// /tokenize endpoint, which returns the model's real token ids for the text.
+func (r *runner) CountTokens(ctx context.Context, text string) (int, error) {
+	body, err := json.Marshal(map[string]string{"content": text})
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/tokenize", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := healthClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("tokenize: upstream status %d", resp.StatusCode)
+	}
+	var out struct {
+		Tokens []json.RawMessage `json:"tokens"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {
+		return 0, err
+	}
+	return len(out.Tokens), nil
 }
 
 // Stop implements backend.Runner. Idempotent; reclaims the process (and its VRAM).
@@ -399,4 +429,3 @@ func atoi(s string) int {
 	}
 	return n
 }
-

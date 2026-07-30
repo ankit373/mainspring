@@ -20,8 +20,33 @@ type Model struct {
 	Path      string   `yaml:"path"`
 	Ctx       int      `yaml:"ctx,omitempty"`
 	GPULayers int      `yaml:"gpu_layers,omitempty"`
-	Preload   bool     `yaml:"preload,omitempty"` // load at startup instead of on first request
+	Preload   bool     `yaml:"preload,omitempty"`         // load at startup instead of on first request
+	TimeoutS  int      `yaml:"timeout_seconds,omitempty"` // per-model request timeout; 0 = use server default
 	Args      []string `yaml:"args,omitempty"`
+
+	// USD pricing per one million tokens (0 = free, the local default). Set when
+	// adopting a metered API backend or to model cost for routing/accounting.
+	InputUSDPerMTok  float64 `yaml:"input_usd_per_mtok,omitempty"`
+	OutputUSDPerMTok float64 `yaml:"output_usd_per_mtok,omitempty"`
+
+	// EnforceContext overrides the server-wide enforce_context for this model:
+	// true rejects over-context requests, false only warns. nil = inherit global.
+	// The guardrail needs Ctx > 0 (the model's context window) to be active.
+	EnforceContext *bool `yaml:"enforce_context,omitempty"`
+
+	// ModelFallbacks is an ordered list of *other model ids* (or aliases) to serve
+	// this request from when this model is unavailable (circuit open / load fail).
+	// Distinct from Fallbacks, which fails over to another backend for THIS model.
+	ModelFallbacks []string `yaml:"model_fallbacks,omitempty"`
+
+	// ClampMaxTokens overrides the server-wide clamp_max_tokens for this model:
+	// true shrinks an over-budget max_tokens to fit; false disables it. nil =
+	// inherit global. Needs Ctx > 0.
+	ClampMaxTokens *bool `yaml:"clamp_max_tokens,omitempty"`
+
+	// PreciseContext overrides the server-wide precise_context for this model.
+	// nil = inherit global.
+	PreciseContext *bool `yaml:"precise_context,omitempty"`
 }
 
 // Tenant is a named principal with an API key, role, and quotas.
@@ -60,7 +85,17 @@ type Config struct {
 	LlamafileHost    string            `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
 	GPT4AllHost      string            `yaml:"gpt4all_host,omitempty"`   // e.g. http://127.0.0.1:4891
 	Models           []Model           `yaml:"models,omitempty"`
-	Aliases          map[string]string `yaml:"aliases,omitempty"` // friendly name -> model id (or another alias)
+	Aliases          map[string]string `yaml:"aliases,omitempty"`                 // friendly name -> model id (or another alias)
+	DiscoverModels   bool              `yaml:"discover_models,omitempty"`         // auto-expose models from present adopt backends
+	RequestTimeoutS  int               `yaml:"request_timeout_seconds,omitempty"` // default per-request timeout; 0 = unbounded
+	CacheMaxEntries  int               `yaml:"cache_max_entries,omitempty"`       // opt-in response cache size; 0 = disabled
+	CacheTTLS        int               `yaml:"cache_ttl_seconds,omitempty"`       // response-cache entry lifetime; <=0 => 300s
+	EnforceContext   bool              `yaml:"enforce_context,omitempty"`         // reject requests exceeding a model's context window (needs model ctx > 0)
+	PreciseContext   bool              `yaml:"precise_context,omitempty"`         // count guardrail prompt tokens exactly when the model is resident on a tokenizing engine
+	ClampMaxTokens   bool              `yaml:"clamp_max_tokens,omitempty"`        // shrink an over-budget max_tokens to fit the context window (needs model ctx > 0)
+	RetryMax         int               `yaml:"retry_max,omitempty"`               // additional upstream attempts after the first on transient failure; 0 = no retry
+	RetryBackoffMs   int               `yaml:"retry_backoff_ms,omitempty"`        // base of the exponential retry backoff; <=0 => 100ms when retry enabled
+	Coalesce         bool              `yaml:"coalesce,omitempty"`                // single-flight de-dup of identical deterministic in-flight requests
 }
 
 // Default returns the baseline configuration.
@@ -104,8 +139,34 @@ func (c Config) HealthProbeInterval() time.Duration {
 	return time.Duration(c.HealthProbeS) * time.Second
 }
 
+// RequestTimeout returns the default per-request timeout (0 = unbounded).
+func (c Config) RequestTimeout() time.Duration {
+	if c.RequestTimeoutS <= 0 {
+		return 0
+	}
+	return time.Duration(c.RequestTimeoutS) * time.Second
+}
+
 // TLSEnabled reports whether both a cert and key are configured (=> serve HTTPS).
 func (c Config) TLSEnabled() bool { return c.TLSCert != "" && c.TLSKey != "" }
+
+// RetryBackoff returns the base retry backoff (defaults to 100ms when retry is
+// enabled without an explicit value).
+func (c Config) RetryBackoff() time.Duration {
+	if c.RetryBackoffMs <= 0 {
+		return 100 * time.Millisecond
+	}
+	return time.Duration(c.RetryBackoffMs) * time.Millisecond
+}
+
+// CacheTTL returns the response-cache entry lifetime (defaults to 5m when the
+// cache is enabled without an explicit TTL).
+func (c Config) CacheTTL() time.Duration {
+	if c.CacheTTLS <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(c.CacheTTLS) * time.Second
+}
 
 // MaxBytes returns the resident byte budget (0 = no byte cap).
 func (c Config) MaxBytes() int64 {

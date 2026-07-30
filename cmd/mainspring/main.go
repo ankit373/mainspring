@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -335,8 +336,8 @@ func cmdServe() *cobra.Command {
 				}
 				cfg.Models = append(cfg.Models, m)
 			}
-			if len(cfg.Models) == 0 {
-				return fmt.Errorf("no models configured — pass --model id=/path/to/weights.gguf or add models to the config")
+			if len(cfg.Models) == 0 && !cfg.DiscoverModels {
+				return fmt.Errorf("no models configured — pass --model id=/path/to/weights.gguf, add models to the config, or set discover_models: true")
 			}
 
 			return runServe(cmd.Context(), cfg, configPath(cmd))
@@ -417,6 +418,13 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 			needed[bname] = true
 		}
 	}
+	// Model auto-discovery: also construct the adopt backends so we can enumerate
+	// their models. Absent ones are skipped below (not fatal).
+	if cfg.DiscoverModels {
+		for _, bname := range adoptBackendNames {
+			needed[bname] = true
+		}
+	}
 
 	// Construct and detect only the backends the configured models actually use.
 	// An absent backend is not fatal when it is only a fallback: we skip it and
@@ -445,6 +453,15 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 		if !hasBackend {
 			return fmt.Errorf("model %q has no available backend (tried %v)", sp.ID, sp.Candidates())
 		}
+	}
+
+	// Auto-discover models from present adopt backends (opt-in). Configured
+	// models win on an id clash.
+	if cfg.DiscoverModels {
+		specs = append(specs, discoverModels(ctx, backends, specs)...)
+	}
+	if len(specs) == 0 {
+		return fmt.Errorf("no models to serve — none configured and discovery found none on any present adopt backend")
 	}
 
 	sched := scheduler.New(backends, specs, scheduler.Options{
@@ -478,6 +495,94 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	}
 	// Wire the admin reload endpoint to the same reload path SIGHUP uses.
 	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, sched, authn) })
+	// Per-request timeouts: global default + per-model overrides.
+	perModelTimeout := map[string]time.Duration{}
+	for _, m := range cfg.Models {
+		if m.TimeoutS > 0 {
+			perModelTimeout[m.ID] = time.Duration(m.TimeoutS) * time.Second
+		}
+	}
+	srv.SetTimeouts(cfg.RequestTimeout(), perModelTimeout)
+	// Opt-in response cache (disabled unless cache_max_entries > 0).
+	if cfg.CacheMaxEntries > 0 {
+		srv.SetCache(cfg.CacheTTL(), cfg.CacheMaxEntries)
+	}
+	// Per-model USD pricing for cost accounting (0 = free/local).
+	costRates := map[string]server.CostRate{}
+	for _, m := range cfg.Models {
+		if m.InputUSDPerMTok > 0 || m.OutputUSDPerMTok > 0 {
+			costRates[m.ID] = server.NewCostRate(m.InputUSDPerMTok, m.OutputUSDPerMTok)
+		}
+	}
+	if len(costRates) > 0 {
+		srv.SetCostRates(costRates)
+	}
+	// Context guardrail: reject/warn requests that exceed a model's context
+	// window. Active per model only when its ctx is known (>0) and enforcement is
+	// on globally or overridden true for that model.
+	ctxPolicies := map[string]server.ContextPolicy{}
+	for _, m := range cfg.Models {
+		if m.Ctx <= 0 {
+			continue
+		}
+		enforce := cfg.EnforceContext
+		if m.EnforceContext != nil {
+			enforce = *m.EnforceContext
+		}
+		if cfg.EnforceContext || (m.EnforceContext != nil && *m.EnforceContext) {
+			ctxPolicies[m.ID] = server.ContextPolicy{Limit: m.Ctx, Enforce: enforce}
+		}
+	}
+	if len(ctxPolicies) > 0 {
+		srv.SetContextGuard(ctxPolicies)
+	}
+	// Precise (exact-tokenization) guardrail: per-model, active when precise is on
+	// globally or overridden true for that model and the model has a known ctx.
+	precise := map[string]bool{}
+	for _, m := range cfg.Models {
+		if m.Ctx <= 0 {
+			continue
+		}
+		if cfg.PreciseContext || (m.PreciseContext != nil && *m.PreciseContext) {
+			precise[m.ID] = true
+		}
+	}
+	if len(precise) > 0 {
+		srv.SetPreciseContext(precise)
+	}
+	// max_tokens clamping: per-model window, active when clamping is on globally
+	// or overridden true for that model and the model has a known ctx.
+	clampLimits := map[string]int{}
+	for _, m := range cfg.Models {
+		if m.Ctx <= 0 {
+			continue
+		}
+		if cfg.ClampMaxTokens || (m.ClampMaxTokens != nil && *m.ClampMaxTokens) {
+			clampLimits[m.ID] = m.Ctx
+		}
+	}
+	if len(clampLimits) > 0 {
+		srv.SetClampLimits(clampLimits)
+	}
+	// Bounded retry of transient upstream failures (disabled unless retry_max > 0).
+	if cfg.RetryMax > 0 {
+		srv.SetRetry(cfg.RetryMax, cfg.RetryBackoff())
+	}
+	// Model-level fallback chains: serve from another model when the primary is
+	// unavailable (circuit open / load failure).
+	modelFallbacks := map[string][]string{}
+	for _, m := range cfg.Models {
+		if len(m.ModelFallbacks) > 0 {
+			modelFallbacks[m.ID] = m.ModelFallbacks
+		}
+	}
+	if len(modelFallbacks) > 0 {
+		srv.SetModelFallbacks(modelFallbacks)
+	}
+	// Single-flight request coalescing (disabled unless coalesce: true).
+	if cfg.Coalesce {
+		srv.SetCoalescing(true)
+	}
 
 	if alClose, err := configureAccessLog(srv, cfg.AccessLog); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: access log disabled:", err)
@@ -640,6 +745,48 @@ func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler
 	fmt.Printf("reload: %d model(s), %d alias(es), %d tenant(s)\n",
 		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
 	return nil
+}
+
+// adoptBackendNames are the detect-and-adopt backends that can enumerate their
+// own models for auto-discovery.
+var adoptBackendNames = []string{"ollama", "lmstudio", "llamafile", "gpt4all"}
+
+// discoverModels queries each present backend that implements backend.ModelLister
+// and returns specs for models not already configured (configured wins on an id
+// clash). A backend that fails to list is skipped with a warning.
+func discoverModels(ctx context.Context, backends map[string]backend.Backend, existing []backend.ModelSpec) []backend.ModelSpec {
+	have := make(map[string]bool, len(existing))
+	for _, sp := range existing {
+		have[sp.ID] = true
+	}
+	var found []backend.ModelSpec
+	names := make([]string, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic discovery order
+	for _, name := range names {
+		lister, ok := backends[name].(backend.ModelLister)
+		if !ok {
+			continue
+		}
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ids, err := lister.ListModels(lctx)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "discover: %s: %v\n", name, err)
+			continue
+		}
+		for _, id := range ids {
+			if id == "" || have[id] {
+				continue
+			}
+			have[id] = true
+			found = append(found, backend.ModelSpec{ID: id, Backend: name})
+			fmt.Printf("discovered model %q on %s\n", id, name)
+		}
+	}
+	return found
 }
 
 // allBackends constructs every known backend adapter (for detection/listing).

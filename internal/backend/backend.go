@@ -111,6 +111,21 @@ type Backend interface {
 	Start(ctx context.Context, spec ModelSpec) (Runner, error)
 }
 
+// ModelLister is an optional Backend capability: enumerate the model ids the
+// backend can currently serve (e.g. an adopted daemon's loaded/pulled models).
+// It powers opt-in model auto-discovery so adopt backends need no manual config.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]string, error)
+}
+
+// TokenCounter is an optional Runner capability: count the tokens in text using
+// the model's real tokenizer (exact), instead of a character-based estimate.
+// Backends whose engine exposes a tokenize endpoint (e.g. llama.cpp) implement
+// it; others are counted with the heuristic estimate.
+type TokenCounter interface {
+	CountTokens(ctx context.Context, text string) (int, error)
+}
+
 // MemoryEstimator is an optional Backend capability: an a-priori estimate (in
 // bytes) of a model's resident footprint, used by the scheduler for admission
 // BEFORE the runner starts. Keeping the estimate in the backend keeps

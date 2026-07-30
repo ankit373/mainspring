@@ -66,6 +66,14 @@ func (g *Group) SetClock(now func() time.Time) { g.now = now }
 // Enabled reports whether breaking is active.
 func (g *Group) Enabled() bool { return g != nil && g.threshold > 0 && g.cooldown > 0 }
 
+// Config returns the configured failure threshold and cooldown (for reporting).
+func (g *Group) Config() (threshold int, cooldown time.Duration) {
+	if g == nil {
+		return 0, 0
+	}
+	return g.threshold, g.cooldown
+}
+
 // Allow reports whether a request for key may proceed. When it returns false the
 // caller must fast-fail (the breaker is open and still cooling down, or a
 // half-open probe is already in flight). It transitions Open→HalfOpen once the
