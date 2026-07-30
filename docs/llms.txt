@@ -77,8 +77,10 @@ MIT and already win; Mainspring wraps them).
   cost signal a router (Hydra) can route away from. Priced only from exact usage; never guessed.
 - Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, cost, requests, residency, inflight/queued,
   cache hits, resilience counters `mainspring_{retries,coalesced,fallback}_total`, and latency percentiles
-  `mainspring_{duration,ttft}_ms_{p50,p90,p99}` — a bounded recent-sample reservoir estimate, not a mean) and
-  an append-only JSONL usage ledger (each event records retries/coalesced/fallback too). The same p50/p90/p99
+  `mainspring_{duration,ttft,queue_wait}_ms_{p50,p90,p99}` — a bounded recent-sample reservoir estimate, not
+  a mean) and an append-only JSONL usage ledger (each event records retries/coalesced/fallback too). Queue
+  wait is the time a request actually spent queued for a concurrency-gate slot, measured separately from
+  total duration so backpressure latency is distinguishable from real generation time. The same percentiles
   are in `/v1/quality` per model. Token counts are real when the upstream reports a usage object (non-stream
   body, or the streaming `include_usage` final chunk), else estimated.
 - Config lint: catches config combinations that are valid YAML but silently do nothing — enforce_context/

@@ -30,7 +30,8 @@ type Event struct {
 	Fallback     bool      `json:"fallback,omitempty"`  // served by a fallback model (not the requested one)
 	Retries      int       `json:"retries,omitempty"`   // upstream retries this request incurred
 	DurationMs   float64   `json:"duration_ms"`
-	TTFTMs       float64   `json:"ttft_ms,omitempty"` // 0 when not applicable
+	TTFTMs       float64   `json:"ttft_ms,omitempty"`       // 0 when not applicable
+	QueueWaitMs  float64   `json:"queue_wait_ms,omitempty"` // time spent waiting for a concurrency-gate slot (0 = none/disabled)
 	Bytes        int64     `json:"bytes"`
 	PromptTokens int64     `json:"prompt_tokens,omitempty"` // real, when upstream reports usage
 	TokensEst    int64     `json:"tokens_est"`              // output tokens: real when Exact, else estimated
@@ -102,8 +103,9 @@ type modelStat struct {
 	coalesced    int64
 	fallback     int64
 
-	durRing  quantileRing // recent total-duration samples (ms)
-	ttftRing quantileRing // recent TTFT samples (ms)
+	durRing   quantileRing // recent total-duration samples (ms)
+	ttftRing  quantileRing // recent TTFT samples (ms)
+	queueRing quantileRing // recent gate queue-wait samples (ms)
 }
 
 // tenantStat is a per-principal consumption rollup (actuals, complementing the
@@ -169,6 +171,7 @@ func (r *Recorder) Record(ev Event) {
 	st.durSumMs += ev.DurationMs
 	st.durCount++
 	st.durRing.add(ev.DurationMs)
+	st.queueRing.add(ev.QueueWaitMs)
 	if ev.TTFTMs > 0 {
 		st.ttftSumMs += ev.TTFTMs
 		st.ttftCount++
@@ -217,12 +220,13 @@ func (r *Recorder) appendLedger(ev Event) {
 // Percentiles is a model's latency percentile snapshot (ms), estimated over a
 // bounded recent-sample reservoir — not an exact global quantile.
 type Percentiles struct {
-	DurationP50, DurationP90, DurationP99 float64
-	TTFTP50, TTFTP90, TTFTP99             float64
+	DurationP50, DurationP90, DurationP99    float64
+	TTFTP50, TTFTP90, TTFTP99                float64
+	QueueWaitP50, QueueWaitP90, QueueWaitP99 float64
 }
 
-// LatencyPercentiles returns duration and TTFT p50/p90/p99 (ms) for a model, or
-// all zeros when there are no samples yet.
+// LatencyPercentiles returns duration, TTFT, and gate queue-wait p50/p90/p99
+// (ms) for a model, or all zeros when there are no samples yet.
 func (r *Recorder) LatencyPercentiles(model string) Percentiles {
 	r.mu.Lock()
 	st := r.stats[model]
@@ -230,16 +234,19 @@ func (r *Recorder) LatencyPercentiles(model string) Percentiles {
 		r.mu.Unlock()
 		return Percentiles{}
 	}
-	dur, ttft := st.durRing.samples(), st.ttftRing.samples()
+	dur, ttft, queue := st.durRing.samples(), st.ttftRing.samples(), st.queueRing.samples()
 	r.mu.Unlock()
 
 	return Percentiles{
-		DurationP50: percentile(dur, 0.5),
-		DurationP90: percentile(dur, 0.9),
-		DurationP99: percentile(dur, 0.99),
-		TTFTP50:     percentile(ttft, 0.5),
-		TTFTP90:     percentile(ttft, 0.9),
-		TTFTP99:     percentile(ttft, 0.99),
+		DurationP50:  percentile(dur, 0.5),
+		DurationP90:  percentile(dur, 0.9),
+		DurationP99:  percentile(dur, 0.99),
+		TTFTP50:      percentile(ttft, 0.5),
+		TTFTP90:      percentile(ttft, 0.9),
+		TTFTP99:      percentile(ttft, 0.99),
+		QueueWaitP50: percentile(queue, 0.5),
+		QueueWaitP90: percentile(queue, 0.9),
+		QueueWaitP99: percentile(queue, 0.99),
 	}
 }
 
@@ -317,7 +324,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 		for k, v := range st.requests {
 			cp[k] = v
 		}
-		dur, ttft := st.durRing.samples(), st.ttftRing.samples()
+		dur, ttft, queue := st.durRing.samples(), st.ttftRing.samples(), st.queueRing.samples()
 		rows = append(rows, rowT{
 			model: m, statuses: cp,
 			durSum: st.durSumMs, ttftSum: st.ttftSumMs,
@@ -329,6 +336,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 			fallback:  st.fallback,
 			durP50:    percentile(dur, 0.5), durP90: percentile(dur, 0.9), durP99: percentile(dur, 0.99),
 			ttftP50: percentile(ttft, 0.5), ttftP90: percentile(ttft, 0.9), ttftP99: percentile(ttft, 0.99),
+			queueP50: percentile(queue, 0.5), queueP90: percentile(queue, 0.9), queueP99: percentile(queue, 0.99),
 		})
 	}
 	r.mu.Unlock()
@@ -362,6 +370,9 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 	writeGauge(w, "mainspring_ttft_ms_p50", "Time-to-first-token p50 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.ttftP50 })
 	writeGauge(w, "mainspring_ttft_ms_p90", "Time-to-first-token p90 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.ttftP90 })
 	writeGauge(w, "mainspring_ttft_ms_p99", "Time-to-first-token p99 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.ttftP99 })
+	writeGauge(w, "mainspring_queue_wait_ms_p50", "Concurrency-gate queue wait p50 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.queueP50 })
+	writeGauge(w, "mainspring_queue_wait_ms_p90", "Concurrency-gate queue wait p90 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.queueP90 })
+	writeGauge(w, "mainspring_queue_wait_ms_p99", "Concurrency-gate queue wait p99 (ms) by model, recent-sample estimate.", rows, func(rw rowT) float64 { return rw.queueP99 })
 
 	fmt.Fprint(w, "# HELP mainspring_loaded_models Currently resident models.\n# TYPE mainspring_loaded_models gauge\n")
 	fmt.Fprintf(w, "mainspring_loaded_models %d\n", g.LoadedModels)
@@ -380,6 +391,7 @@ type rowT = struct {
 	retries, coalesced, fallback              int64
 	durP50, durP90, durP99                    float64
 	ttftP50, ttftP90, ttftP99                 float64
+	queueP50, queueP90, queueP99              float64
 }
 
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {

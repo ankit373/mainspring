@@ -18,25 +18,28 @@ import (
 
 // modelQuality is the per-model routing signal.
 type modelQuality struct {
-	ID            string   `json:"id"`
-	Resident      bool     `json:"resident"`
-	Backend       string   `json:"backend,omitempty"`
-	Device        string   `json:"device,omitempty"`
-	GPUOffload    bool     `json:"gpu_offload"`
-	Degraded      bool     `json:"degraded"`
-	RequestedCtx  int      `json:"requested_ctx,omitempty"`
-	EffectiveCtx  int      `json:"effective_ctx,omitempty"`
-	Warnings      []string `json:"warnings,omitempty"`
-	Inflight      int      `json:"inflight"`
-	QueueDepth    int      `json:"queue_depth"`
-	TTFTp50Ms     float64  `json:"ttft_ms_p50"`
-	TTFTp90Ms     float64  `json:"ttft_ms_p90"`
-	TTFTp99Ms     float64  `json:"ttft_ms_p99"`
-	DurationP50Ms float64  `json:"duration_ms_p50"`
-	DurationP90Ms float64  `json:"duration_ms_p90"`
-	DurationP99Ms float64  `json:"duration_ms_p99"`
-	Breaker       string   `json:"breaker"`  // "closed" | "open" | "half_open"
-	CostUSD       float64  `json:"cost_usd"` // accumulated spend for this model
+	ID             string   `json:"id"`
+	Resident       bool     `json:"resident"`
+	Backend        string   `json:"backend,omitempty"`
+	Device         string   `json:"device,omitempty"`
+	GPUOffload     bool     `json:"gpu_offload"`
+	Degraded       bool     `json:"degraded"`
+	RequestedCtx   int      `json:"requested_ctx,omitempty"`
+	EffectiveCtx   int      `json:"effective_ctx,omitempty"`
+	Warnings       []string `json:"warnings,omitempty"`
+	Inflight       int      `json:"inflight"`
+	QueueDepth     int      `json:"queue_depth"`
+	TTFTp50Ms      float64  `json:"ttft_ms_p50"`
+	TTFTp90Ms      float64  `json:"ttft_ms_p90"`
+	TTFTp99Ms      float64  `json:"ttft_ms_p99"`
+	DurationP50Ms  float64  `json:"duration_ms_p50"`
+	DurationP90Ms  float64  `json:"duration_ms_p90"`
+	DurationP99Ms  float64  `json:"duration_ms_p99"`
+	QueueWaitP50Ms float64  `json:"queue_wait_ms_p50"`
+	QueueWaitP90Ms float64  `json:"queue_wait_ms_p90"`
+	QueueWaitP99Ms float64  `json:"queue_wait_ms_p99"`
+	Breaker        string   `json:"breaker"`  // "closed" | "open" | "half_open"
+	CostUSD        float64  `json:"cost_usd"` // accumulated spend for this model
 }
 
 // quality implements GET /v1/quality. Gated like /capabilities: an authenticated
@@ -80,6 +83,7 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 			lat := s.metrics.LatencyPercentiles(sp.ID)
 			mq.TTFTp50Ms, mq.TTFTp90Ms, mq.TTFTp99Ms = lat.TTFTP50, lat.TTFTP90, lat.TTFTP99
 			mq.DurationP50Ms, mq.DurationP90Ms, mq.DurationP99Ms = lat.DurationP50, lat.DurationP90, lat.DurationP99
+			mq.QueueWaitP50Ms, mq.QueueWaitP90Ms, mq.QueueWaitP99Ms = lat.QueueWaitP50, lat.QueueWaitP90, lat.QueueWaitP99
 			mq.CostUSD = costByModel[sp.ID]
 		}
 		if c, ok := capsByID[sp.ID]; ok {
