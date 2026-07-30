@@ -131,6 +131,22 @@ func (g *Group) OnResult(key string, success bool) {
 	}
 }
 
+// Reset forces key's breaker back to Closed and clears its failure count,
+// letting an operator recover immediately (e.g. after manually confirming the
+// backend is healthy again) rather than waiting out the cooldown. A no-op when
+// breaking is disabled or key has never tripped.
+func (g *Group) Reset(key string) {
+	if !g.Enabled() {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if b := g.breakers[key]; b != nil {
+		b.state = Closed
+		b.failures = 0
+	}
+}
+
 // State returns the current state for key (Closed if unseen).
 func (g *Group) State(key string) State {
 	if !g.Enabled() {
