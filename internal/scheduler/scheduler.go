@@ -474,10 +474,14 @@ func (s *Scheduler) idleEvict(modelID string) {
 }
 
 // Unload evicts a specific model if resident, stopping its runner and reclaiming
-// its memory. It resolves aliases first. It returns true if a model was
-// unloaded, false if it was not resident. The model can be reloaded on the next
-// request.
-func (s *Scheduler) Unload(modelID string) bool {
+// its memory. It resolves aliases first. It returns unloaded=true if a model
+// was unloaded, false if it was not resident. Unlike the automatic idle/LRU/
+// reload eviction paths, this is an explicit operator action and always takes
+// priority over any in-flight request — but interrupted reports how many
+// requests were actually using the runner at the moment it was force-stopped,
+// so the operator knows whether they just interrupted live traffic (0 = the
+// model was idle). The model can be reloaded on the next request.
+func (s *Scheduler) Unload(modelID string) (unloaded bool, interrupted int) {
 	if real, ok := s.Resolve(modelID); ok {
 		modelID = real
 	}
@@ -485,16 +489,16 @@ func (s *Scheduler) Unload(modelID string) bool {
 	l, ok := s.running[modelID]
 	if !ok {
 		s.mu.Unlock()
-		return false
+		return false, 0
 	}
 	if l.timer != nil {
 		l.timer.Stop()
 	}
 	delete(s.running, modelID)
-	r := l.runner
+	r, n := l.runner, l.inflight
 	s.mu.Unlock()
 	_ = r.Stop(context.Background())
-	return true
+	return true, n
 }
 
 // touch marks a loaded model as recently used (caller holds s.mu).
