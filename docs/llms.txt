@@ -112,7 +112,10 @@ MIT and already win; Mainspring wraps them).
   in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
   are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand —
   a model actively serving a request is never evicted mid-flight, even if its spec changed; eviction is
-  deferred until it actually goes idle.
+  deferred until it actually goes idle. Every other setting reload does not (or structurally cannot)
+  re-apply — timeouts, cache, guardrail, clamp, retry, coalesce, breaker, per-model cost/fallback
+  overrides, and more — is logged as requiring a restart when it changes, rather than silently keeping
+  the old value with no explanation.
 
 ## Backends
 

@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -726,10 +727,14 @@ func runHealthProber(ctx context.Context, interval time.Duration, sched *schedul
 }
 
 // reloadConfig re-reads the config file and applies the safe subset: model
-// specs, aliases, and tenants. Changes to the listen address, backend set, or
-// ledger require a restart and are only logged. A missing config file is a
-// no-op (so a flag-only launch is never wiped). Shared by SIGHUP and the admin
-// reload endpoint; it returns an error the caller can surface or log.
+// specs, aliases, and tenants. Every other setting is either a listener/process
+// concern that cannot be swapped on a running server, or a value some other
+// Set* call already baked into the server/scheduler at startup and never
+// revisits — reload does not re-run any of that wiring. Rather than silently
+// keeping the old value with no explanation, every changed-but-unapplied field
+// is logged so the difference is never a silent surprise. A missing config file
+// is a no-op (so a flag-only launch is never wiped). Shared by SIGHUP and the
+// admin reload endpoint; it returns an error the caller can surface or log.
 func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator) error {
 	resolved := path
 	if resolved == "" {
@@ -742,14 +747,7 @@ func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler
 	if err != nil {
 		return fmt.Errorf("reload failed, keeping current config: %w", err)
 	}
-
-	// Unsafe changes can't be applied to a running listener — warn, don't apply.
-	if newCfg.Addr != startup.Addr {
-		fmt.Fprintf(os.Stderr, "reload: addr change (%s → %s) requires a restart; ignoring\n", startup.Addr, newCfg.Addr)
-	}
-	if newCfg.Backend != startup.Backend {
-		fmt.Fprintf(os.Stderr, "reload: backend change (%q → %q) requires a restart; ignoring\n", startup.Backend, newCfg.Backend)
-	}
+	warnUnappliedChanges(startup, newCfg)
 
 	if err := sched.Reload(modelSpecs(newCfg), newCfg.Aliases); err != nil {
 		return fmt.Errorf("model/alias reload rejected, keeping current: %w", err)
@@ -758,6 +756,89 @@ func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler
 	fmt.Printf("reload: %d model(s), %d alias(es), %d tenant(s)\n",
 		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
 	return nil
+}
+
+// warnUnappliedChanges logs every top-level and per-model setting that reload
+// does not (and, for most of these, structurally cannot without a restart)
+// re-apply, whenever it differs between the running config and the newly
+// loaded one. Silence otherwise — an unchanged value is not worth a line.
+func warnUnappliedChanges(startup, newCfg config.Config) {
+	warnRestartRequired("addr", startup.Addr, newCfg.Addr)
+	warnRestartRequired("backend", startup.Backend, newCfg.Backend)
+	warnRestartRequired("keep_alive_seconds", startup.KeepAliveSeconds, newCfg.KeepAliveSeconds)
+	warnRestartRequired("max_loaded", startup.MaxLoaded, newCfg.MaxLoaded)
+	warnRestartRequired("max_resident_mb", startup.MaxResidentMB, newCfg.MaxResidentMB)
+	warnRestartRequired("max_inflight", startup.MaxInflight, newCfg.MaxInflight)
+	warnRestartRequired("max_queue", startup.MaxQueue, newCfg.MaxQueue)
+	warnRestartRequired("breaker_threshold", startup.BreakerThreshold, newCfg.BreakerThreshold)
+	warnRestartRequired("breaker_cooldown_seconds", startup.BreakerCooldownS, newCfg.BreakerCooldownS)
+	warnRestartRequired("health_probe_seconds", startup.HealthProbeS, newCfg.HealthProbeS)
+	warnRestartRequired("drain_seconds", startup.DrainSeconds, newCfg.DrainSeconds)
+	warnRestartRequired("usage_ledger", startup.UsageLedger, newCfg.UsageLedger)
+	warnRestartRequired("access_log", startup.AccessLog, newCfg.AccessLog)
+	warnRestartRequired("tls_cert", startup.TLSCert, newCfg.TLSCert)
+	warnRestartRequired("tls_key", startup.TLSKey, newCfg.TLSKey)
+	warnRestartRequired("llama_server_path", startup.LlamaServerPath, newCfg.LlamaServerPath)
+	warnRestartRequired("ollama_host", startup.OllamaHost, newCfg.OllamaHost)
+	warnRestartRequired("mlx_python", startup.MLXPython, newCfg.MLXPython)
+	warnRestartRequired("lmstudio_host", startup.LMStudioHost, newCfg.LMStudioHost)
+	warnRestartRequired("llamafile_host", startup.LlamafileHost, newCfg.LlamafileHost)
+	warnRestartRequired("gpt4all_host", startup.GPT4AllHost, newCfg.GPT4AllHost)
+	warnRestartRequired("discover_models", startup.DiscoverModels, newCfg.DiscoverModels)
+	warnRestartRequired("request_timeout_seconds", startup.RequestTimeoutS, newCfg.RequestTimeoutS)
+	warnRestartRequired("cache_max_entries", startup.CacheMaxEntries, newCfg.CacheMaxEntries)
+	warnRestartRequired("cache_ttl_seconds", startup.CacheTTLS, newCfg.CacheTTLS)
+	warnRestartRequired("enforce_context", startup.EnforceContext, newCfg.EnforceContext)
+	warnRestartRequired("precise_context", startup.PreciseContext, newCfg.PreciseContext)
+	warnRestartRequired("clamp_max_tokens", startup.ClampMaxTokens, newCfg.ClampMaxTokens)
+	warnRestartRequired("retry_max", startup.RetryMax, newCfg.RetryMax)
+	warnRestartRequired("retry_backoff_ms", startup.RetryBackoffMs, newCfg.RetryBackoffMs)
+	warnRestartRequired("coalesce", startup.Coalesce, newCfg.Coalesce)
+
+	// Per-model settings outside backend.ModelSpec (cost rates, guardrail
+	// overrides, request timeout, model-level fallbacks): scheduler.Reload only
+	// evicts/reloads a model whose ModelSpec changed, so these can silently
+	// drift from the file even for a model that IS otherwise reloaded correctly.
+	old := make(map[string]config.Model, len(startup.Models))
+	for _, m := range startup.Models {
+		old[m.ID] = m
+	}
+	for _, m := range newCfg.Models {
+		if prev, ok := old[m.ID]; ok && modelExtrasChanged(prev, m) {
+			fmt.Fprintf(os.Stderr, "reload: model %q per-model overrides (cost/guardrail/clamp/timeout/fallbacks) changed; requires a restart to take effect; ignoring\n", m.ID)
+		}
+	}
+}
+
+// warnRestartRequired logs a restart-required line when oldV != newV. Values
+// are compared via their default fmt formatting, which is exact for the
+// plain scalar config fields this is used for (string/int/bool).
+func warnRestartRequired(field string, oldV, newV any) {
+	if fmt.Sprintf("%v", oldV) != fmt.Sprintf("%v", newV) {
+		fmt.Fprintf(os.Stderr, "reload: %s changed (%v -> %v) requires a restart; ignoring\n", field, oldV, newV)
+	}
+}
+
+// modelExtrasChanged reports whether any per-model setting NOT already covered
+// by backend.ModelSpec (and thus not already handled by scheduler.Reload)
+// differs between two Model entries for the same id.
+func modelExtrasChanged(a, b config.Model) bool {
+	if a.TimeoutS != b.TimeoutS || a.InputUSDPerMTok != b.InputUSDPerMTok || a.OutputUSDPerMTok != b.OutputUSDPerMTok {
+		return true
+	}
+	if boolPtrDiffers(a.EnforceContext, b.EnforceContext) ||
+		boolPtrDiffers(a.ClampMaxTokens, b.ClampMaxTokens) ||
+		boolPtrDiffers(a.PreciseContext, b.PreciseContext) {
+		return true
+	}
+	return !slices.Equal(a.ModelFallbacks, b.ModelFallbacks)
+}
+
+func boolPtrDiffers(a, b *bool) bool {
+	if (a == nil) != (b == nil) {
+		return true
+	}
+	return a != nil && *a != *b
 }
 
 // adoptBackendNames are the detect-and-adopt backends that can enumerate their
