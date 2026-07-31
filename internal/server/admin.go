@@ -83,7 +83,8 @@ func (s *Server) adminUnload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeModelNotFound, "model not found: "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "unloaded": s.sched.Unload(id)})
+	unloaded, interrupted := s.sched.Unload(id)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "unloaded": unloaded, "interrupted_requests": interrupted})
 }
 
 // adminBreakerReset forces a model's circuit breaker back to Closed, letting an

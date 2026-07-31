@@ -18,7 +18,7 @@ type fakeRunner struct {
 	stopped atomic.Bool
 }
 
-func (r *fakeRunner) BaseURL() string { return "http://fake/" + r.id }
+func (r *fakeRunner) BaseURL() string                       { return "http://fake/" + r.id }
 func (r *fakeRunner) Health(context.Context) backend.Status { return backend.StatusReady }
 func (r *fakeRunner) MemoryBytes() int64 {
 	if r.mem == 0 {
@@ -452,8 +452,8 @@ func TestUnloadEvictsSpecificModel(t *testing.T) {
 	ra, _ := s.EnsureLoaded(context.Background(), "a")
 	_, _ = s.EnsureLoaded(context.Background(), "b")
 
-	if !s.Unload("a") {
-		t.Fatal("Unload should report true for a resident model")
+	if unloaded, interrupted := s.Unload("a"); !unloaded || interrupted != 0 {
+		t.Fatalf("Unload(a) = (%v, %d), want (true, 0) — resident and idle", unloaded, interrupted)
 	}
 	if !ra.(*fakeRunner).stopped.Load() {
 		t.Fatal("Unload must Stop the runner")
@@ -461,7 +461,7 @@ func TestUnloadEvictsSpecificModel(t *testing.T) {
 	if len(s.Loaded()) != 1 {
 		t.Fatalf("only b should remain, got %d loaded", len(s.Loaded()))
 	}
-	if s.Unload("a") {
+	if unloaded, _ := s.Unload("a"); unloaded {
 		t.Fatal("Unloading a non-resident model should return false")
 	}
 	// A reload path still works after unload.
@@ -470,11 +470,35 @@ func TestUnloadEvictsSpecificModel(t *testing.T) {
 	}
 }
 
+// TestUnloadReportsInterruptedRequests proves the fix: force-unloading a busy
+// model still succeeds (an explicit admin action always takes priority — this
+// is deliberately different from the automatic idle/LRU/reload eviction paths,
+// which must never interrupt a live request), but now reports how many
+// requests were actually cut off.
+func TestUnloadReportsInterruptedRequests(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2})
+	r, _ := s.EnsureLoaded(context.Background(), "a")
+	s.MarkBusy("a")
+	s.MarkBusy("a") // two concurrent in-flight requests
+
+	unloaded, interrupted := s.Unload("a")
+	if !unloaded {
+		t.Fatal("Unload should still succeed on a busy model (explicit admin action)")
+	}
+	if interrupted != 2 {
+		t.Fatalf("interrupted = %d, want 2 (both in-flight requests were cut off)", interrupted)
+	}
+	if !r.(*fakeRunner).stopped.Load() {
+		t.Fatal("the runner must actually be stopped despite being busy")
+	}
+}
+
 func TestUnloadResolvesAlias(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("real"), Options{MaxLoaded: 2, Aliases: map[string]string{"friendly": "real"}})
 	_, _ = s.EnsureLoaded(context.Background(), "friendly")
-	if !s.Unload("friendly") {
+	if unloaded, _ := s.Unload("friendly"); !unloaded {
 		t.Fatal("Unload should resolve the alias and evict the real model")
 	}
 }
