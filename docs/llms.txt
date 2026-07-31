@@ -110,7 +110,9 @@ MIT and already win; Mainspring wraps them).
   distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK.
 - Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
   in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
-  are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand.
+  are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand —
+  a model actively serving a request is never evicted mid-flight, even if its spec changed; eviction is
+  deferred until it actually goes idle.
 
 ## Backends
 
