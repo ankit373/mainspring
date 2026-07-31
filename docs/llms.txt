@@ -34,7 +34,10 @@ MIT and already win; Mainspring wraps them).
   runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or
   that would otherwise be picked as the LRU victim, is protected until it actually finishes.
 - Standalone governance: API keys → named tenants with roles (admin/inference) and per-tenant request
-  rate limits (429 + Retry-After) and token budgets.
+  rate limits (429 + Retry-After) and token budgets. Every authenticated response for a tenant with a
+  configured quota carries `X-Mainspring-{RateLimit,TokenBudget}-{Limit,Remaining,Reset}` headers, so a
+  client can see headroom and back off proactively instead of only reacting to a 429/token_budget error.
+  Omitted entirely for an unlimited tenant or in open mode.
 - Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.
 - Per-request timeout: an optional global default + per-model override bounds total generation time; on
   expiry the upstream call is cancelled and a 504 `timeout` is returned (0 = unbounded).

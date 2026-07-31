@@ -121,6 +121,57 @@ func TestUnlimitedTenantHasNoQuota(t *testing.T) {
 	}
 }
 
+// TestQuotaHeadersOnSuccessfulResponse proves the fix: a tenant with a
+// configured rate/token quota sees headroom on a normal, successful response
+// -- not just after finally being rejected.
+func TestQuotaHeadersOnSuccessfulResponse(t *testing.T) {
+	a := NewTenants([]Tenant{{Name: "t", Key: "k", RateRPM: 5, TokenBudget: 1000, WindowSec: 60}})
+	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r.Header.Set("Authorization", "Bearer k")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("X-Mainspring-RateLimit-Limit"); got != "5" {
+		t.Fatalf("RateLimit-Limit = %q, want 5", got)
+	}
+	if got := w.Header().Get("X-Mainspring-RateLimit-Remaining"); got != "4" {
+		t.Fatalf("RateLimit-Remaining = %q, want 4 (5 - this request)", got)
+	}
+	if got := w.Header().Get("X-Mainspring-RateLimit-Reset"); got == "" {
+		t.Fatal("RateLimit-Reset should be set")
+	}
+	if got := w.Header().Get("X-Mainspring-TokenBudget-Limit"); got != "1000" {
+		t.Fatalf("TokenBudget-Limit = %q, want 1000", got)
+	}
+	if got := w.Header().Get("X-Mainspring-TokenBudget-Remaining"); got != "1000" {
+		t.Fatalf("TokenBudget-Remaining = %q, want 1000 (no tokens spent yet)", got)
+	}
+}
+
+// Headers must be omitted entirely for a tenant with no configured quota, and
+// in open mode (no tenant at all).
+func TestQuotaHeadersOmittedWhenUnlimited(t *testing.T) {
+	a := NewTenants([]Tenant{{Name: "t", Key: "k"}}) // no RateRPM, no TokenBudget
+	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r.Header.Set("Authorization", "Bearer k")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	for _, h := range []string{
+		"X-Mainspring-RateLimit-Limit", "X-Mainspring-RateLimit-Remaining", "X-Mainspring-RateLimit-Reset",
+		"X-Mainspring-TokenBudget-Limit", "X-Mainspring-TokenBudget-Remaining", "X-Mainspring-TokenBudget-Reset",
+	} {
+		if got := w.Header().Get(h); got != "" {
+			t.Fatalf("%s = %q, want empty (no quota configured)", h, got)
+		}
+	}
+}
+
 func TestOpenModeAllowsAll(t *testing.T) {
 	a := New(nil)
 	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
