@@ -55,7 +55,8 @@ type loaded struct {
 	spec     backend.ModelSpec
 	lastUsed time.Time
 	timer    *time.Timer
-	inflight int // requests actively using this runner right now; never evict while > 0
+	inflight int  // requests actively using this runner right now; never evict while > 0
+	stale    bool // spec changed (or model removed) during Reload while busy; evict once idle
 }
 
 type loadCall struct {
@@ -172,18 +173,27 @@ func (s *Scheduler) Reload(specList []backend.ModelSpec, aliases map[string]stri
 	s.aliases = newAliases
 	s.specsMu.Unlock()
 
-	// Evict runners whose spec changed or disappeared.
+	// Evict runners whose spec changed or disappeared — but never one that is
+	// actively serving a request (the same in-flight protection idleEvict and
+	// the LRU picker already apply). A busy, changed model is marked stale
+	// instead: MarkIdle evicts it as soon as it actually finishes, so the fix
+	// is self-healing without a second background sweep.
 	var victims []backend.Runner
 	s.mu.Lock()
 	for id, l := range s.running {
 		ns, ok := newSpecs[id]
-		if !ok || !specEqual(ns, l.spec) {
-			if l.timer != nil {
-				l.timer.Stop()
-			}
-			delete(s.running, id)
-			victims = append(victims, l.runner)
+		if ok && specEqual(ns, l.spec) {
+			continue
 		}
+		if l.inflight > 0 {
+			l.stale = true
+			continue
+		}
+		if l.timer != nil {
+			l.timer.Stop()
+		}
+		delete(s.running, id)
+		victims = append(victims, l.runner)
 	}
 	s.mu.Unlock()
 	for _, r := range victims {
@@ -294,18 +304,35 @@ func (s *Scheduler) MarkBusy(modelID string) {
 
 // MarkIdle is the matching release for MarkBusy. It also touches the model, so
 // the idle clock starts counting from actual last-activity (when the request
-// truly finished) rather than from when it started.
+// truly finished) rather than from when it started. If a config Reload marked
+// this model stale (its spec changed while it was busy) and this was the last
+// in-flight request, it is evicted now — self-healing, without a second
+// background sweep — so the next request picks up the new spec.
 func (s *Scheduler) MarkIdle(modelID string) {
 	if real, ok := s.Resolve(modelID); ok {
 		modelID = real
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if l, ok := s.running[modelID]; ok {
-		if l.inflight > 0 {
-			l.inflight--
+	l, ok := s.running[modelID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	if l.inflight > 0 {
+		l.inflight--
+	}
+	s.touch(l)
+	var victim backend.Runner
+	if l.stale && l.inflight == 0 {
+		if l.timer != nil {
+			l.timer.Stop()
 		}
-		s.touch(l)
+		delete(s.running, modelID)
+		victim = l.runner
+	}
+	s.mu.Unlock()
+	if victim != nil {
+		_ = victim.Stop(context.Background())
 	}
 }
 

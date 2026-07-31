@@ -284,6 +284,54 @@ func TestReloadEvictsChangedModel(t *testing.T) {
 	}
 }
 
+// TestReloadDefersEvictionWhileBusy proves the fix: a config reload that
+// changes a busy model's spec must not kill it mid-request. It survives until
+// MarkIdle, then evicts promptly (self-healing, no restart needed).
+func TestReloadDefersEvictionWhileBusy(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2})
+	r, _ := s.EnsureLoaded(context.Background(), "a")
+	s.MarkBusy("a")
+
+	// Same id but a different path — would normally be evicted immediately.
+	changed := []backend.ModelSpec{{ID: "a", Backend: "fake", Path: "/new/path"}}
+	if err := s.Reload(changed, nil); err != nil {
+		t.Fatal(err)
+	}
+	if r.(*fakeRunner).stopped.Load() {
+		t.Fatal("busy model must not be evicted by a reload mid-request")
+	}
+	if len(s.Loaded()) != 1 {
+		t.Fatal("busy model should still be resident immediately after reload")
+	}
+
+	// Once idle, the deferred eviction fires.
+	s.MarkIdle("a")
+	if !r.(*fakeRunner).stopped.Load() {
+		t.Fatal("stale model should be evicted as soon as it goes idle")
+	}
+	if len(s.Loaded()) != 0 {
+		t.Fatal("stale model should no longer be resident after MarkIdle")
+	}
+}
+
+// A busy model whose spec did NOT change must survive reload regardless, and
+// must not be evicted later by an unrelated MarkIdle (it was never stale).
+func TestReloadUnchangedBusyModelNeverMarkedStale(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2})
+	r, _ := s.EnsureLoaded(context.Background(), "a")
+	s.MarkBusy("a")
+
+	if err := s.Reload(specs("a"), nil); err != nil {
+		t.Fatal(err)
+	}
+	s.MarkIdle("a")
+	if r.(*fakeRunner).stopped.Load() {
+		t.Fatal("unchanged model must never be evicted, even after going idle post-reload")
+	}
+}
+
 func TestReloadKeepsUnchangedModelResident(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 3})
