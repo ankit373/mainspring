@@ -92,17 +92,17 @@ nav a:hover{color:var(--ink);text-decoration:none}
 @media(max-width:430px){nav .hide-xs{display:none}}
 
 /* ---- hero ---- */
-.hero{padding:clamp(56px,9vw,92px) 0 clamp(40px,6vw,60px);border-bottom:1px solid var(--line);position:relative}
+.hero{padding:clamp(40px,6vw,62px) 0 clamp(38px,5vw,54px);border-bottom:1px solid var(--line);position:relative}
 .hero::after{
   content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;
   background:linear-gradient(90deg,transparent,var(--brass-deep) 22%,var(--brass) 50%,var(--brass-deep) 78%,transparent);
   opacity:.5;
 }
 .hero h1{
-  font-size:clamp(38px,7vw,66px);line-height:1.03;margin:16px 0 20px;
+  font-size:clamp(35px,5.6vw,56px);line-height:1.05;margin:14px 0 16px;
 }
 .hero h1 em{font-style:normal;color:var(--brass)}
-.lede{font-size:clamp(17px,2.2vw,20px);color:var(--ink-dim);max-width:var(--measure);margin:0 0 30px}
+.lede{font-size:clamp(16.5px,1.9vw,18.5px);color:var(--ink-dim);max-width:60ch;margin:0 0 26px}
 .cta{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
 .btn{
   display:inline-block;padding:12px 20px;border-radius:7px;
@@ -114,15 +114,117 @@ nav a:hover{color:var(--ink);text-decoration:none}
 .btn.ghost{border-color:var(--line-lit);color:var(--ink)}
 .btn.ghost:hover{border-color:var(--brass);color:var(--brass);text-decoration:none}
 
-/* Hero stat strip — the gauge row under the headline. */
-.strip{
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
-  gap:1px;margin-top:44px;background:var(--line);
-  border:1px solid var(--line);border-radius:10px;overflow:hidden;
+/* ============================================================
+   The journey of one request — the page's mental model.
+   A request enters at the top, passes five stages, leaves as
+   an answer plus the truth about what produced it.
+   ============================================================ */
+.journey{
+  margin-top:clamp(30px,4vw,42px);
+  border:1px solid var(--line);border-radius:14px;
+  background:
+    radial-gradient(120% 90% at 50% -10%,color-mix(in srgb,var(--brass) 7%,transparent),transparent 60%),
+    linear-gradient(180deg,var(--panel-2),var(--panel));
+  box-shadow:0 1px 0 color-mix(in srgb,var(--brass) 13%,transparent) inset,0 26px 60px -30px #000;
+  overflow:hidden;
 }
-.strip div{background:var(--panel);padding:15px 16px}
-.strip .n{font-family:var(--mono);font-size:21px;font-weight:500;color:var(--brass);font-variant-numeric:tabular-nums;line-height:1.2}
-.strip .l{font-size:12.5px;color:var(--muted);margin-top:3px}
+.j-head{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
+  padding:14px 18px;border-bottom:1px solid var(--line);
+  background:color-mix(in srgb,#000 22%,transparent);
+}
+.j-req{font-family:var(--mono);font-size:12.5px;color:var(--ink-dim);overflow-wrap:anywhere}
+.j-req b{color:var(--brass);font-weight:500}
+.j-head .plate{color:var(--faint)}
+
+/* --- the track --- */
+.j-track{position:relative;padding:30px 18px 8px}
+.j-rail{position:relative;height:2px;margin:0 auto;background:var(--line-lit);border-radius:2px}
+/* The rail fills to the stage the request has reached. */
+.j-fill{
+  position:absolute;left:0;top:0;height:100%;width:10%;border-radius:2px;
+  background:linear-gradient(90deg,var(--brass-deep),var(--brass-lit));
+  box-shadow:0 0 12px 1px color-mix(in srgb,var(--brass) 45%,transparent);
+  transition:width .55s cubic-bezier(.6,.02,.3,1);
+}
+.j-nodes{
+  display:grid;grid-template-columns:repeat(5,1fr);
+  margin-top:-14px;position:relative;z-index:2;
+}
+.j-node{
+  appearance:none;background:none;border:0;padding:0 6px 12px;cursor:pointer;
+  display:flex;flex-direction:column;align-items:center;gap:9px;
+  font-family:var(--mono);color:var(--muted);text-align:center;
+}
+.j-dot{
+  width:26px;height:26px;border-radius:50%;flex:none;
+  display:grid;place-items:center;
+  font-size:11px;font-weight:500;color:var(--faint);
+  background:radial-gradient(circle at 34% 28%,var(--panel-2),#0d0a06);
+  border:1px solid var(--line-lit);
+  transition:transform .3s,border-color .3s,color .3s,box-shadow .3s;
+}
+.j-name{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;transition:color .3s}
+.j-node:hover .j-dot,.j-node:focus-visible .j-dot{border-color:var(--brass-deep);color:var(--brass)}
+.j-node[aria-current="true"] .j-dot{
+  color:#1a1204;border-color:var(--brass-lit);transform:scale(1.22);
+  background:radial-gradient(circle at 34% 28%,var(--brass-lit),var(--brass-deep));
+  box-shadow:0 0 20px 3px color-mix(in srgb,var(--brass) 45%,transparent);
+}
+.j-node[aria-current="true"] .j-name{color:var(--brass-lit)}
+
+/* --- the stage detail panel --- */
+.j-panel{
+  margin:8px 18px 18px;padding:17px 19px;min-height:126px;
+  border:1px solid var(--line);border-left:2px solid var(--brass);border-radius:10px;
+  background:color-mix(in srgb,#000 26%,transparent);
+}
+.j-does{margin:0;font-size:15.5px;color:var(--ink);line-height:1.55}
+.j-does code{color:var(--brass);font-size:13.5px;overflow-wrap:anywhere}
+.j-prevents{
+  margin:12px 0 0;padding-top:11px;border-top:1px solid var(--line);
+  font-size:14px;color:var(--muted);display:flex;gap:10px;align-items:baseline;
+}
+.j-prevents .k{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--rust);flex:none;padding-top:2px;
+}
+.j-panel.swap .j-does,.j-panel.swap .j-prevents{animation:jfade .34s ease}
+@keyframes jfade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* --- engines out --- */
+.j-out{
+  display:flex;flex-wrap:wrap;gap:7px;align-items:center;
+  padding:14px 18px;border-top:1px solid var(--line);
+  background:color-mix(in srgb,#000 22%,transparent);
+}
+.j-out .plate{margin-right:4px;color:var(--faint)}
+.eng{
+  font-family:var(--mono);font-size:11.5px;padding:4px 10px;border-radius:999px;
+  border:1px solid var(--line-lit);color:var(--muted);transition:all .3s;white-space:nowrap;
+}
+.eng.hot{
+  color:var(--brass-lit);border-color:var(--brass);
+  background:color-mix(in srgb,var(--brass) 13%,transparent);
+  box-shadow:0 0 14px -2px color-mix(in srgb,var(--brass) 50%,transparent);
+}
+.j-out .out-h{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--verdigris);opacity:0;transition:opacity .4s}
+.j-out .out-h.on{opacity:1}
+@media(max-width:660px){
+  .j-out .out-h{margin-left:0;flex-basis:100%}
+  .j-name{font-size:9px;letter-spacing:.08em}
+  .j-track{padding:26px 12px 8px}
+  .j-panel{margin:8px 12px 14px;min-height:0}
+  /* Stack the label above its text rather than starving the column. */
+  .j-prevents{flex-direction:column;gap:4px}
+  .j-prevents .k{padding-top:0}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .j-fill{transition:none}
+  .j-panel{min-height:0}
+  .j-node[aria-current="true"] .j-dot{transform:none}
+}
 
 /* ---- sections ---- */
 section{padding:clamp(48px,7vw,72px) 0;border-bottom:1px solid var(--line)}
@@ -239,12 +341,33 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
     <a class="btn ghost" href="https://github.com/ankit373/mainspring">View on GitHub</a>
   </div>
 
-  <div class="strip">
-    <div><div class="n">6</div><div class="l">engines, one API</div></div>
-    <div><div class="n">2</div><div class="l">API dialects</div></div>
-    <div><div class="n">0</div><div class="l">kernels written</div></div>
-    <div><div class="n">1</div><div class="l">static binary</div></div>
-  </div>
+  <figure class="journey" id="journey">
+    <figcaption class="j-head">
+      <span class="j-req">your app <b>&rarr;</b> POST /v1/chat/completions <b>{</b>"model":"qwen2.5-coder"<b>}</b></span>
+      <span class="plate">one request, five stages</span>
+    </figcaption>
+
+    <div class="j-track">
+      <div class="j-rail"><span class="j-fill" id="jfill" aria-hidden="true"></span></div>
+      <div class="j-nodes" id="jnodes" role="group" aria-label="Stages of a request"></div>
+    </div>
+
+    <div class="j-panel" id="jpanel" aria-live="polite">
+      <p class="j-does" id="jdoes"></p>
+      <p class="j-prevents"><span class="k">prevents</span><span id="jprev"></span></p>
+    </div>
+
+    <div class="j-out">
+      <span class="plate">runs on</span>
+      <span class="eng" data-eng="llamacpp">llama.cpp</span>
+      <span class="eng" data-eng="mlx">MLX</span>
+      <span class="eng" data-eng="ollama">Ollama</span>
+      <span class="eng" data-eng="lmstudio">LM Studio</span>
+      <span class="eng" data-eng="llamafile">llamafile</span>
+      <span class="eng" data-eng="gpt4all">GPT4All</span>
+      <span class="out-h" id="jout">&larr; backend=llamacpp device=gpu ctx=8192 exact</span>
+    </div>
+  </figure>
 </div></div>
 
 <section id="why"><div class="wrap">
@@ -463,5 +586,99 @@ curl localhost:11500/capabilities
   </div>
 </div></footer>
 
+<script>
+(() => {
+  // Each stage is real behaviour in the request path, paired with the specific
+  // failure it exists to prevent. Order matches the actual pipeline.
+  const STAGES = [
+    { n:'Admit',
+      does:'Resolve the API key to a tenant and role, charge its rate limit and token budget, then check the prompt actually <em>fits</em> the model’s context — exactly when the model is resident on a tokenizing engine, conservatively when it isn’t.',
+      prev:'an over-length prompt being silently truncated by the engine, and an unauthenticated caller reaching your GPU at all.' },
+    { n:'Resolve',
+      does:'Turn a friendly alias into a real model id, pick which engine serves it, and line up its fallbacks — both kinds: the same model on another engine, and <code>model_fallbacks</code>, a different model entirely.',
+      prev:'one engine’s name being hard-coded into your application, and a single unavailable model taking the request down with it.' },
+    { n:'Resident',
+      does:'Ask whether the model is already loaded, and whether there is VRAM budget for it. Loads are single-flight; eviction is LRU plus a byte budget, and it counts in-flight requests before it touches anything.',
+      prev:'a long generation getting its own runner killed out from under it mid-stream — by an idle timeout, or by being chosen as the eviction victim.' },
+    { n:'Run',
+      does:'Pass the concurrency gate and bounded queue, check the circuit breaker, then proxy to the engine — retrying transient failures with backoff, always decided <em>before</em> the first byte reaches you, so streaming stays safe.',
+      prev:'latency collapsing under a burst instead of shedding load, and paying a full timeout to a backend that is already known to be down.' },
+    { n:'Tell',
+      does:'Answer with the truth attached: which backend and device really ran it, the effective context and how tokens were counted, real usage, and cost — on response headers, in Prometheus, and in an append-only ledger.',
+      prev:'not knowing what actually served a request, on what hardware, at what context length, or what it cost you.' }
+  ];
+
+  const nodes = document.getElementById('jnodes');
+  const fill  = document.getElementById('jfill');
+  const panel = document.getElementById('jpanel');
+  const does  = document.getElementById('jdoes');
+  const prev  = document.getElementById('jprev');
+  const out   = document.getElementById('jout');
+  const engs  = [...document.querySelectorAll('.eng')];
+  if (!nodes) return;
+
+  const still = matchMedia('(prefers-reduced-motion: reduce)');
+
+  STAGES.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'j-node';
+    b.innerHTML = `<span class="j-dot">${i + 1}</span><span class="j-name">${s.n}</span>`;
+    b.setAttribute('aria-label', `Stage ${i + 1}: ${s.n}`);
+    b.addEventListener('click', () => { stop(); show(i); });
+    b.addEventListener('keydown', e => {
+      const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!d) return;
+      e.preventDefault(); stop();
+      const j = (i + d + STAGES.length) % STAGES.length;
+      show(j); nodes.children[j].focus();
+    });
+    nodes.appendChild(b);
+  });
+
+  let at = -1, timer = null;
+
+  function show(i){
+    if (i === at) return;
+    at = i;
+    [...nodes.children].forEach((b, j) => b.setAttribute('aria-current', String(j === i)));
+    fill.style.width = ((i + 0.5) / STAGES.length * 100) + '%';
+    does.innerHTML = STAGES[i].does;
+    prev.textContent = STAGES[i].prev;
+    panel.classList.remove('swap'); void panel.offsetWidth; panel.classList.add('swap');
+    // The engine only actually runs the request from stage 4 onward.
+    engs.forEach(e => e.classList.toggle('hot', i >= 3 && e.dataset.eng === 'llamacpp'));
+    out.classList.toggle('on', i === STAGES.length - 1);
+  }
+
+  function stop(){ if (timer) { clearInterval(timer); timer = null; } }
+  function start(){ if (!timer && !still.matches) timer = setInterval(() => show((at + 1) % STAGES.length), 2600); }
+
+  if (still.matches){
+    // No motion: render the whole journey at once, as a plain readable list —
+    // including what each stage prevents, which is the point of the diagram.
+    panel.innerHTML = STAGES.map((s, i) =>
+      `<p class="j-does" style="margin:${i ? '16px' : '0'} 0 0"><strong>${i + 1}. ${s.n}</strong> — ${s.does}</p>` +
+      `<p class="j-prevents" style="margin-top:7px;padding-top:0;border-top:0">` +
+      `<span class="k">prevents</span><span>${s.prev}</span></p>`
+    ).join('');
+    fill.style.width = '100%';
+    engs.forEach(e => e.classList.toggle('hot', e.dataset.eng === 'llamacpp'));
+    out.classList.add('on');
+    [...nodes.children].forEach(b => b.setAttribute('aria-current', 'false'));
+    return;
+  }
+
+  show(0);
+  start();
+  const fig = document.getElementById('journey');
+  fig.addEventListener('mouseenter', stop);
+  fig.addEventListener('mouseleave', start);
+  fig.addEventListener('focusin', stop);
+  // Don't animate off-screen.
+  new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? start() : stop()), { threshold:.15 })
+    .observe(fig);
+})();
+</script>
 </body>
 </html>
