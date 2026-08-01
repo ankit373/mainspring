@@ -85,7 +85,7 @@ MIT and already win; Mainspring wraps them).
 - Cost accounting: optional per-model USD pricing (`input_usd_per_mtok` / `output_usd_per_mtok`, 0 =
   local/free) turns real token usage into spend. Cost lands in the usage ledger (`cost_usd`), a
   `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
-  cost signal a router (Hydra) can route away from. Priced only from exact usage; never guessed.
+  cost signal a trust control plane (Hydra) can route away from. Priced only from exact usage; never guessed.
 - Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, cost, requests, residency, inflight/queued,
   cache hits, resilience counters `mainspring_{retries,coalesced,fallback}_total`, and latency percentiles
   `mainspring_{duration,ttft,queue_wait}_ms_{p50,p90,p99}` — a bounded recent-sample reservoir estimate, not
@@ -177,12 +177,16 @@ distinguished by `code` (server_busy vs circuit_open vs backend_unavailable).
 
 ## Relationship to Hydra
 
-Mainspring is an inference *head*; Hydra (https://github.com/ankit373/hydra) is a provider-neutral
-router/trust control plane above it. They meet over the standard OpenAI-compatible boundary. Hydra
-works with everything (Ollama, OpenAI, Anthropic, any OpenAI-compatible endpoint) and never depends on
-Mainspring — Mainspring is simply the head Hydra integrates with best. The optional `GET /v1/quality`
+Two control planes at different scopes, not a router and a server. Hydra
+(https://github.com/ankit373/hydra) is a provider-neutral *Trust* Control Plane: it routes across many
+heads to a target confidence of correctness. Mainspring is the *inference* control plane for one head:
+admission control, VRAM residency, and fail-loud truth about what actually ran. Hydra asks which head
+should answer and how confident we are it is right; Mainspring answers what is true about this head
+right now. They meet over the standard OpenAI-compatible boundary. Hydra works with everything
+(Ollama, OpenAI, Anthropic, any OpenAI-compatible endpoint) and never depends on Mainspring —
+Mainspring is simply the head it integrates with best. The optional `GET /v1/quality`
 endpoint is that integration contract: a machine-readable per-model routing signal (residency, real
-device, degraded state, effective context, in-flight/queue depth, TTFT p50) a router can consume to
+device, degraded state, effective context, in-flight/queue depth, TTFT p50) a trust control plane or router can consume to
 route to Mainspring best. It is never required — Mainspring runs fine standalone with no router.
 
 ## Links

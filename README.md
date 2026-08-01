@@ -56,7 +56,7 @@ layer around them **fail loud, VRAM-aware, and governed**.
   usage ledger, a `mainspring_cost_usd_total` metric, and `/v1/quality` (a real cost signal for routing).
 - **Operability** — Prometheus `/metrics`, JSONL usage ledger, `X-Request-ID` + W3C `traceparent`
   propagation, optional access log, **SIGHUP hot-reload**, an **admin API** (drain / reload / model
-  load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a router (Hydra) can consume.
+  load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a trust control plane like Hydra can consume.
 - **Detect-first, opt-in managed install** — use whatever engine is present; install a missing one only
   when you enable it (SHA-256-pinned, optionally ed25519-signed manifest) — never silently.
 - **Deploy anywhere** — a single static binary, a distroless container image, and a Helm chart
@@ -70,9 +70,12 @@ layer around them **fail loud, VRAM-aware, and governed**.
 
 ## Status
 
-**v0.1.0 — released.** The full control plane is shipped: OpenAI + Anthropic APIs, six backends with
-per-model routing / aliases / fallback, VRAM-aware scheduling, governance, circuit breaker, TLS, admin
-API, request-ID + trace-context, and `/v1/quality`. `go test -race` clean across the tree. See
+**v0.2.0 — released.** The full control plane is shipped: OpenAI + Anthropic APIs, six backends with
+per-model routing / aliases / fallback, VRAM-aware scheduling that never evicts a runner out from under
+an in-flight request, governance with quota-headroom headers, circuit breaker (open vs half-open
+distinguished in `/metrics`), response cache + request coalescing, cost accounting, latency and
+queue-wait percentiles, TLS, admin API, request-ID + trace-context, and `/v1/quality`.
+`go test -race` clean across the tree. See
 [CHANGELOG.md](CHANGELOG.md) and the [releases page](https://github.com/ankit373/mainspring/releases).
 
 ## Quick start
@@ -106,10 +109,14 @@ curl localhost:11500/v1/quality
 
 ## Relationship to Hydra
 
-Mainspring is an **inference head**; [Hydra](https://github.com/ankit373/hydra) is the **router/trust
-control plane above it**. They meet over the standard OpenAI-compatible HTTP boundary, so either can
-evolve independently. Mainspring governs *its own* served endpoint (admission control); Hydra governs
-*routing across many heads*.
+These are **two control planes at different scopes**, not a router and a server.
+[Hydra](https://github.com/ankit373/hydra) is the **Trust Control Plane**: it routes *across* heads to
+a target **confidence of correctness**. Mainspring is the **inference control plane** for *one* head:
+admission control, VRAM residency, and fail-loud truth about what actually ran.
+
+Hydra asks *which head should answer this, and how confident are we that it's right*. Mainspring
+answers *what is true about this head right now*. They meet over the standard OpenAI-compatible HTTP
+boundary, so either can evolve independently.
 
 **Hydra stays provider-neutral — it works with everything** (Ollama, OpenAI, Anthropic/Claude, any
 OpenAI-compatible endpoint). Mainspring is not a replacement for that and Hydra never depends on it;
