@@ -127,7 +127,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
 		return
 	}
-	release, ok := s.gate.acquire(r.Context(), model)
+	release, queueWait, ok := s.gate.acquire(r.Context(), model)
 	if !ok {
 		w.Header().Set("Retry-After", "1")
 		writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
@@ -167,11 +167,16 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var prompt, completion int64
 	var exact bool
+	// Mark the runner busy for the actual generation call so the scheduler's
+	// idle timer and LRU eviction never pull it out from under a long-running
+	// request (e.g. one that streams longer than KeepAlive).
+	s.sched.MarkBusy(model)
 	if req.Stream {
 		prompt, completion, exact = s.messagesStream(w, r.Context(), runner.BaseURL(), oaiBody, requested)
 	} else {
 		prompt, completion, exact = s.messagesJSON(w, r.Context(), runner.BaseURL(), oaiBody, requested)
 	}
+	s.sched.MarkIdle(model)
 
 	charge := completion
 	if exact {
@@ -185,6 +190,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 			Status: http.StatusOK, Stream: req.Stream,
 			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
 			PromptTokens: prompt, TokensEst: completion, Exact: exact,
+			QueueWaitMs: float64(queueWait.Microseconds()) / 1000.0,
 		})
 	}
 }

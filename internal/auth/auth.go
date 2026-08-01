@@ -142,8 +142,34 @@ func (a *Authenticator) Wrap(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// Set after AllowRequest consumes this request's slot, so Remaining
+		// reflects the count including the request currently being served (the
+		// standard rate-limit-header convention).
+		a.setQuotaHeaders(w, t)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantCtxKey, t)))
 	})
+}
+
+// setQuotaHeaders reports a tenant's current rate-limit and token-budget
+// headroom on every authenticated response — not just the one that finally
+// gets rejected — so a well-behaved client can back off proactively instead of
+// only reactively after a 429/token_budget error. Headers are pure reads (no
+// side effects) and are omitted entirely for a quota that isn't configured.
+func (a *Authenticator) setQuotaHeaders(w http.ResponseWriter, t *Tenant) {
+	if t.RateRPM > 0 {
+		remaining, reset := a.lim.RemainingRequests(t.Key, t.RateRPM)
+		h := w.Header()
+		h.Set("X-Mainspring-RateLimit-Limit", strconv.Itoa(t.RateRPM))
+		h.Set("X-Mainspring-RateLimit-Remaining", strconv.FormatInt(remaining, 10))
+		h.Set("X-Mainspring-RateLimit-Reset", strconv.Itoa(int(reset.Seconds())))
+	}
+	if t.TokenBudget > 0 {
+		remaining, reset := a.lim.RemainingTokens(t.Key, t.TokenBudget, t.tokenWindow())
+		h := w.Header()
+		h.Set("X-Mainspring-TokenBudget-Limit", strconv.FormatInt(t.TokenBudget, 10))
+		h.Set("X-Mainspring-TokenBudget-Remaining", strconv.FormatInt(remaining, 10))
+		h.Set("X-Mainspring-TokenBudget-Reset", strconv.Itoa(int(reset.Seconds())))
+	}
 }
 
 // AllowTokens reports whether tenant t is within its token budget.

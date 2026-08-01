@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"time"
 )
 
 // gate bounds concurrent inference per model: at most maxInflight requests run
@@ -35,12 +36,15 @@ func newGate(maxInflight, maxQueue int) *gate {
 func (g *gate) enabled() bool { return g.maxInflight > 0 }
 
 // acquire reserves a slot for model, blocking (as a queued waiter) until one is
-// free. It returns a release func and ok=true on success, or ok=false when the
-// queue is full (reject) or the context is cancelled. release is nil when ok=false.
-func (g *gate) acquire(ctx context.Context, model string) (func(), bool) {
+// free. It returns a release func, the time spent waiting for a slot (0 when
+// gating is disabled or a slot was immediately free), and ok=true on success,
+// or ok=false when the queue is full (reject) or the context is cancelled.
+// release is nil when ok=false.
+func (g *gate) acquire(ctx context.Context, model string) (release func(), waitTime time.Duration, ok bool) {
 	if !g.enabled() {
-		return func() {}, true
+		return func() {}, 0, true
 	}
+	start := time.Now()
 	g.mu.Lock()
 	sem := g.sems[model]
 	if sem == nil {
@@ -50,7 +54,7 @@ func (g *gate) acquire(ctx context.Context, model string) (func(), bool) {
 	free := g.maxInflight - g.inflight[model]
 	if free <= 0 && g.queued[model] >= g.maxQueue {
 		g.mu.Unlock()
-		return nil, false // no free slot and the wait queue is full → backpressure
+		return nil, 0, false // no free slot and the wait queue is full → backpressure
 	}
 	g.queued[model]++
 	g.mu.Unlock()
@@ -66,12 +70,12 @@ func (g *gate) acquire(ctx context.Context, model string) (func(), bool) {
 			g.mu.Lock()
 			g.inflight[model]--
 			g.mu.Unlock()
-		}, true
+		}, time.Since(start), true
 	case <-ctx.Done():
 		g.mu.Lock()
 		g.queued[model]--
 		g.mu.Unlock()
-		return nil, false
+		return nil, time.Since(start), false
 	}
 }
 

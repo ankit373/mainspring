@@ -133,6 +133,41 @@ func (b *Backend) ListModels(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// EstimateMemory implements backend.MemoryEstimator: it looks up the model's
+// on-disk size from /api/tags — a reasonable pre-admission resident-footprint
+// proxy, available even for a model Ollama has not loaded yet. This is what
+// lets the scheduler's byte-budget eviction make room for an adopted Ollama
+// model BEFORE starting it, the same way it already does for llamacpp/mlx;
+// runner.MemoryBytes (via /api/ps) only knows the real size after the fact.
+// Returns 0 (no estimate, same as not implementing this at all) on any lookup
+// or parse failure, or if the model isn't in the tag list — never fabricated.
+func (b *Backend) EstimateMemory(spec backend.ModelSpec) int64 {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, b.Host+"/api/tags", nil)
+	if err != nil {
+		return 0
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Models []struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
+		return 0
+	}
+	for _, m := range payload.Models {
+		if m.Name == spec.ID || strings.TrimSuffix(m.Name, ":latest") == spec.ID {
+			return m.Size
+		}
+	}
+	return 0
+}
+
 // runner adopts the daemon for one logical model.
 type runner struct {
 	host string
