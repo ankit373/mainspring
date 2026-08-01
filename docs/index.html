@@ -226,6 +226,75 @@ nav a:hover{color:var(--ink);text-decoration:none}
   .j-node[aria-current="true"] .j-dot{transform:none}
 }
 
+/* ============================================================
+   Where we exist — the model tiers, then the stack layer.
+   ============================================================ */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:30px}
+@media(max-width:800px){.tiers{grid-template-columns:1fr}}
+.tier{
+  border:1px solid var(--line);border-radius:11px;padding:0;overflow:hidden;
+  background:linear-gradient(180deg,var(--panel-2),var(--panel));
+}
+.tier.here{
+  border-color:var(--brass-deep);
+  box-shadow:0 0 0 1px color-mix(in srgb,var(--brass) 18%,transparent),0 18px 40px -28px #000;
+}
+.tier-h{padding:15px 17px 13px;border-bottom:1px solid var(--line)}
+.tier-h h3{font-family:var(--sans);font-size:15.5px;font-weight:600;margin:0;color:var(--ink);letter-spacing:0}
+.tier-h .ex{display:block;font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:5px}
+.tier dl{margin:0;padding:6px 17px 15px}
+.tier dt{
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--brass-deep);margin-top:12px;
+}
+.tier dd{margin:3px 0 0;font-size:14px;color:var(--muted);line-height:1.5}
+.tier dd strong{color:var(--ink);font-weight:600}
+/* residency-pressure meter: three pips, filled by severity */
+.meter{display:flex;gap:4px;align-items:center;margin-top:5px}
+.meter i{width:19px;height:4px;border-radius:2px;background:var(--line-lit);display:block}
+.meter i.on{background:var(--brass)}
+.meter i.hot{background:var(--rust)}
+.meter span{font-size:13px;color:var(--muted);margin-left:6px;font-style:normal}
+
+.punch{
+  margin:26px 0 0;padding:17px 20px;border-radius:11px;
+  border:1px solid var(--line);border-left:2px solid var(--brass);
+  background:color-mix(in srgb,#000 24%,transparent);
+  font-family:var(--display);font-size:clamp(17px,2.3vw,21px);line-height:1.4;color:var(--ink);
+  max-width:none;
+}
+.punch b{color:var(--brass);font-weight:600}
+
+/* --- the stack ladder --- */
+.ladder{margin-top:14px;display:flex;flex-direction:column;gap:7px}
+.rung{
+  display:grid;grid-template-columns:150px 1fr;gap:16px;align-items:baseline;
+  padding:13px 17px;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel);
+}
+.rung .lyr{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;
+  color:var(--faint);
+}
+.rung .who{font-size:14.5px;color:var(--muted)}
+.rung .who b{color:var(--ink-dim);font-weight:600}
+.rung.edge{background:none;border-style:dashed;opacity:.75}
+.rung.us{
+  border-color:var(--brass);
+  background:
+    radial-gradient(120% 200% at 0% 50%,color-mix(in srgb,var(--brass) 13%,transparent),transparent 62%),
+    var(--panel-2);
+  box-shadow:0 0 0 1px color-mix(in srgb,var(--brass) 22%,transparent),0 16px 40px -26px #000;
+}
+.rung.us .lyr{color:var(--brass)}
+.rung.us .who{color:var(--ink);font-size:15px}
+.rung.us .who b{color:var(--brass-lit)}
+@media(max-width:640px){
+  .rung{grid-template-columns:1fr;gap:5px}
+}
+.after-ladder{margin:20px 0 0;font-size:14.5px;color:var(--muted);max-width:var(--measure)}
+.after-ladder strong{color:var(--ink)}
+
 /* ---- sections ---- */
 section{padding:clamp(48px,7vw,72px) 0;border-bottom:1px solid var(--line)}
 section h2{font-size:clamp(26px,3.6vw,34px);margin:10px 0 8px;line-height:1.15}
@@ -322,7 +391,7 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
     Mainspring
   </a>
   <nav>
-    <a href="#why" class="hide-sm">Why</a>
+    <a href="#where" class="hide-sm">Where we fit</a>
     <a href="#what">Features</a>
     <a href="#backends" class="hide-xs">Backends</a>
     <a href="#api" class="hide-sm">API</a>
@@ -369,6 +438,104 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
     </div>
   </figure>
 </div></div>
+
+<section id="where"><div class="wrap">
+  <span class="plate">Where we exist</span>
+  <h2>Models got small enough to own.</h2>
+  <p class="sub">When there was one frontier model behind one API key, there was nothing to manage.
+    What changed is that open weights and small models got good enough to run yourself — so now you
+    have <em>many</em> models and a <em>fixed</em> amount of metal. Notice that the problem gets
+    harder as the models get smaller.</p>
+
+  <div class="tiers">
+    <div class="tier">
+      <div class="tier-h">
+        <h3>Frontier LLM</h3>
+        <span class="ex">GPT · Claude · Gemini</span>
+      </div>
+      <dl>
+        <dt>Runs on</dt><dd>someone else's datacentre</dd>
+        <dt>You own</dt><dd>nothing — you rent a token stream</dd>
+        <dt>Residency</dt>
+        <dd><span class="meter"><i></i><i></i><i></i><span>not your problem</span></span></dd>
+        <dt>Cost</dt><dd>metered and visible by default</dd>
+      </dl>
+    </div>
+
+    <div class="tier">
+      <div class="tier-h">
+        <h3>Open-weight LLM</h3>
+        <span class="ex">Llama · Qwen · Mistral · DeepSeek</span>
+      </div>
+      <dl>
+        <dt>Runs on</dt><dd>your metal, if it fits</dd>
+        <dt>You own</dt><dd>the weights, and the consequences</dd>
+        <dt>Residency</dt>
+        <dd><span class="meter"><i class="on"></i><i class="on"></i><i></i><span>a problem</span></span></dd>
+        <dt>Cost</dt><dd>"free", until you compare it to a paid head</dd>
+      </dl>
+    </div>
+
+    <div class="tier here">
+      <div class="tier-h">
+        <h3>Small language models</h3>
+        <span class="ex">Phi · Gemma · Qwen 0.5B · TinyLlama</span>
+      </div>
+      <dl>
+        <dt>Runs on</dt><dd>your metal, trivially — several at once</dd>
+        <dt>You own</dt><dd><strong>many</strong> models, one per job</dd>
+        <dt>Residency</dt>
+        <dd><span class="meter"><i class="hot"></i><i class="hot"></i><i class="hot"></i><span><strong style="color:var(--ink)">the</strong> problem</span></span></dd>
+        <dt>Cost</dt><dd>invisible per-call, real in aggregate</dd>
+      </dl>
+    </div>
+  </div>
+
+  <p class="punch">A dozen small models on one GPU is a <b>scheduling and governance</b> problem, not a
+    modelling one. Models got small enough to own — nothing got built to run them like you own them.</p>
+</div></section>
+
+<section id="layer"><div class="wrap">
+  <span class="plate">Which layer</span>
+  <h2>A control plane, not another runner.</h2>
+  <p class="sub">Mainspring is one rung of the local stack. It doesn't compute tokens and it doesn't
+    route across vendors — it makes a single local head honest and governable, so whatever sits above
+    it can trust what it says.</p>
+
+  <div class="ladder">
+    <div class="rung edge">
+      <span class="lyr">Your app</span>
+      <span class="who">agents, editors, anything already written against the OpenAI or Anthropic SDK</span>
+    </div>
+    <div class="rung">
+      <span class="lyr">Router</span>
+      <span class="who"><b>Hydra · LiteLLM · OpenRouter</b> — choose <em>which head</em> answers, across
+        vendors and machines. Assumes each head already behaves.</span>
+    </div>
+    <div class="rung us">
+      <span class="lyr">Control plane</span>
+      <span class="who"><b>Mainspring</b> — govern <em>one</em> head honestly: keys and quotas, VRAM
+        residency, guardrails, fail-loud truth, spend.</span>
+    </div>
+    <div class="rung">
+      <span class="lyr">Runner</span>
+      <span class="who"><b>Ollama · LM Studio · llamafile · GPT4All</b> — package a model and serve it.
+        Mainspring adopts these as backends rather than replacing them.</span>
+    </div>
+    <div class="rung">
+      <span class="lyr">Engine</span>
+      <span class="who"><b>llama.cpp · MLX</b> — the actual compute. MIT-licensed, already excellent.
+        Mainspring never writes a kernel.</span>
+    </div>
+  </div>
+
+  <p class="after-ladder"><strong>So it composes rather than competes.</strong> If Ollama is already
+    running, Mainspring detects and adopts it — your models keep working, and they gain
+    authentication, quotas, residency budgeting and a fail-loud contract they didn't have.
+    <a href="https://github.com/ankit373/hydra">Hydra</a> is one router that can sit above; it is
+    provider-neutral and never depends on Mainspring, which is equally designed to be useful with
+    nothing above it at all.</p>
+</div></section>
 
 <section id="why"><div class="wrap">
   <span class="plate">The gap</span>
