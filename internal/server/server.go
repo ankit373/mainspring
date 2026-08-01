@@ -360,28 +360,10 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		body = rewriteModelField(body, model)
 	}
 
-	// Graceful clamp: shrink an over-budget max_tokens to fit the window before
-	// the guardrail gets a chance to reject the request.
-	body = s.applyClamp(w, model, body)
-
-	// Context guardrail: reject (or warn) an over-context request before doing any
-	// work, rather than letting the engine silently truncate it. Prompt tokens are
-	// counted exactly when precise_context is on and the model is resident on a
-	// tokenizing engine, otherwise estimated; the method is reported on a header.
-	if pol, ok := s.ctxPolicies[model]; ok && pol.Limit > 0 {
-		promptTok, exact := s.guardPromptTokens(r.Context(), model, body)
-		method := "estimated"
-		if exact {
-			method = "exact"
-		}
-		w.Header().Set("X-Mainspring-Context-Method", method)
-		if over, reason := contextOverageDetail(body, pol.Limit, promptTok, exact); over {
-			if pol.Enforce {
-				writeErr(w, codeContextLength, reason)
-				return
-			}
-			w.Header().Set("X-Mainspring-Context-Warning", reason)
-		}
+	// Clamp + context guardrail (shared with the Anthropic /v1/messages path).
+	body, ok = s.admit(w, r.Context(), model, body)
+	if !ok {
+		return
 	}
 
 	// Per-tenant token budget (enforced pre-request; accrued after).
