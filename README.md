@@ -125,6 +125,12 @@ Mainspring special is that it's the head Hydra works with *best* — it's the on
 fail-loud capability signals, VRAM-residency hints, and verified OpenAI-compat correctness that
 Hydra's trust layer can consume directly. Best-integrated, never exclusive.
 
+## Contributing
+
+Issue first, always — see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, the commit
+convention, and the `go test -race` bar. Security issues go through
+[SECURITY.md](SECURITY.md), never a public issue.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Built on MIT/Apache-2.0 engines only (llama.cpp, GGML, MLX, `go-openai`).
