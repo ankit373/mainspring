@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a capability Mainspring should have
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Mainspring wraps existing inference engines and never implements its own kernels.
+        Proposals to add a compute backend are welcome; proposals to write inference code are out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you unable to do today? Describe the situation, not the solution.
+    validations: { required: true }
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations: { required: true }
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including whether this belongs in a router above Mainspring rather than in Mainspring.

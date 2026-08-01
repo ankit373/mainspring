@@ -1,0 +1,44 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security vulnerabilities here — see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `mainspring version`
+      placeholder: v0.2.0 (commit abc1234)
+    validations: { required: true }
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend in use
+      options: [llamacpp, mlx, ollama, lmstudio, llamafile, gpt4all, several, not sure]
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows the problem. Include the request if relevant.
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations: { required: true }
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include any `X-Mainspring-*` response headers and relevant server log lines.
+    validations: { required: true }
+  - type: textarea
+    id: config
+    attributes:
+      label: Config
+      description: Your config.yaml with API keys and any secrets REDACTED.
+      render: yaml
