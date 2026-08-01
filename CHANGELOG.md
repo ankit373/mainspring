@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.2.0](https://github.com/ankit373/mainspring/compare/v0.1.0...v0.2.0) (2026-08-01)
+
+
+### Features
+
+* **admin:** GET /admin/config — effective runtime settings (secret-free) ([#96](https://github.com/ankit373/mainspring/issues/96)) ([f97b9e3](https://github.com/ankit373/mainspring/commit/f97b9e39d28f73946e43bbbb69e71ca0fdaf73b2)), closes [#93](https://github.com/ankit373/mainspring/issues/93)
+* **admin:** POST /admin/breaker/{id}/reset — manual circuit-breaker reset ([#115](https://github.com/ankit373/mainspring/issues/115)) ([35ea8e9](https://github.com/ankit373/mainspring/commit/35ea8e90d737189e872f4eb09af447b7a0070de0)), closes [#112](https://github.com/ankit373/mainspring/issues/112)
+* **admin:** POST /admin/cache/clear — manual response-cache purge ([#116](https://github.com/ankit373/mainspring/issues/116)) ([ee10256](https://github.com/ankit373/mainspring/commit/ee1025634e5f00b7dc03c17da3eb81111cfa6344)), closes [#113](https://github.com/ankit373/mainspring/issues/113)
+* **admin:** report interrupted in-flight requests on forced unload ([#134](https://github.com/ankit373/mainspring/issues/134)) ([4bd9a4b](https://github.com/ankit373/mainspring/commit/4bd9a4bf4fb94c51d513b63e51f9e3543207099b)), closes [#131](https://github.com/ankit373/mainspring/issues/131)
+* adopt-backend model auto-discovery ([#75](https://github.com/ankit373/mainspring/issues/75)) ([#78](https://github.com/ankit373/mainspring/issues/78)) ([a52fc8c](https://github.com/ankit373/mainspring/commit/a52fc8c4380668dadde6fcf2c4d2ede1ade7a98d))
+* **auth:** rate-limit and token-budget headroom headers ([#128](https://github.com/ankit373/mainspring/issues/128)) ([6b1061a](https://github.com/ankit373/mainspring/commit/6b1061a0e1b86d1dd6ad8860b700be16a4e7670e)), closes [#125](https://github.com/ankit373/mainspring/issues/125)
+* **backend/ollama:** EstimateMemory via /api/tags size field ([#127](https://github.com/ankit373/mainspring/issues/127)) ([986482e](https://github.com/ankit373/mainspring/commit/986482e12c865ab9d422a61f016cf8b85bd4860f)), closes [#124](https://github.com/ankit373/mainspring/issues/124)
+* **cache:** opt-in TTL+LRU response cache for deterministic requests ([#81](https://github.com/ankit373/mainspring/issues/81)) ([d6d8970](https://github.com/ankit373/mainspring/commit/d6d897018e4a1af0c158076656690e9c5c84b24e)), closes [#80](https://github.com/ankit373/mainspring/issues/80)
+* **config:** shared config-lint for silently-inert settings ([#120](https://github.com/ankit373/mainspring/issues/120)) ([b2a35cb](https://github.com/ankit373/mainspring/commit/b2a35cbfe3c5a7dd19bbb326e92d17eed879b30b)), closes [#117](https://github.com/ankit373/mainspring/issues/117)
+* **cost:** per-model USD cost accounting from real token usage ([#84](https://github.com/ankit373/mainspring/issues/84)) ([2978c1d](https://github.com/ankit373/mainspring/commit/2978c1dc94c2f65bc4d85127a1323092f3dad77e)), closes [#82](https://github.com/ankit373/mainspring/issues/82)
+* **dispatch:** model-level fallback chain when primary is unavailable ([#90](https://github.com/ankit373/mainspring/issues/90)) ([430209e](https://github.com/ankit373/mainspring/commit/430209ee42f01f058265565738abfa2b485a0481)), closes [#87](https://github.com/ankit373/mainspring/issues/87)
+* **metrics:** count retries, coalesced hits, and fallbacks ([#95](https://github.com/ankit373/mainspring/issues/95)) ([9025193](https://github.com/ankit373/mainspring/commit/90251937b9e9b631eeaa47b91708f46047669080)), closes [#92](https://github.com/ankit373/mainspring/issues/92)
+* **metrics:** duration + TTFT percentiles (p50/p90/p99) ([#114](https://github.com/ankit373/mainspring/issues/114)) ([2f5b5ee](https://github.com/ankit373/mainspring/commit/2f5b5eeade2b97e6173f765e4b5e79f2f188930d)), closes [#111](https://github.com/ankit373/mainspring/issues/111)
+* **metrics:** per-tenant usage rollup + GET /admin/usage ([#97](https://github.com/ankit373/mainspring/issues/97)) ([388dbba](https://github.com/ankit373/mainspring/commit/388dbba6ef089367757c5bc621a4bf070a20bc6c)), closes [#94](https://github.com/ankit373/mainspring/issues/94)
+* **metrics:** queue wait-time percentiles (p50/p90/p99) ([#121](https://github.com/ankit373/mainspring/issues/121)) ([8a2d20e](https://github.com/ankit373/mainspring/commit/8a2d20ef687694164cd02efc732be1c5e8e23dd4)), closes [#118](https://github.com/ankit373/mainspring/issues/118)
+* per-model request timeout ([#76](https://github.com/ankit373/mainspring/issues/76)) ([#79](https://github.com/ankit373/mainspring/issues/79)) ([dfd84c6](https://github.com/ankit373/mainspring/commit/dfd84c69e72054f6dd51d50ca26037ca31c6dc47))
+* **server:** /readyz reflects total outage (all breakers open) ([#122](https://github.com/ankit373/mainspring/issues/122)) ([8ebad1d](https://github.com/ankit373/mainspring/commit/8ebad1dbb0725aa1fead30c99d8f82ac9b860ea2)), closes [#119](https://github.com/ankit373/mainspring/issues/119)
+* **server:** Anthropic image / multimodal content translation ([#74](https://github.com/ankit373/mainspring/issues/74)) ([#77](https://github.com/ankit373/mainspring/issues/77)) ([147cdf2](https://github.com/ankit373/mainspring/commit/147cdf238a7b7a95a8ae71837c8b620ad35a05d8))
+* **server:** clamp_max_tokens — fit max_tokens to the context window ([#102](https://github.com/ankit373/mainspring/issues/102)) ([a8b886b](https://github.com/ankit373/mainspring/commit/a8b886b637f9c575691d821edf2a2700d8fc092b)), closes [#99](https://github.com/ankit373/mainspring/issues/99)
+* **server:** coalesce identical in-flight requests (single-flight) ([#91](https://github.com/ankit373/mainspring/issues/91)) ([29f1657](https://github.com/ankit373/mainspring/commit/29f16573ef18a0ed1003c9dc1382877e22c1e197)), closes [#88](https://github.com/ankit373/mainspring/issues/88)
+* **server:** effective-context guardrail — reject over-context requests ([#85](https://github.com/ankit373/mainspring/issues/85)) ([4f25960](https://github.com/ankit373/mainspring/commit/4f25960eadd8ac6c0654e763a590addffb639a4d)), closes [#83](https://github.com/ankit373/mainspring/issues/83)
+* **server:** GET /v1/models/{id} — model detail endpoint ([#108](https://github.com/ankit373/mainspring/issues/108)) ([21fdb22](https://github.com/ankit373/mainspring/commit/21fdb228cd48eca15deb961ef88b28293932c9ec))
+* **server:** precise_context — exact guardrail tokens for resident models ([#103](https://github.com/ankit373/mainspring/issues/103)) ([d95f7e1](https://github.com/ankit373/mainspring/commit/d95f7e195a10b9817cd6e4c277f634c79b434959)), closes [#100](https://github.com/ankit373/mainspring/issues/100)
+* **server:** retry transient upstream failures with backoff ([#89](https://github.com/ankit373/mainspring/issues/89)) ([284ac70](https://github.com/ankit373/mainspring/commit/284ac707b165e20b60846482a5995f1b16ace84f)), closes [#86](https://github.com/ankit373/mainspring/issues/86)
+* **tokenize:** backend token counter + POST /v1/tokenize ([#101](https://github.com/ankit373/mainspring/issues/101)) ([3cb274c](https://github.com/ankit373/mainspring/commit/3cb274c2aef8b1d86c5372c8b933ebd3bc1a5a81)), closes [#98](https://github.com/ankit373/mainspring/issues/98)
+
+
+### Bug Fixes
+
+* **anthropic:** request stream_options.include_usage so streaming gets exact token usage ([#107](https://github.com/ankit373/mainspring/issues/107)) ([cdf1782](https://github.com/ankit373/mainspring/commit/cdf1782c9058b1ee7457a336c9c324cee410e71b)), closes [#105](https://github.com/ankit373/mainspring/issues/105)
+* **backend:** Degraded() falsely flags intentional CPU-only models ([#138](https://github.com/ankit373/mainspring/issues/138)) ([59a3c28](https://github.com/ankit373/mainspring/commit/59a3c28192a609f68bef1953c10247785f7adc02)), closes [#135](https://github.com/ankit373/mainspring/issues/135)
+* **context:** count embeddings input field in guardrail and tokenizer ([#109](https://github.com/ankit373/mainspring/issues/109)) ([f5ba431](https://github.com/ankit373/mainspring/commit/f5ba431a38bdb0bc621056830726ba78b6b837d0)), closes [#106](https://github.com/ankit373/mainspring/issues/106)
+* **reload:** warn about config fields that are silently ignored on reload ([#133](https://github.com/ankit373/mainspring/issues/133)) ([a15fc7a](https://github.com/ankit373/mainspring/commit/a15fc7abf970cd23a8301f2285b17f61a84c4fc3)), closes [#130](https://github.com/ankit373/mainspring/issues/130)
+* **scheduler:** config reload can kill a runner mid-request ([#132](https://github.com/ankit373/mainspring/issues/132)) ([b9adf23](https://github.com/ankit373/mainspring/commit/b9adf231a81a4cb9e35980abde671bd1c97a427c)), closes [#129](https://github.com/ankit373/mainspring/issues/129)
+* **scheduler:** idle-unload can kill a runner mid-request ([#126](https://github.com/ankit373/mainspring/issues/126)) ([f988eec](https://github.com/ankit373/mainspring/commit/f988eec498283e7d88aff1233f8835cb4aa11993)), closes [#123](https://github.com/ankit373/mainspring/issues/123)
+
 ## 0.1.0 (2026-07-25)
 
 
