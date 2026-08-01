@@ -421,7 +421,8 @@ func authTenants(cfg config.Config) []auth.Tenant {
 }
 
 func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
-	for _, w := range cfg.Lint() {
+	startupLint := cfg.Lint()
+	for _, w := range startupLint {
 		fmt.Fprintln(os.Stderr, "warning: config:", w.String())
 	}
 
@@ -507,8 +508,9 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	if cfg.BreakerThreshold > 0 {
 		srv.SetBreaker(cfg.BreakerThreshold, cfg.BreakerCooldown())
 	}
+	srv.SetLintWarnings(lintStrings(startupLint))
 	// Wire the admin reload endpoint to the same reload path SIGHUP uses.
-	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, sched, authn) })
+	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, sched, authn, srv) })
 	// Per-request timeouts: global default + per-model overrides.
 	perModelTimeout := map[string]time.Duration{}
 	for _, m := range cfg.Models {
@@ -653,7 +655,7 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	defer signal.Stop(hup)
 	go func() {
 		for range hup {
-			if err := reloadConfig(cfgPath, cfg, sched, authn); err != nil {
+			if err := reloadConfig(cfgPath, cfg, sched, authn, srv); err != nil {
 				fmt.Fprintln(os.Stderr, "SIGHUP:", err)
 			}
 		}
@@ -735,7 +737,7 @@ func runHealthProber(ctx context.Context, interval time.Duration, sched *schedul
 // is logged so the difference is never a silent surprise. A missing config file
 // is a no-op (so a flag-only launch is never wiped). Shared by SIGHUP and the
 // admin reload endpoint; it returns an error the caller can surface or log.
-func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator) error {
+func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator, srv *server.Server) error {
 	resolved := path
 	if resolved == "" {
 		resolved = config.DefaultPath()
@@ -753,6 +755,7 @@ func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler
 		return fmt.Errorf("model/alias reload rejected, keeping current: %w", err)
 	}
 	authn.Reload(authTenants(newCfg))
+	srv.SetLintWarnings(lintStrings(newCfg.Lint()))
 	fmt.Printf("reload: %d model(s), %d alias(es), %d tenant(s)\n",
 		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
 	return nil
@@ -808,6 +811,16 @@ func warnUnappliedChanges(startup, newCfg config.Config) {
 			fmt.Fprintf(os.Stderr, "reload: model %q per-model overrides (cost/guardrail/clamp/timeout/fallbacks) changed; requires a restart to take effect; ignoring\n", m.ID)
 		}
 	}
+}
+
+// lintStrings renders config lint warnings for GET /admin/config, keeping
+// internal/server independent of internal/config's LintWarning type.
+func lintStrings(warnings []config.LintWarning) []string {
+	out := make([]string, len(warnings))
+	for i, w := range warnings {
+		out[i] = w.String()
+	}
+	return out
 }
 
 // warnRestartRequired logs a restart-required line when oldV != newV. Values

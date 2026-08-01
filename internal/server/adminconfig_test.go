@@ -91,6 +91,66 @@ func TestAdminConfigIsSecretFree(t *testing.T) {
 	}
 }
 
+// TestAdminConfigExposesLintWarnings proves the fix: config lint results are
+// now queryable live over HTTP, not just visible in startup stderr.
+func TestAdminConfigExposesLintWarnings(t *testing.T) {
+	srv := configTestServer(t, auth.New(nil))
+	srv.SetLintWarnings([]string{`model "m1": enforce_context is on but ctx is not set — the context guardrail has no effect for this model`})
+	h := srv.Handler()
+
+	w := getJSON(h, "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	warnings, ok := cfg["lint_warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected 1 lint warning, got %v", cfg["lint_warnings"])
+	}
+	if !strings.Contains(warnings[0].(string), "enforce_context") {
+		t.Fatalf("unexpected warning content: %v", warnings[0])
+	}
+}
+
+// A clean config (or one where SetLintWarnings was never called) reports an
+// empty array, not null — friendlier for API consumers.
+func TestAdminConfigLintWarningsEmptyWhenClean(t *testing.T) {
+	srv := configTestServer(t, auth.New(nil))
+	h := srv.Handler()
+
+	w := getJSON(h, "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	warnings, ok := cfg["lint_warnings"].([]any)
+	if !ok {
+		t.Fatalf("lint_warnings should be an array (even if empty), got %v (%T)", cfg["lint_warnings"], cfg["lint_warnings"])
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+}
+
+// SetLintWarnings can be called again (e.g. after a reload) and the response
+// must reflect the latest call, not accumulate or ignore updates.
+func TestAdminConfigLintWarningsUpdateAfterReload(t *testing.T) {
+	srv := configTestServer(t, auth.New(nil))
+	srv.SetLintWarnings([]string{"first warning"})
+	h := srv.Handler()
+
+	srv.SetLintWarnings([]string{"second warning", "third warning"})
+	w := getJSON(h, "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	warnings, _ := cfg["lint_warnings"].([]any)
+	if len(warnings) != 2 {
+		t.Fatalf("expected the latest 2 warnings (not accumulated), got %v", warnings)
+	}
+}
+
 func TestAdminConfigForbiddenForNonAdmin(t *testing.T) {
 	a := auth.NewTenants([]auth.Tenant{{Name: "user", Key: "userkey", Role: auth.RoleInference}})
 	h := configTestServer(t, a).Handler()
