@@ -28,19 +28,31 @@ commitment, not a contractual SLA.
 
 Mainspring is an inference control plane. Be clear about what it does and does not defend.
 
-**It is designed to protect:**
+**When API keys are configured, it is designed to protect:**
 - The served HTTP endpoint, via API keys mapped to named tenants and roles.
 - Per-tenant resource use, via rate limits and token budgets.
-- Administrative operations, which are gated to the `admin` role.
+- Administrative operations, which require the `admin` role.
+
+Every one of those protections depends on having configured keys. With none configured, all three
+are absent — see open mode below.
 
 **It is explicitly not a hardened internet-facing gateway.** Deploy it behind your own trust
 boundary — a private network, a VPN, or a reverse proxy that terminates TLS and authenticates
 callers. Mainspring can terminate TLS itself, but it is not a substitute for an edge proxy.
 
 **Running with no API keys configured is "open mode".** Every request is then unauthenticated and
-unmetered. This is a legitimate choice for a laptop, and Mainspring warns loudly at startup when it
-happens — but exposing an open-mode instance to a network you do not control gives anyone who can
-reach it full use of your hardware, and administrative control of the server.
+unmetered, **including the `/admin` endpoints** — in open mode `requireAdmin` admits every caller,
+so drain, reload, model load/unload, breaker reset and cache clear are all reachable by anyone who
+can reach the port. This is a deliberate choice so a laptop install works with no setup, and
+Mainspring warns at startup when it applies:
+
+```
+⚠  WARNING: no API keys configured — the server is OPEN (no authentication).
+```
+
+Exposing an open-mode instance to a network you do not control hands over both full use of your
+hardware and administrative control of the server. Configure keys before binding to anything other
+than loopback.
 
 **Backends are subprocesses or local daemons.** Mainspring supervises engines such as
 `llama-server` and adopts local daemons such as Ollama. It inherits their security properties; it
