@@ -95,7 +95,10 @@ MIT and already win; Mainspring wraps them).
 - Config lint: catches config combinations that are valid YAML but silently do nothing — enforce_context/
   clamp_max_tokens/precise_context set but a model has no ctx (guardrail is a no-op for it), model_fallbacks
   targeting an unresolvable model/alias, a negative cost rate, or a missing tls_cert/tls_key file. Surfaced
-  as `mainspring doctor` diagnostics and as non-fatal stderr warnings at `mainspring serve` startup.
+  as `mainspring doctor` diagnostics, as non-fatal stderr warnings at `mainspring serve` startup, and live
+  via `GET /admin/config`'s `lint_warnings` field — reflecting the config as of the last successful
+  load/reload, not just startup, so an operator can check for silently-inert settings on a running server
+  without digging through logs.
 - Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
   Never installs anything unless you run `mainspring install`.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,

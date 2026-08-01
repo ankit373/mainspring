@@ -36,6 +36,8 @@ type Server struct {
 	draining       atomic.Bool
 	accessMu       sync.RWMutex
 	access         *accessLogger
+	lintMu         sync.RWMutex
+	lint           []string                 // current config-lint warnings (rendered strings), for GET /admin/config
 	reloadFn       func() error             // wired by main for POST /admin/reload
 	cache          *cache.LRU               // opt-in response cache (nil = disabled)
 	costRates      map[string]CostRate      // per-model USD pricing (nil = all free)
@@ -96,6 +98,28 @@ func (s *Server) accessLog() *accessLogger {
 	s.accessMu.RLock()
 	defer s.accessMu.RUnlock()
 	return s.access
+}
+
+// SetLintWarnings records the current config-lint warnings (rendered as
+// strings, so this package stays independent of internal/config), surfaced via
+// GET /admin/config. Safe to call at startup and again after every successful
+// reload, so the report reflects the config as of the last load, not just the
+// one the process booted with.
+func (s *Server) SetLintWarnings(warnings []string) {
+	s.lintMu.Lock()
+	defer s.lintMu.Unlock()
+	s.lint = warnings
+}
+
+// lintWarnings never returns nil (json.Marshal renders a nil slice as `null`,
+// not `[]`) — a clean config reports an explicit empty array.
+func (s *Server) lintWarnings() []string {
+	s.lintMu.RLock()
+	defer s.lintMu.RUnlock()
+	if s.lint == nil {
+		return []string{}
+	}
+	return s.lint
 }
 
 // SetDraining marks the server as draining: readiness (/readyz) starts failing so

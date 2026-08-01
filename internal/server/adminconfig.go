@@ -102,5 +102,6 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"precise_models":  preciseModels,
 		"model_fallbacks": s.modelFallbacks,
 		"cost_rates_set":  priced,
+		"lint_warnings":   s.lintWarnings(),
 	})
 }
