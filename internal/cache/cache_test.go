@@ -58,6 +58,34 @@ func TestLRUEviction(t *testing.T) {
 	}
 }
 
+func TestClear(t *testing.T) {
+	c := New(time.Minute, 4)
+	c.Put("a", val("a"))
+	c.Put("b", val("b"))
+	if c.Len() != 2 {
+		t.Fatalf("len = %d, want 2 before clear", c.Len())
+	}
+	c.Clear()
+	if c.Len() != 0 {
+		t.Fatalf("len = %d, want 0 after clear", c.Len())
+	}
+	if _, ok := c.Get("a"); ok {
+		t.Fatal("cleared entry should miss")
+	}
+	// The cache must still work after clearing (not a broken/nil internal state).
+	c.Put("c", val("c"))
+	if _, ok := c.Get("c"); !ok {
+		t.Fatal("cache should be usable after Clear")
+	}
+}
+
+func TestClearNoopWhenDisabled(t *testing.T) {
+	c := New(time.Minute, 0)
+	c.Clear() // must not panic
+	var nilC *LRU
+	nilC.Clear() // must not panic
+}
+
 func TestDisabledCache(t *testing.T) {
 	c := New(time.Minute, 0)
 	c.Put("k", val("v"))

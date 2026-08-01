@@ -66,3 +66,40 @@ func (l *Limiter) AddTokens(key string, n int64, windowSec int) {
 	}
 	c.n += n
 }
+
+// RemainingRequests reports how many more requests key may make in the current
+// rate window, and how long until it resets — a pure read with no side
+// effects (AllowRequest is what actually consumes a request). An
+// empty/expired window reports a full, fresh rpm budget.
+func (l *Limiter) RemainingRequests(key string, rpm int) (remaining int64, resetIn time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	c := l.reqWin[key]
+	if c == nil || now.Sub(c.start) >= time.Minute {
+		return int64(rpm), time.Minute
+	}
+	remaining = int64(rpm) - c.n
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, time.Minute - now.Sub(c.start)
+}
+
+// RemainingTokens reports how many more tokens key may spend in the current
+// token-budget window, and how long until it resets — a pure read with no
+// side effects. An empty/expired window reports the full, fresh budget.
+func (l *Limiter) RemainingTokens(key string, budget int64, windowSec int) (remaining int64, resetIn time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	window := time.Duration(windowSec) * time.Second
+	c := l.tokWin[key]
+	if c == nil || time.Since(c.start) >= window {
+		return budget, window
+	}
+	remaining = budget - c.n
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, window - time.Since(c.start)
+}

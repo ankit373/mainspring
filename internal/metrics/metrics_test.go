@@ -41,6 +41,56 @@ func TestRecordAndPrometheus(t *testing.T) {
 	}
 }
 
+func TestLatencyPercentiles(t *testing.T) {
+	r, _ := New("")
+	if p := r.LatencyPercentiles("none"); p != (Percentiles{}) {
+		t.Fatalf("no samples => zero value, got %+v", p)
+	}
+	now := time.Unix(1700000000, 0)
+	// Duration samples 10..100 (step 10); TTFT samples 1..10 (step 1); queue-wait
+	// samples 100..1000 (step 100).
+	for i := 1; i <= 10; i++ {
+		r.Record(Event{Time: now, Model: "m1", Status: 200, DurationMs: float64(i * 10), TTFTMs: float64(i), QueueWaitMs: float64(i * 100)})
+	}
+	p := r.LatencyPercentiles("m1")
+	// Sorted duration = [10..100]; p50 index int(0.5*10)=5 -> 60; p90 index 9 -> 100; p99 index 9 (clamped) -> 100.
+	if p.DurationP50 != 60 {
+		t.Fatalf("DurationP50 = %v, want 60", p.DurationP50)
+	}
+	if p.DurationP90 != 100 {
+		t.Fatalf("DurationP90 = %v, want 100", p.DurationP90)
+	}
+	if p.DurationP99 != 100 {
+		t.Fatalf("DurationP99 = %v, want 100", p.DurationP99)
+	}
+	if p.TTFTP50 != 6 {
+		t.Fatalf("TTFTP50 = %v, want 6", p.TTFTP50)
+	}
+	// TTFTp50 back-compat wrapper must agree.
+	if got := r.TTFTp50("m1"); got != p.TTFTP50 {
+		t.Fatalf("TTFTp50() = %v, want %v (LatencyPercentiles.TTFTP50)", got, p.TTFTP50)
+	}
+	if p.QueueWaitP50 != 600 {
+		t.Fatalf("QueueWaitP50 = %v, want 600", p.QueueWaitP50)
+	}
+	if p.QueueWaitP99 != 1000 {
+		t.Fatalf("QueueWaitP99 = %v, want 1000", p.QueueWaitP99)
+	}
+}
+
+func TestPercentileHelper(t *testing.T) {
+	if got := percentile(nil, 0.5); got != 0 {
+		t.Fatalf("empty samples => 0, got %v", got)
+	}
+	samples := []float64{50, 10, 30, 20, 40} // sorted: 10 20 30 40 50
+	if got := percentile(samples, 0.5); got != 30 {
+		t.Fatalf("p50 = %v, want 30", got)
+	}
+	if got := percentile(samples, 0.99); got != 50 {
+		t.Fatalf("p99 = %v, want 50 (clamped to max)", got)
+	}
+}
+
 func TestResilienceCounters(t *testing.T) {
 	r, _ := New("")
 	now := time.Unix(1700000000, 0)

@@ -18,7 +18,7 @@ type fakeRunner struct {
 	stopped atomic.Bool
 }
 
-func (r *fakeRunner) BaseURL() string { return "http://fake/" + r.id }
+func (r *fakeRunner) BaseURL() string                       { return "http://fake/" + r.id }
 func (r *fakeRunner) Health(context.Context) backend.Status { return backend.StatusReady }
 func (r *fakeRunner) MemoryBytes() int64 {
 	if r.mem == 0 {
@@ -284,6 +284,54 @@ func TestReloadEvictsChangedModel(t *testing.T) {
 	}
 }
 
+// TestReloadDefersEvictionWhileBusy proves the fix: a config reload that
+// changes a busy model's spec must not kill it mid-request. It survives until
+// MarkIdle, then evicts promptly (self-healing, no restart needed).
+func TestReloadDefersEvictionWhileBusy(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2})
+	r, _ := s.EnsureLoaded(context.Background(), "a")
+	s.MarkBusy("a")
+
+	// Same id but a different path — would normally be evicted immediately.
+	changed := []backend.ModelSpec{{ID: "a", Backend: "fake", Path: "/new/path"}}
+	if err := s.Reload(changed, nil); err != nil {
+		t.Fatal(err)
+	}
+	if r.(*fakeRunner).stopped.Load() {
+		t.Fatal("busy model must not be evicted by a reload mid-request")
+	}
+	if len(s.Loaded()) != 1 {
+		t.Fatal("busy model should still be resident immediately after reload")
+	}
+
+	// Once idle, the deferred eviction fires.
+	s.MarkIdle("a")
+	if !r.(*fakeRunner).stopped.Load() {
+		t.Fatal("stale model should be evicted as soon as it goes idle")
+	}
+	if len(s.Loaded()) != 0 {
+		t.Fatal("stale model should no longer be resident after MarkIdle")
+	}
+}
+
+// A busy model whose spec did NOT change must survive reload regardless, and
+// must not be evicted later by an unrelated MarkIdle (it was never stale).
+func TestReloadUnchangedBusyModelNeverMarkedStale(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2})
+	r, _ := s.EnsureLoaded(context.Background(), "a")
+	s.MarkBusy("a")
+
+	if err := s.Reload(specs("a"), nil); err != nil {
+		t.Fatal(err)
+	}
+	s.MarkIdle("a")
+	if r.(*fakeRunner).stopped.Load() {
+		t.Fatal("unchanged model must never be evicted, even after going idle post-reload")
+	}
+}
+
 func TestReloadKeepsUnchangedModelResident(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 3})
@@ -404,8 +452,8 @@ func TestUnloadEvictsSpecificModel(t *testing.T) {
 	ra, _ := s.EnsureLoaded(context.Background(), "a")
 	_, _ = s.EnsureLoaded(context.Background(), "b")
 
-	if !s.Unload("a") {
-		t.Fatal("Unload should report true for a resident model")
+	if unloaded, interrupted := s.Unload("a"); !unloaded || interrupted != 0 {
+		t.Fatalf("Unload(a) = (%v, %d), want (true, 0) — resident and idle", unloaded, interrupted)
 	}
 	if !ra.(*fakeRunner).stopped.Load() {
 		t.Fatal("Unload must Stop the runner")
@@ -413,7 +461,7 @@ func TestUnloadEvictsSpecificModel(t *testing.T) {
 	if len(s.Loaded()) != 1 {
 		t.Fatalf("only b should remain, got %d loaded", len(s.Loaded()))
 	}
-	if s.Unload("a") {
+	if unloaded, _ := s.Unload("a"); unloaded {
 		t.Fatal("Unloading a non-resident model should return false")
 	}
 	// A reload path still works after unload.
@@ -422,13 +470,110 @@ func TestUnloadEvictsSpecificModel(t *testing.T) {
 	}
 }
 
+// TestUnloadReportsInterruptedRequests proves the fix: force-unloading a busy
+// model still succeeds (an explicit admin action always takes priority — this
+// is deliberately different from the automatic idle/LRU/reload eviction paths,
+// which must never interrupt a live request), but now reports how many
+// requests were actually cut off.
+func TestUnloadReportsInterruptedRequests(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2})
+	r, _ := s.EnsureLoaded(context.Background(), "a")
+	s.MarkBusy("a")
+	s.MarkBusy("a") // two concurrent in-flight requests
+
+	unloaded, interrupted := s.Unload("a")
+	if !unloaded {
+		t.Fatal("Unload should still succeed on a busy model (explicit admin action)")
+	}
+	if interrupted != 2 {
+		t.Fatalf("interrupted = %d, want 2 (both in-flight requests were cut off)", interrupted)
+	}
+	if !r.(*fakeRunner).stopped.Load() {
+		t.Fatal("the runner must actually be stopped despite being busy")
+	}
+}
+
 func TestUnloadResolvesAlias(t *testing.T) {
 	be := &fakeBackend{}
 	s := New(bmap(be), specs("real"), Options{MaxLoaded: 2, Aliases: map[string]string{"friendly": "real"}})
 	_, _ = s.EnsureLoaded(context.Background(), "friendly")
-	if !s.Unload("friendly") {
+	if unloaded, _ := s.Unload("friendly"); !unloaded {
 		t.Fatal("Unload should resolve the alias and evict the real model")
 	}
+}
+
+// TestIdleEvictStopsGenuinelyUnusedModel is the baseline: with no MarkBusy in
+// play, a model that goes untouched past KeepAlive is evicted as before.
+func TestIdleEvictStopsGenuinelyUnusedModel(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2, KeepAlive: 30 * time.Millisecond})
+	ra, err := s.EnsureLoaded(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if !ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("genuinely idle model should have been evicted past KeepAlive")
+	}
+}
+
+// TestMarkBusyPreventsIdleEviction proves the fix: a request whose duration
+// outlasts KeepAlive must not have its runner killed mid-flight.
+func TestMarkBusyPreventsIdleEviction(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a"), Options{MaxLoaded: 2, KeepAlive: 30 * time.Millisecond})
+	ra, err := s.EnsureLoaded(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.MarkBusy("a")
+
+	// Sleep well past KeepAlive while "busy" — the runner must survive.
+	time.Sleep(100 * time.Millisecond)
+	if ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("runner was evicted while marked busy — a request would have broken mid-flight")
+	}
+	if loaded := s.Loaded(); len(loaded) != 1 || loaded[0].ID != "a" {
+		t.Fatalf("model should still be resident while busy, got %+v", loaded)
+	}
+
+	// Once idle, the clock restarts from MarkIdle (not from the original load),
+	// so it takes another full KeepAlive window to actually evict.
+	s.MarkIdle("a")
+	time.Sleep(100 * time.Millisecond)
+	if !ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("runner should be evicted a full KeepAlive window after MarkIdle")
+	}
+}
+
+// TestMarkBusyPreventsLRUEviction proves the fix applies to capacity-pressure
+// eviction too, not just the idle timer: a busy model must not be picked as the
+// LRU victim when a new model needs room.
+func TestMarkBusyPreventsLRUEviction(t *testing.T) {
+	be := &fakeBackend{}
+	s := New(bmap(be), specs("a", "b"), Options{MaxLoaded: 1}) // capacity 1
+	ra, err := s.EnsureLoaded(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.MarkBusy("a")
+
+	if _, err := s.EnsureLoaded(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	if ra.(*fakeRunner).stopped.Load() {
+		t.Fatal("busy model 'a' must not be evicted to make room for 'b'")
+	}
+	// Over capacity temporarily, but nothing broken — both remain resident.
+	ids := map[string]bool{}
+	for _, l := range s.Loaded() {
+		ids[l.ID] = true
+	}
+	if !ids["a"] || !ids["b"] {
+		t.Fatalf("expected both a and b resident (capacity exceeded rather than breaking a's request), got %+v", ids)
+	}
+	s.MarkIdle("a")
 }
 
 func TestShutdownStopsAll(t *testing.T) {

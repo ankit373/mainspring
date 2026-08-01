@@ -63,12 +63,16 @@ type Capabilities struct {
 	Warnings     []string `json:"warnings,omitempty"` // populated when degraded
 }
 
-// Degraded reports whether the running model differs from what was asked for —
-// CPU fallback or a shrunk context window. The server surfaces this loudly.
+// Degraded reports whether the running model differs from what was asked for
+// in a way worth a human's attention — e.g. an unrequested CPU fallback or a
+// shrunk context window. It does NOT treat "not using the GPU" as inherently
+// degraded: GPULayers < 0 is a documented, intentional request for CPU-only
+// execution, and a backend correctly reports that with GPUOffload=false and no
+// warning. Each backend already appends a Warning exactly when something
+// actually differs from the request (silent fallback, partial offload, a
+// device it cannot verify), so Degraded defers to that rather than guessing
+// from GPUOffload alone. The server surfaces a true Degraded loudly.
 func (c Capabilities) Degraded() bool {
-	if !c.GPUOffload {
-		return true
-	}
 	if c.RequestedCtx > 0 && c.EffectiveCtx > 0 && c.EffectiveCtx < c.RequestedCtx {
 		return true
 	}

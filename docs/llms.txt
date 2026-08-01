@@ -23,14 +23,23 @@ MIT and already win; Mainspring wraps them).
   startup); aliases appear in `/v1/models` and resolve on every inference path.
 - Model auto-discovery (opt-in `discover_models: true`): enumerate models from present adopt backends
   (Ollama `/api/tags`, LM Studio / llamafile / GPT4All `/v1/models`) and expose them automatically;
-  configured models win on an id clash.
+  configured models win on an id clash. Adopted Ollama models also get a pre-admission size estimate
+  (from `/api/tags`, before the model is ever loaded), so the byte-budget scheduler can make room for
+  them the same way it already does for llamacpp/mlx — not just after Ollama has loaded them.
 - Fail loud, never silently degrade: `/capabilities` reports the real backend, device, GPU offload,
   and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
-  headers on every response.
+  headers on every response. "Degraded" means something actually differs from what was asked for (a
+  silent CPU fallback, a shrunk context) — a model deliberately configured CPU-only (`gpu_layers: -1`)
+  is never flagged degraded just for not using the GPU.
 - VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
-  unload, optional preload at startup.
+  unload, optional preload at startup. Eviction (idle-timeout and capacity/LRU alike) never pulls a
+  runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or
+  that would otherwise be picked as the LRU victim, is protected until it actually finishes.
 - Standalone governance: API keys → named tenants with roles (admin/inference) and per-tenant request
-  rate limits (429 + Retry-After) and token budgets.
+  rate limits (429 + Retry-After) and token budgets. Every authenticated response for a tenant with a
+  configured quota carries `X-Mainspring-{RateLimit,TokenBudget}-{Limit,Remaining,Reset}` headers, so a
+  client can see headroom and back off proactively instead of only reacting to a 429/token_budget error.
+  Omitted entirely for an unlimited tenant or in open mode.
 - Concurrency + backpressure: per-model in-flight limit + bounded queue; 503 instead of latency collapse.
 - Per-request timeout: an optional global default + per-model override bounds total generation time; on
   expiry the upstream call is cancelled and a 504 `timeout` is returned (0 = unbounded).
@@ -76,15 +85,26 @@ MIT and already win; Mainspring wraps them).
   `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
   cost signal a router (Hydra) can route away from. Priced only from exact usage; never guessed.
 - Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, cost, requests, residency, inflight/queued,
-  cache hits, and resilience counters `mainspring_{retries,coalesced,fallback}_total`) and an append-only
-  JSONL usage ledger (each event records retries/coalesced/fallback too). Token counts are real when the
-  upstream reports a usage object (non-stream body, or the streaming `include_usage` final chunk), else estimated.
+  cache hits, resilience counters `mainspring_{retries,coalesced,fallback}_total`, and latency percentiles
+  `mainspring_{duration,ttft,queue_wait}_ms_{p50,p90,p99}` — a bounded recent-sample reservoir estimate, not
+  a mean) and an append-only JSONL usage ledger (each event records retries/coalesced/fallback too). Queue
+  wait is the time a request actually spent queued for a concurrency-gate slot, measured separately from
+  total duration so backpressure latency is distinguishable from real generation time. The same percentiles
+  are in `/v1/quality` per model. Token counts are real when the upstream reports a usage object (non-stream
+  body, or the streaming `include_usage` final chunk), else estimated.
+- Config lint: catches config combinations that are valid YAML but silently do nothing — enforce_context/
+  clamp_max_tokens/precise_context set but a model has no ctx (guardrail is a no-op for it), model_fallbacks
+  targeting an unresolvable model/alias, a negative cost rate, or a missing tls_cert/tls_key file. Surfaced
+  as `mainspring doctor` diagnostics and as non-fatal stderr warnings at `mainspring serve` startup.
 - Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
   Never installs anything unless you run `mainspring install`.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
   ServiceMonitor, GPU node scheduling). Optional TLS (tls_cert/tls_key => HTTPS, TLS 1.2 minimum).
 - Graceful drain: `/readyz` flips to 503 on shutdown so load balancers stop routing while in-flight
-  requests finish.
+  requests finish. It also flips to 503 (`degraded`) when the circuit breaker is enabled and every
+  configured model's breaker is Open — a full-outage signal, not just an explicit drain — so a load
+  balancer or Kubernetes readinessProbe stops sending traffic to a pod that cannot serve a single request.
+  A single healthy or half-open (recovering) model keeps readyz at 200.
 - Request correlation: every request carries an `X-Request-ID` (accepted from the client or generated,
   echoed on the response and recorded in the usage ledger); an optional JSONL access log records every
   request (method, path, status, duration). W3C `traceparent` is accepted/continued (or generated), the
@@ -92,7 +112,12 @@ MIT and already win; Mainspring wraps them).
   distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK.
 - Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
   in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
-  are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand.
+  are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand —
+  a model actively serving a request is never evicted mid-flight, even if its spec changed; eviction is
+  deferred until it actually goes idle. Every other setting reload does not (or structurally cannot)
+  re-apply — timeouts, cache, guardrail, clamp, retry, coalesce, breaker, per-model cost/fallback
+  overrides, and more — is logged as requiring a restart when it changes, rather than silently keeping
+  the old value with no explanation.
 
 ## Backends
 
@@ -125,7 +150,12 @@ MIT and already win; Mainspring wraps them).
   timeouts, retry, breaker, cache, coalesce, guardrail, concurrency, fallbacks; secret-free by construction),
   `GET /admin/usage` (per-tenant consumption actuals — requests, prompt/output tokens, USD cost; open-mode
   traffic bucketed as "(anonymous)"), `POST /admin/drain[?on=false]`, `POST /admin/reload`,
-  `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload`
+  `POST /admin/models/{id}/load`, `POST /admin/models/{id}/unload` (force-stops the model regardless of
+  in-flight requests — an explicit admin action always takes priority — and reports how many were actually
+  interrupted via `interrupted_requests`, so the operator knows whether they just cut off live traffic),
+  `POST /admin/breaker/{id}/reset`
+  (force a tripped circuit breaker back to closed without waiting out the cooldown), `POST /admin/cache/clear`
+  (purge the response cache on demand instead of waiting for TTL/LRU eviction; a no-op when caching is off)
 
 ## Errors
 

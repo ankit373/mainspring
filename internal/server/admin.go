@@ -83,5 +83,32 @@ func (s *Server) adminUnload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeModelNotFound, "model not found: "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "unloaded": s.sched.Unload(id)})
+	unloaded, interrupted := s.sched.Unload(id)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "unloaded": unloaded, "interrupted_requests": interrupted})
+}
+
+// adminBreakerReset forces a model's circuit breaker back to Closed, letting an
+// operator recover immediately (e.g. after manually confirming the backend is
+// healthy) rather than waiting out the cooldown. POST /admin/breaker/{id}/reset.
+func (s *Server) adminBreakerReset(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := s.sched.Resolve(r.PathValue("id"))
+	if !ok {
+		writeErr(w, codeModelNotFound, "model not found: "+r.PathValue("id"))
+		return
+	}
+	s.breaker.Reset(id)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "breaker": s.breaker.State(id).String()})
+}
+
+// adminCacheClear purges every entry from the response cache. A no-op (still
+// 200) when caching is disabled. POST /admin/cache/clear.
+func (s *Server) adminCacheClear(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.cache.Clear()
+	writeJSON(w, http.StatusOK, map[string]any{"cleared": true})
 }

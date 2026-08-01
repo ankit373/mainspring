@@ -55,6 +55,8 @@ type loaded struct {
 	spec     backend.ModelSpec
 	lastUsed time.Time
 	timer    *time.Timer
+	inflight int  // requests actively using this runner right now; never evict while > 0
+	stale    bool // spec changed (or model removed) during Reload while busy; evict once idle
 }
 
 type loadCall struct {
@@ -171,18 +173,27 @@ func (s *Scheduler) Reload(specList []backend.ModelSpec, aliases map[string]stri
 	s.aliases = newAliases
 	s.specsMu.Unlock()
 
-	// Evict runners whose spec changed or disappeared.
+	// Evict runners whose spec changed or disappeared — but never one that is
+	// actively serving a request (the same in-flight protection idleEvict and
+	// the LRU picker already apply). A busy, changed model is marked stale
+	// instead: MarkIdle evicts it as soon as it actually finishes, so the fix
+	// is self-healing without a second background sweep.
 	var victims []backend.Runner
 	s.mu.Lock()
 	for id, l := range s.running {
 		ns, ok := newSpecs[id]
-		if !ok || !specEqual(ns, l.spec) {
-			if l.timer != nil {
-				l.timer.Stop()
-			}
-			delete(s.running, id)
-			victims = append(victims, l.runner)
+		if ok && specEqual(ns, l.spec) {
+			continue
 		}
+		if l.inflight > 0 {
+			l.stale = true
+			continue
+		}
+		if l.timer != nil {
+			l.timer.Stop()
+		}
+		delete(s.running, id)
+		victims = append(victims, l.runner)
 	}
 	s.mu.Unlock()
 	for _, r := range victims {
@@ -271,6 +282,58 @@ func (s *Scheduler) EnsureLoaded(ctx context.Context, modelID string) (backend.R
 	delete(s.loading, modelID)
 	s.loadingMu.Unlock()
 	return c.runner, c.err
+}
+
+// MarkBusy records that a request is actively using modelID's runner right
+// now, deferring both idle-timeout and capacity eviction until the matching
+// MarkIdle. Without this, a request whose total duration outlasts KeepAlive (or
+// that loses a capacity race to a new model) would have its runner killed out
+// from under it — idleEvict and the LRU picker have no other way to know a
+// "stale-looking" runner is still in active use. No-op if the model isn't
+// currently resident (e.g. a race with eviction) — nothing left to protect.
+func (s *Scheduler) MarkBusy(modelID string) {
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.running[modelID]; ok {
+		l.inflight++
+	}
+}
+
+// MarkIdle is the matching release for MarkBusy. It also touches the model, so
+// the idle clock starts counting from actual last-activity (when the request
+// truly finished) rather than from when it started. If a config Reload marked
+// this model stale (its spec changed while it was busy) and this was the last
+// in-flight request, it is evicted now — self-healing, without a second
+// background sweep — so the next request picks up the new spec.
+func (s *Scheduler) MarkIdle(modelID string) {
+	if real, ok := s.Resolve(modelID); ok {
+		modelID = real
+	}
+	s.mu.Lock()
+	l, ok := s.running[modelID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	if l.inflight > 0 {
+		l.inflight--
+	}
+	s.touch(l)
+	var victim backend.Runner
+	if l.stale && l.inflight == 0 {
+		if l.timer != nil {
+			l.timer.Stop()
+		}
+		delete(s.running, modelID)
+		victim = l.runner
+	}
+	s.mu.Unlock()
+	if victim != nil {
+		_ = victim.Stop(context.Background())
+	}
 }
 
 func (s *Scheduler) load(ctx context.Context, modelID string) (backend.Runner, error) {
@@ -364,11 +427,20 @@ func (s *Scheduler) usedBytesLocked() int64 {
 }
 
 // lruLocked returns the id of the least-recently-used model (caller holds mu).
+// lruLocked returns the least-recently-used *idle* model, skipping any with an
+// in-flight request — an active request must never be evicted to make room for
+// another. Returns "" if every resident model is currently busy (the caller
+// then admits the new one without evicting anything, over capacity but not
+// broken — the same best-effort trade-off already made when a single model is
+// larger than the whole budget).
 func (s *Scheduler) lruLocked() string {
 	var oldestID string
 	var oldest time.Time
 	first := true
 	for id, l := range s.running {
+		if l.inflight > 0 {
+			continue
+		}
 		if first || l.lastUsed.Before(oldest) {
 			oldestID, oldest, first = id, l.lastUsed, false
 		}
@@ -380,6 +452,13 @@ func (s *Scheduler) idleEvict(modelID string) {
 	s.mu.Lock()
 	l, ok := s.running[modelID]
 	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	if l.inflight > 0 {
+		// Never unload a runner mid-request; recheck after a full fresh window
+		// rather than racing the in-flight request's own completion.
+		l.timer.Reset(s.keepAlive)
 		s.mu.Unlock()
 		return
 	}
@@ -395,10 +474,14 @@ func (s *Scheduler) idleEvict(modelID string) {
 }
 
 // Unload evicts a specific model if resident, stopping its runner and reclaiming
-// its memory. It resolves aliases first. It returns true if a model was
-// unloaded, false if it was not resident. The model can be reloaded on the next
-// request.
-func (s *Scheduler) Unload(modelID string) bool {
+// its memory. It resolves aliases first. It returns unloaded=true if a model
+// was unloaded, false if it was not resident. Unlike the automatic idle/LRU/
+// reload eviction paths, this is an explicit operator action and always takes
+// priority over any in-flight request — but interrupted reports how many
+// requests were actually using the runner at the moment it was force-stopped,
+// so the operator knows whether they just interrupted live traffic (0 = the
+// model was idle). The model can be reloaded on the next request.
+func (s *Scheduler) Unload(modelID string) (unloaded bool, interrupted int) {
 	if real, ok := s.Resolve(modelID); ok {
 		modelID = real
 	}
@@ -406,16 +489,16 @@ func (s *Scheduler) Unload(modelID string) bool {
 	l, ok := s.running[modelID]
 	if !ok {
 		s.mu.Unlock()
-		return false
+		return false, 0
 	}
 	if l.timer != nil {
 		l.timer.Stop()
 	}
 	delete(s.running, modelID)
-	r := l.runner
+	r, n := l.runner, l.inflight
 	s.mu.Unlock()
 	_ = r.Stop(context.Background())
-	return true
+	return true, n
 }
 
 // touch marks a loaded model as recently used (caller holds s.mu).

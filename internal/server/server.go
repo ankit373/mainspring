@@ -143,6 +143,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/reload", s.adminReload)
 	mux.HandleFunc("POST /admin/models/{id}/load", s.adminLoad)
 	mux.HandleFunc("POST /admin/models/{id}/unload", s.adminUnload)
+	mux.HandleFunc("POST /admin/breaker/{id}/reset", s.adminBreakerReset)
+	mux.HandleFunc("POST /admin/cache/clear", s.adminCacheClear)
 	// requestID is outermost so every request — including auth rejections and
 	// health checks — gets a correlation id and an access-log line.
 	return s.requestID(s.auth.Wrap(mux))
@@ -175,7 +177,33 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
 		return
 	}
+	if s.totalOutage() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// totalOutage reports whether every configured model's circuit breaker is
+// Open — a full-outage signal a load balancer or Kubernetes readinessProbe
+// should act on by routing traffic elsewhere, not something drain alone
+// covers. False whenever breaking is disabled, no models are configured, or at
+// least one model is Closed/HalfOpen (HalfOpen means recovery is actively
+// being probed, not that the service is down).
+func (s *Server) totalOutage() bool {
+	if !s.breaker.Enabled() {
+		return false
+	}
+	specs := s.sched.Models()
+	if len(specs) == 0 {
+		return false
+	}
+	for _, sp := range specs {
+		if s.breaker.State(sp.ID) != breaker.Open {
+			return false
+		}
+	}
+	return true
 }
 
 // models implements GET /v1/models.
@@ -427,12 +455,14 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// A candidate is skipped only for a pre-serve failure (circuit open or load
 	// error); gate saturation is backpressure, not a fallback trigger.
 	var (
-		runner  backend.Runner
-		release func()
-		served  string
+		runner    backend.Runner
+		release   func()
+		served    string
+		queueWait time.Duration
 	)
 	for _, cand := range s.candidatesFor(model) {
-		rr, rel, busy, okc := s.acquireRunner(r, cand)
+		rr, rel, wait, busy, okc := s.acquireRunner(r, cand)
+		queueWait += wait
 		if busy {
 			w.Header().Set("Retry-After", "1")
 			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
@@ -476,7 +506,12 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	if ((cacheKey != "") || coLeader) && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
+	// Mark the runner busy for the actual generation call so the scheduler's
+	// idle timer and LRU eviction never pull it out from under a long-running
+	// request (e.g. one that streams longer than KeepAlive).
+	s.sched.MarkBusy(served)
 	retries := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
+	s.sched.MarkIdle(served)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
 	// (4xx is a client error, not the backend's fault).
 	s.breaker.OnResult(served, cap.status < 500)
@@ -525,6 +560,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			CostUSD:      s.costFor(served, prompt, completion, exact),
 			Retries:      retries,
 			Fallback:     served != model,
+			QueueWaitMs:  float64(queueWait.Microseconds()) / 1000.0,
 		})
 	}
 }
