@@ -52,7 +52,9 @@ MIT and already win; Mainspring wraps them).
   too; `X-Mainspring-Retries: N` reports how many retries a request took. Disabled by default (`retry_max`).
 - Circuit breaker + health probe: after N consecutive backend failures a model's requests fast-fail with
   503 (no timeout paid) until a cooldown elapses and a half-open probe succeeds; an optional background
-  health probe trips/recovers the breaker without waiting for live traffic. State in /metrics and /v1/quality.
+  health probe trips/recovers the breaker without waiting for live traffic. State in /metrics
+  (`mainspring_breaker_open{model}` — tripped, open or half-open; `mainspring_breaker_half_open{model}` —
+  specifically probing recovery) and /v1/quality.
 - Token counting: `POST /v1/tokenize {model, input}` returns `{tokens, exact}` — the model's real token
   count (exact) when the model is resident on an engine that exposes a tokenizer (llama.cpp `/tokenize`),
   otherwise the character-based estimate (exact:false). No forced load; no extra dependency.

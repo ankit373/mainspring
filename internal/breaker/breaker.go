@@ -160,7 +160,11 @@ func (g *Group) State(key string) State {
 	return Closed
 }
 
-// WritePrometheus emits a per-key open-state gauge (1 when open or half-open).
+// WritePrometheus emits a per-key open-state gauge (1 when open or half-open,
+// preserving existing dashboard semantics), plus a separate half-open gauge so
+// "still failing, cooldown running" is distinguishable from "cooldown elapsed,
+// actively probing recovery" without switching to /v1/quality, which already
+// reports the granular state string per model.
 func (g *Group) WritePrometheus(w io.Writer) {
 	if !g.Enabled() {
 		return
@@ -182,12 +186,23 @@ func (g *Group) WritePrometheus(w io.Writer) {
 		if states[k] != Closed {
 			v = 1
 		}
-		writeGauge(w, k, v)
+		writeGauge(w, "mainspring_breaker_open", k, v)
+	}
+
+	io.WriteString(w, "# HELP mainspring_breaker_half_open Circuit breaker actively probing recovery (1=half-open) by model.\n")
+	io.WriteString(w, "# TYPE mainspring_breaker_half_open gauge\n")
+	for _, k := range keys {
+		v := 0
+		if states[k] == HalfOpen {
+			v = 1
+		}
+		writeGauge(w, "mainspring_breaker_half_open", k, v)
 	}
 }
 
-func writeGauge(w io.Writer, model string, v int) {
-	io.WriteString(w, "mainspring_breaker_open{model=\"")
+func writeGauge(w io.Writer, name, model string, v int) {
+	io.WriteString(w, name)
+	io.WriteString(w, "{model=\"")
 	io.WriteString(w, esc(model))
 	io.WriteString(w, "\"} ")
 	if v == 1 {
