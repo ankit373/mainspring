@@ -155,7 +155,37 @@ func TestWritePrometheus(t *testing.T) {
 	g.OnResult("m", false)
 	var sb strings.Builder
 	g.WritePrometheus(&sb)
-	if !strings.Contains(sb.String(), `mainspring_breaker_open{model="m"} 1`) {
-		t.Fatalf("expected open gauge, got:\n%s", sb.String())
+	out := sb.String()
+	if !strings.Contains(out, `mainspring_breaker_open{model="m"} 1`) {
+		t.Fatalf("expected open gauge, got:\n%s", out)
+	}
+	// Open (not yet half-open): the half-open gauge must read 0.
+	if !strings.Contains(out, `mainspring_breaker_half_open{model="m"} 0`) {
+		t.Fatalf("expected half_open=0 while merely open, got:\n%s", out)
+	}
+}
+
+// TestWritePrometheusDistinguishesHalfOpen proves the fix: half-open (actively
+// probing recovery) must be distinguishable from a plain open breaker, not
+// just collapsed into the same "tripped" gauge.
+func TestWritePrometheusDistinguishesHalfOpen(t *testing.T) {
+	g, clk := newTestGroup(1, time.Minute)
+	g.OnResult("m", false) // opens
+	clk.add(time.Minute)
+	g.Allow("m") // cooldown elapsed -> transitions to HalfOpen
+	if g.State("m") != HalfOpen {
+		t.Fatal("setup: expected half-open state")
+	}
+
+	var sb strings.Builder
+	g.WritePrometheus(&sb)
+	out := sb.String()
+	// Existing dashboards keep working: still "tripped" (1) while half-open.
+	if !strings.Contains(out, `mainspring_breaker_open{model="m"} 1`) {
+		t.Fatalf("expected open=1 during half-open (back-compat), got:\n%s", out)
+	}
+	// New signal: specifically half-open.
+	if !strings.Contains(out, `mainspring_breaker_half_open{model="m"} 1`) {
+		t.Fatalf("expected half_open=1, got:\n%s", out)
 	}
 }
