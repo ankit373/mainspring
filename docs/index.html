@@ -268,14 +268,22 @@ nav a:hover{color:var(--ink);text-decoration:none}
 /* --- the stack ladder --- */
 .ladder{margin-top:14px;display:flex;flex-direction:column;gap:7px}
 .rung{
-  display:grid;grid-template-columns:150px 1fr;gap:16px;align-items:baseline;
+  display:grid;grid-template-columns:172px 1fr;gap:16px;align-items:start;
   padding:13px 17px;border:1px solid var(--line);border-radius:10px;
   background:var(--panel);
 }
 .rung .lyr{
   font-family:var(--mono);font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;
-  color:var(--faint);
+  color:var(--faint);line-height:1.45;
+  display:flex;flex-direction:column;align-items:flex-start; /* keep the scope chip on its own line */
 }
+/* What the layer governs — the axis that actually separates the two control planes. */
+.rung .scope{
+  display:inline-block;margin-top:6px;padding:2px 8px;border-radius:999px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;
+  border:1px solid var(--line-lit);color:var(--faint);
+}
+.rung.us .scope{border-color:var(--brass-deep);color:var(--brass)}
 .rung .who{font-size:14.5px;color:var(--muted)}
 .rung .who b{color:var(--ink-dim);font-weight:600}
 .rung.edge{background:none;border-style:dashed;opacity:.75}
@@ -508,14 +516,17 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
       <span class="who">agents, editors, anything already written against the OpenAI or Anthropic SDK</span>
     </div>
     <div class="rung">
-      <span class="lyr">Router</span>
-      <span class="who"><b>Hydra · LiteLLM · OpenRouter</b> — choose <em>which head</em> answers, across
-        vendors and machines. Assumes each head already behaves.</span>
+      <span class="lyr">Trust control plane<span class="scope">across heads</span></span>
+      <span class="who"><b>Hydra</b> — decide <em>which head should answer</em>, to a target confidence
+        of correctness, at what cost, with an accountability trail. Simpler proxies live at this tier
+        too (<b>LiteLLM</b>, <b>OpenRouter</b>), but they forward traffic rather than reason about
+        whether the answer is right.</span>
     </div>
     <div class="rung us">
-      <span class="lyr">Control plane</span>
-      <span class="who"><b>Mainspring</b> — govern <em>one</em> head honestly: keys and quotas, VRAM
-        residency, guardrails, fail-loud truth, spend.</span>
+      <span class="lyr">Inference control plane<span class="scope">one head</span></span>
+      <span class="who"><b>Mainspring</b> — make <em>one</em> head honest and governable: keys and
+        quotas, VRAM residency, guardrails, fail-loud truth, spend. Whatever decides <em>which</em>
+        head to use is only as good as what each head reports about itself.</span>
     </div>
     <div class="rung">
       <span class="lyr">Runner</span>
@@ -531,10 +542,13 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
 
   <p class="after-ladder"><strong>So it composes rather than competes.</strong> If Ollama is already
     running, Mainspring detects and adopts it — your models keep working, and they gain
-    authentication, quotas, residency budgeting and a fail-loud contract they didn't have.
-    <a href="https://github.com/ankit373/hydra">Hydra</a> is one router that can sit above; it is
-    provider-neutral and never depends on Mainspring, which is equally designed to be useful with
-    nothing above it at all.</p>
+    authentication, quotas, residency budgeting and a fail-loud contract they didn't have.</p>
+  <p class="after-ladder"><strong>Two control planes, different questions.</strong>
+    <a href="https://github.com/ankit373/hydra">Hydra</a> asks <em>which head should answer this, and
+    how confident are we that it's right</em>. Mainspring answers <em>what is true about this head
+    right now</em>. Hydra is provider-neutral, works with any OpenAI-compatible endpoint, and never
+    depends on Mainspring — and Mainspring is equally designed to be useful with nothing above it at
+    all. They compose well precisely because neither assumes the other.</p>
 </div></section>
 
 <section id="why"><div class="wrap">
@@ -741,10 +755,11 @@ curl localhost:11500/capabilities
 <footer><div class="wrap">
   <div class="note">
     <strong>Where Hydra fits.</strong> Mainspring is an inference <em>head</em>;
-    <a href="https://github.com/ankit373/hydra">Hydra</a> is a provider-neutral router and trust
-    control plane that sits above many heads. They meet over the standard OpenAI-compatible boundary.
-    Hydra works with everything — Ollama, OpenAI, Anthropic, any compatible endpoint — and never
-    depends on Mainspring. Mainspring is simply the head it integrates with best, and it is designed
+    <a href="https://github.com/ankit373/hydra">Hydra</a> is a provider-neutral <em>trust</em> control
+    plane that routes across many heads to a target confidence of correctness. They meet over the
+    standard OpenAI-compatible boundary. Hydra works with everything — Ollama, OpenAI, Anthropic, any
+    compatible endpoint — and never depends on Mainspring. Mainspring is simply the head it
+    integrates with best, because it is the one that reports honestly on itself; and it is designed
     to be useful deployed entirely alone.
   </div>
   <div class="meta">
