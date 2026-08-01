@@ -28,7 +28,9 @@ MIT and already win; Mainspring wraps them).
   them the same way it already does for llamacpp/mlx — not just after Ollama has loaded them.
 - Fail loud, never silently degrade: `/capabilities` reports the real backend, device, GPU offload,
   and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
-  headers on every response.
+  headers on every response. "Degraded" means something actually differs from what was asked for (a
+  silent CPU fallback, a shrunk context) — a model deliberately configured CPU-only (`gpu_layers: -1`)
+  is never flagged degraded just for not using the GPU.
 - VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
   unload, optional preload at startup. Eviction (idle-timeout and capacity/LRU alike) never pulls a
   runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or
