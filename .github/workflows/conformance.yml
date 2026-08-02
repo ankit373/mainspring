@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   openai-compat:
     runs-on: ubuntu-latest
