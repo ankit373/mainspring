@@ -71,8 +71,16 @@ func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Ru
 	}
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
-		s.breaker.OnResult(model, false)
 		rel()
+		if clientGone(r.Context()) {
+			// The caller went away while the model was loading, so the backend
+			// never got the chance to fail — this is not a load failure. Release
+			// the half-open probe Allow may have just consumed (see OnAbandoned)
+			// without moving the failure count, and write nothing back.
+			s.breaker.OnAbandoned(model)
+			return nil, nil, wait, acquireCancelled
+		}
+		s.breaker.OnResult(model, false)
 		return nil, nil, wait, acquireLoadFailed
 	}
 	return runner, rel, wait, acquireOK

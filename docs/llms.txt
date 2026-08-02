@@ -46,8 +46,11 @@ MIT and already win; Mainspring wraps them).
   a genuinely broken backend's circuit closed. If the abandoned request was holding the half-open
   probe, the probe is released so the next caller takes it immediately rather than waiting out another
   cooldown. Nothing is written back to the abandoned connection either (a caller cancelled while queued
-  for a concurrency slot gets no misleading `503 server_busy`). A per-request *timeout* is deliberately
-  the other way: it is the backend's fault and still counts as a failure.
+  for a concurrency slot gets no misleading `503 server_busy`). This holds at every point a request can
+  be abandoned and on both dialects: while queued, while the model is *loading* (a caller who gives up
+  waiting for a large model to load has not shown that the model cannot load), and mid-generation on the
+  OpenAI and Anthropic paths alike. A per-request *timeout* is deliberately the other way: it is the
+  backend's fault and still counts as a failure, as does a model that genuinely fails to load.
 - VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
   unload, optional preload at startup. Eviction (idle-timeout and capacity/LRU alike) never pulls a
   runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or
