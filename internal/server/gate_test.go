@@ -145,3 +145,25 @@ func TestGatePrometheus(t *testing.T) {
 		t.Fatalf("expected queued gauge, got:\n%s", out)
 	}
 }
+
+// A model id containing a quote and a backslash must be escaped exactly once.
+// Wrapping the escaper in %q double-escaped it, corrupting the label.
+func TestGatePrometheusEscapesLabelValueOnce(t *testing.T) {
+	g := newGate(1, 1)
+	rel, _, res := g.acquire(context.Background(), `we"ird\model`)
+	if res != gateAcquired {
+		t.Fatal("setup: acquire should succeed")
+	}
+	defer rel()
+	var sb strings.Builder
+	g.writePrometheus(&sb)
+	out := sb.String()
+	for _, want := range []string{
+		`mainspring_inflight_requests{model="we\"ird\\model"} 1`,
+		`mainspring_queued_requests{model="we\"ird\\model"} 0`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}

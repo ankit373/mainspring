@@ -240,3 +240,15 @@ func TestOnAbandonedReleasesAHalfOpenProbe(t *testing.T) {
 		t.Fatal("next caller should immediately get the released probe")
 	}
 }
+
+// A model id containing a quote and a backslash must be escaped exactly once —
+// the three escapes the Prometheus text format defines, and no more.
+func TestWritePrometheusEscapesLabelValueOnce(t *testing.T) {
+	g, _ := newTestGroup(1, time.Minute)
+	g.OnResult(`we"ird\model`, false)
+	var sb strings.Builder
+	g.WritePrometheus(&sb)
+	if out := sb.String(); !strings.Contains(out, `mainspring_breaker_open{model="we\"ird\\model"} 1`) {
+		t.Fatalf("label value not escaped exactly once, got:\n%s", out)
+	}
+}

@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/ankit373/mainspring/internal/apierr"
 )
 
 func TestOpenMode(t *testing.T) {
@@ -180,5 +183,69 @@ func TestOpenModeAllowsAll(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("open mode should allow all, got %d", w.Code)
+	}
+}
+
+// The middleware's rejections must carry the shared error taxonomy, not a
+// hand-rolled JSON literal that can drift from the handlers' shape.
+func TestMiddlewareErrorsUseSharedTaxonomy(t *testing.T) {
+	decode := func(t *testing.T, w *httptest.ResponseRecorder) (typ, code string) {
+		t.Helper()
+		if ct := w.Header().Get("content-type"); ct != "application/json" {
+			t.Fatalf("content-type = %q, want application/json", ct)
+		}
+		var body struct {
+			Error struct{ Message, Type, Code string }
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode %q: %v", w.Body.String(), err)
+		}
+		if body.Error.Message == "" {
+			t.Fatal("error body carries no message")
+		}
+		return body.Error.Type, body.Error.Code
+	}
+
+	a := NewTenants([]Tenant{{Name: "t", Key: "k", Role: RoleInference, RateRPM: 1}})
+	h := a.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	do := func(key string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		if key != "" {
+			r.Header.Set("Authorization", "Bearer "+key)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	// 401: no key.
+	w := do("")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	if typ, code := decode(t, w); typ != "authentication_error" || code != "unauthorized" {
+		t.Fatalf("401 body = (%q, %q), want (authentication_error, unauthorized)", typ, code)
+	}
+	wantStatus, wantTyp := apierr.Meta(apierr.Unauthorized)
+	if w.Code != wantStatus {
+		t.Fatalf("401 status = %d, want the taxonomy's %d", w.Code, wantStatus)
+	}
+	if typ, _ := decode(t, w); typ != wantTyp {
+		t.Fatalf("401 type = %q, want the taxonomy's %q", typ, wantTyp)
+	}
+
+	// 429: rate limit exhausted (RateRPM 1, so the second request is rejected).
+	if do("k").Code != 200 {
+		t.Fatal("setup: first request should pass")
+	}
+	w = do("k")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("429 must still set Retry-After")
+	}
+	if typ, code := decode(t, w); typ != "rate_limit_error" || code != "rate_limited" {
+		t.Fatalf("429 body = (%q, %q), want (rate_limit_error, rate_limited)", typ, code)
 	}
 }

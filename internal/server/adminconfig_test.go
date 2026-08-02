@@ -181,3 +181,29 @@ func TestAdminConfigLintWarningsUpdateAfterReload(t *testing.T) {
 		t.Fatalf("expected the latest 2 warnings (not accumulated), got %v", warnings)
 	}
 }
+
+// The route is registered as `GET /admin/config`, and in net/http a GET pattern
+// also serves HEAD. The handler's own r.Method != GET check therefore only ever
+// fired for HEAD — answering 405 for a method the route does serve — while
+// /admin/usage, registered identically, had no such check. The mux is now the
+// only method gate, and the two agree.
+func TestAdminEndpointsLeaveMethodGatingToTheMux(t *testing.T) {
+	h := configTestServer(t, auth.New(nil)).Handler()
+	for _, path := range []string{"/admin/config", "/admin/usage"} {
+		req := httptest.NewRequest(http.MethodHead, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("HEAD %s = %d, want 200", path, w.Code)
+		}
+	}
+	// A method the route genuinely does not serve is still rejected — by the mux.
+	for _, path := range []string{"/admin/config", "/admin/usage"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s = %d, want 405", path, w.Code)
+		}
+	}
+}

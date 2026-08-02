@@ -67,10 +67,6 @@ func TestLatencyPercentiles(t *testing.T) {
 	if p.TTFTP50 != 6 {
 		t.Fatalf("TTFTP50 = %v, want 6", p.TTFTP50)
 	}
-	// TTFTp50 back-compat wrapper must agree.
-	if got := r.TTFTp50("m1"); got != p.TTFTP50 {
-		t.Fatalf("TTFTp50() = %v, want %v (LatencyPercentiles.TTFTP50)", got, p.TTFTP50)
-	}
 	if p.QueueWaitP50 != 600 {
 		t.Fatalf("QueueWaitP50 = %v, want 600", p.QueueWaitP50)
 	}
@@ -137,16 +133,18 @@ func TestTenantUsageRollup(t *testing.T) {
 	}
 }
 
-func TestTTFTp50(t *testing.T) {
+// TTFT percentiles for a model with no samples must read 0, not panic on a
+// missing stats entry.
+func TestLatencyPercentilesTTFT(t *testing.T) {
 	r, _ := New("")
-	if r.TTFTp50("none") != 0 {
+	if r.LatencyPercentiles("none").TTFTP50 != 0 {
 		t.Fatal("no samples => 0")
 	}
 	now := time.Unix(1700000000, 0)
 	for _, v := range []float64{10, 30, 20, 50, 40} { // median = 30
 		r.Record(Event{Time: now, Model: "m1", Status: 200, TTFTMs: v})
 	}
-	if got := r.TTFTp50("m1"); got != 30 {
+	if got := r.LatencyPercentiles("m1").TTFTP50; got != 30 {
 		t.Fatalf("p50 = %v, want 30", got)
 	}
 }
@@ -238,5 +236,32 @@ func TestLedgerWriteFailureIsLoggedOnce(t *testing.T) {
 
 	if n := strings.Count(logs.String(), "usage ledger write failed"); n != 1 {
 		t.Fatalf("logged the write failure %d times, want exactly 1:\n%s", n, logs.String())
+	}
+}
+
+// A model id containing a quote and a backslash must be escaped exactly once,
+// on every metric family. Wrapping the escaper in %q double-escaped it, so the
+// label a scraper read back was not the model id.
+func TestPrometheusEscapesLabelValueOnce(t *testing.T) {
+	r, _ := New("")
+	const model = `we"ird\model`
+	r.Record(Event{Time: time.Unix(1700000000, 0), Model: model, Status: 200, DurationMs: 10, TokensEst: 3})
+
+	var buf bytes.Buffer
+	r.WritePrometheus(&buf, Gauges{})
+	out := buf.String()
+	for _, want := range []string{
+		`mainspring_requests_total{model="we\"ird\\model",status="200"} 1`,
+		`mainspring_request_duration_ms_sum{model="we\"ird\\model"} 10`,
+		`mainspring_tokens_estimated_total{model="we\"ird\\model"} 3`,
+		`mainspring_duration_ms_p50{model="we\"ird\\model"} 10`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// The double-escaped form must be gone entirely.
+	if strings.Contains(out, `\\"`) {
+		t.Errorf("output still double-escapes the label value:\n%s", out)
 	}
 }

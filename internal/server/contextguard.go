@@ -57,17 +57,13 @@ const tokensPerCharDenom = 4
 // adds around each message.
 const perMessageOverhead = 4
 
-// contextOverage reports whether a request cannot fit the model's context and a
-// human-readable reason. maxTokens alone exceeding the limit is exact; the
-// combined prompt-estimate + maxTokens check is approximate (see estimate note).
-func contextOverage(body []byte, limit int) (bool, string) {
-	return contextOverageDetail(body, limit, estimatePromptTokens(body), false)
-}
-
-// contextOverageDetail is the core check with the prompt-token count supplied by
-// the caller: exact when counted with the model's real tokenizer, else an
-// estimate. The reason text labels which was used so the client can tell an
-// exact rejection from a heuristic one.
+// contextOverageDetail reports whether a request cannot fit the model's context
+// and a human-readable reason. The prompt-token count is supplied by the caller
+// — exact when counted with the model's real tokenizer, else the estimate from
+// estimatePromptTokens — and `exact` says which. maxTokens alone exceeding the
+// limit is always exact; the combined check inherits the caller's accuracy, and
+// the reason text labels it so a client can tell an exact rejection from a
+// heuristic one.
 func contextOverageDetail(body []byte, limit, promptTokens int, exact bool) (bool, string) {
 	maxTok := maxTokensRequested(body)
 

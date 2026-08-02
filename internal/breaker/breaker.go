@@ -10,6 +10,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/util"
 )
 
 // State is a breaker's lifecycle state.
@@ -227,27 +229,11 @@ func (g *Group) WritePrometheus(w io.Writer) {
 func writeGauge(w io.Writer, name, model string, v int) {
 	io.WriteString(w, name)
 	io.WriteString(w, "{model=\"")
-	io.WriteString(w, esc(model))
+	io.WriteString(w, util.PromLabelValue(model))
 	io.WriteString(w, "\"} ")
 	if v == 1 {
 		io.WriteString(w, "1\n")
 	} else {
 		io.WriteString(w, "0\n")
 	}
-}
-
-// esc escapes a Prometheus label value.
-func esc(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		switch r {
-		case '\\', '"':
-			out = append(out, '\\', r)
-		case '\n':
-			out = append(out, '\\', 'n')
-		default:
-			out = append(out, r)
-		}
-	}
-	return string(out)
 }

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/util"
 )
 
 // gate bounds concurrent inference per model: at most maxInflight requests run
@@ -133,26 +135,10 @@ func (g *gate) writePrometheus(w io.Writer) {
 
 	fmt.Fprint(w, "# HELP mainspring_inflight_requests In-flight inference requests by model.\n# TYPE mainspring_inflight_requests gauge\n")
 	for _, m := range models {
-		fmt.Fprintf(w, "mainspring_inflight_requests{model=%q} %d\n", esc(m), inflight[m])
+		fmt.Fprintf(w, "mainspring_inflight_requests{model=\"%s\"} %d\n", util.PromLabelValue(m), inflight[m])
 	}
 	fmt.Fprint(w, "# HELP mainspring_queued_requests Queued (waiting) inference requests by model.\n# TYPE mainspring_queued_requests gauge\n")
 	for _, m := range models {
-		fmt.Fprintf(w, "mainspring_queued_requests{model=%q} %d\n", esc(m), queued[m])
+		fmt.Fprintf(w, "mainspring_queued_requests{model=\"%s\"} %d\n", util.PromLabelValue(m), queued[m])
 	}
-}
-
-// esc escapes a Prometheus label value.
-func esc(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		switch r {
-		case '\\', '"':
-			out = append(out, '\\', r)
-		case '\n':
-			out = append(out, '\\', 'n')
-		default:
-			out = append(out, r)
-		}
-	}
-	return string(out)
 }
