@@ -466,17 +466,22 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		served    string
 		queueWait time.Duration
 	)
+candidates:
 	for _, cand := range s.candidatesFor(model) {
-		rr, rel, wait, busy, okc := s.acquireRunner(r, cand)
+		rr, rel, wait, out := s.acquireRunner(r, cand)
 		queueWait += wait
-		if busy {
+		switch out {
+		case acquireBusy:
 			w.Header().Set("Retry-After", "1")
 			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
 			return
-		}
-		if okc {
+		case acquireCancelled:
+			// The caller disconnected while queued; a 503 would be written to a
+			// dead connection and would misreport why the request ended.
+			return
+		case acquireOK:
 			runner, release, served = rr, rel, cand
-			break
+			break candidates
 		}
 	}
 	if runner == nil {
@@ -516,16 +521,30 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// idle timer and LRU eviction never pull it out from under a long-running
 	// request (e.g. one that streams longer than KeepAlive).
 	s.sched.MarkBusy(served)
-	retries := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
+	pr := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
 	s.sched.MarkIdle(served)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
-	// (4xx is a client error, not the backend's fault).
-	s.breaker.OnResult(served, cap.status < 500)
+	// (4xx is a client error, not the backend's fault). backendFailed covers what
+	// the status cannot: once a response is committed — 200 for a stream — a body
+	// that stops early would otherwise be recorded as a success.
+	//
+	// A caller that abandoned its own request is neither: it never learned whether
+	// the backend was healthy. Recording a failure would let client disconnects open
+	// the circuit for every tenant; recording a success would clear the failure
+	// count, letting a flaky client hold a broken backend's circuit closed.
+	if pr.abandoned {
+		s.breaker.OnAbandoned(served)
+	} else {
+		s.breaker.OnResult(served, !pr.backendFailed && cap.status < 500)
+	}
 
 	prompt, completion, exact := cap.usage()
-	// Build the shareable value once for a successful, non-streaming, within-cap
-	// primary-model response, then feed it to the cache and/or coalesce followers.
-	if served == model && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
+	// Build the shareable value once for a successful, non-streaming, within-cap,
+	// *completely delivered* primary-model response, then feed it to the cache
+	// and/or coalesce followers. A truncated body is never shareable: storing it
+	// would replay one severed answer to every later caller for the life of the
+	// entry, and publish it to the followers already waiting on this request.
+	if served == model && !pr.incomplete && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
 		shared := cache.Value{
 			Status:     cap.status,
 			Header:     cap.snapHeader,
@@ -564,7 +583,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			TokensEst:    completion,
 			Exact:        exact,
 			CostUSD:      s.costFor(served, prompt, completion, exact),
-			Retries:      retries,
+			Retries:      pr.retries,
 			Fallback:     served != model,
 			QueueWaitMs:  float64(queueWait.Microseconds()) / 1000.0,
 		})

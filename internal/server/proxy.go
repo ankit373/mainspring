@@ -3,9 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -53,6 +57,26 @@ func retryableStatus(code int) bool {
 		code == http.StatusGatewayTimeout
 }
 
+// proxyResult reports what a proxied request actually did, beyond what the
+// status line can express. Once a response is committed the status is on the
+// wire — pinned at 200 for a stream — so a body that stops early needs an
+// explicit signal or it is indistinguishable from a complete answer.
+type proxyResult struct {
+	retries       int  // additional upstream attempts incurred (0 = succeeded first try)
+	incomplete    bool // the body did not arrive in full → never cacheable or shareable
+	backendFailed bool // the break was the backend's fault (not a caller's own abort)
+	abandoned     bool // the caller went away; the request says nothing about the backend
+}
+
+// clientGone reports whether the caller cancelled its own request. Such a
+// request gets no response written — the connection is already gone — and is
+// never charged to the circuit breaker, since otherwise enough client
+// disconnects would open the circuit for every tenant. A deadline is
+// deliberately excluded: a timeout *is* a backend failure.
+func clientGone(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
+}
+
 // proxyTo forwards the (already-read) request body to baseURL+path and streams
 // the response back, flushing each chunk so SSE tokens arrive live. The client's
 // Authorization is intentionally not forwarded — backend engines are local and
@@ -61,28 +85,33 @@ func retryableStatus(code int) bool {
 // Transient failures (connection errors, retryable statuses) are retried with
 // exponential backoff up to s.retryMax additional attempts. Retry is always
 // decided *before* any byte reaches the client, so it is safe for both
-// streaming and non-streaming responses. It returns the number of retries the
-// request incurred (0 when it succeeded first try).
-func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string, body []byte, extra map[string]string) int {
+// streaming and non-streaming responses.
+func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string, body []byte, extra map[string]string) proxyResult {
 	attempts := s.retryMax + 1
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 && !sleepBackoff(r.Context(), s.retryBackoff, attempt) {
+			if clientGone(r.Context()) {
+				return proxyResult{retries: attempt, abandoned: true}
+			}
 			writeErr(w, codeTimeout, "request timed out")
-			return attempt
+			return proxyResult{retries: attempt}
 		}
 		last := attempt == attempts-1
 
 		resp, err := s.upstreamDo(r, baseURL, body)
 		if err != nil {
-			if r.Context().Err() == context.DeadlineExceeded {
+			if clientGone(r.Context()) {
+				return proxyResult{retries: attempt, abandoned: true}
+			}
+			if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 				writeErr(w, codeTimeout, "request timed out")
-				return attempt
+				return proxyResult{retries: attempt}
 			}
 			if !last {
 				continue // transient connection error → retry
 			}
 			writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-			return attempt
+			return proxyResult{retries: attempt}
 		}
 
 		if !last && retryableStatus(resp.StatusCode) {
@@ -96,9 +125,43 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 		if attempt > 0 {
 			w.Header().Set("X-Mainspring-Retries", strconv.Itoa(attempt))
 		}
-		s.commitResponse(w, resp, extra)
+		copyErr := s.commitResponse(w, resp, extra)
+		stream := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 		_ = resp.Body.Close()
-		return attempt
+		if copyErr == nil {
+			return proxyResult{retries: attempt}
+		}
+		// The answer was severed. The status is already on the wire, so for a
+		// stream a terminal error frame is the only signal the client will get.
+		clientLeft := clientGone(r.Context()) || errors.Is(copyErr, errClientWrite)
+		if stream {
+			switch {
+			case errors.Is(r.Context().Err(), context.DeadlineExceeded):
+				sseError(w, codeTimeout, "stream exceeded the per-request timeout")
+			case clientLeft:
+				sseError(w, codeInternal, "stream cancelled before completion")
+			default:
+				sseError(w, codeUpstreamError, "upstream stream ended prematurely: "+copyErr.Error())
+			}
+		}
+		return proxyResult{retries: attempt, incomplete: true, backendFailed: !clientLeft, abandoned: clientLeft}
+	}
+}
+
+// sseError emits a terminal `error` frame on an already-open SSE stream, in the
+// OpenAI dialect and carrying Mainspring's error taxonomy — the counterpart to
+// streamError on the Anthropic path.
+func sseError(w http.ResponseWriter, code errorCode, msg string) {
+	m, ok := codeMeta[code]
+	if !ok {
+		m = codeMeta[codeInternal]
+	}
+	b, _ := json.Marshal(map[string]any{
+		"error": map[string]string{"message": msg, "type": m.typ, "code": string(code)},
+	})
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", b)
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
 	}
 }
 
@@ -120,8 +183,9 @@ func (s *Server) upstreamDo(r *http.Request, baseURL string, body []byte) (*http
 }
 
 // commitResponse copies the upstream headers (minus hop-by-hop), applies the
-// fail-loud extras, writes the status, and streams the body to the client.
-func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response, extra map[string]string) {
+// fail-loud extras, writes the status, and streams the body to the client. It
+// returns the body-copy error, nil only when the whole body was delivered.
+func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response, extra map[string]string) error {
 	for k, vs := range resp.Header {
 		if hopByHop[http.CanonicalHeaderKey(k)] {
 			continue
@@ -134,7 +198,7 @@ func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response, extr
 		w.Header().Set(k, v)
 	}
 	w.WriteHeader(resp.StatusCode)
-	flushCopy(w, resp.Body)
+	return flushCopy(w, resp.Body)
 }
 
 // sleepBackoff waits an exponential delay before retry `attempt` (1-based),
@@ -158,22 +222,35 @@ func sleepBackoff(ctx context.Context, base time.Duration, attempt int) bool {
 	}
 }
 
+// errClientWrite marks a copy that failed writing to the *client* rather than
+// reading from the upstream: the caller's connection died, which is never the
+// backend's fault. The request context alone cannot say so — it races the write
+// and may not be cancelled yet.
+var errClientWrite = errors.New("write to client failed")
+
 // flushCopy streams src to w, flushing after every chunk for live SSE delivery.
-func flushCopy(w http.ResponseWriter, src io.Reader) {
+// It returns nil only when src ended at io.EOF and every byte reached the
+// client; any other terminal condition is returned, because a caller that
+// cannot tell a finished body from a severed one will serve — and cache — a
+// truncation as a success.
+func flushCopy(w http.ResponseWriter, src io.Reader) error {
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	for {
 		n, rerr := src.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
+				return fmt.Errorf("%w: %v", errClientWrite, werr)
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 		if rerr != nil {
-			return
+			if errors.Is(rerr, io.EOF) {
+				return nil
+			}
+			return rerr
 		}
 	}
 }

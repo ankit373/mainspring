@@ -33,9 +33,21 @@ MIT and already win; Mainspring wraps them).
   is never flagged degraded just for not using the GPU. The same rule governs failures: an upstream
   non-2xx is reported as an error (5xx becomes 502 `upstream_error`) and never decoded into an empty
   success, and a generation cut mid-stream ends with a terminal error event rather than a fabricated
-  stop reason — on Anthropic `/v1/messages` that is an `error` SSE event carrying Mainspring's error
-  code. A truncated stream is also reported to the circuit breaker as the backend failure it is, which
-  the HTTP status cannot express once the stream is already open at 200.
+  stop reason — an `error` SSE event carrying Mainspring's error code on both dialects (Anthropic
+  `/v1/messages` and the OpenAI `/v1/chat/completions` proxy path). A truncated stream is also reported
+  to the circuit breaker as the backend failure it is, which the HTTP status cannot express once the
+  stream is already open at 200. A truncated *non-streaming* body is never treated as a result: it is
+  not stored in the response cache and not published to coalescing followers, so one severed read can
+  never be replayed as a success.
+- Correct failure attribution: a caller that cancels its own request (Ctrl-C, closed tab, aborted SDK
+  call) learned nothing about the backend, so it votes neither way. It is not charged to the circuit
+  breaker as a failure — client disconnects cannot open the circuit for every tenant — and equally it
+  is not recorded as a success, which would clear the banked failure count and let a flaky client hold
+  a genuinely broken backend's circuit closed. If the abandoned request was holding the half-open
+  probe, the probe is released so the next caller takes it immediately rather than waiting out another
+  cooldown. Nothing is written back to the abandoned connection either (a caller cancelled while queued
+  for a concurrency slot gets no misleading `503 server_busy`). A per-request *timeout* is deliberately
+  the other way: it is the backend's fault and still counts as a failure.
 - VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
   unload, optional preload at startup. Eviction (idle-timeout and capacity/LRU alike) never pulls a
   runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or

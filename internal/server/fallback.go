@@ -38,27 +38,38 @@ func (s *Server) candidatesFor(primary string) []string {
 	return out
 }
 
+// acquireOutcome is why acquireRunner ended.
+type acquireOutcome int
+
+const (
+	acquireOK          acquireOutcome = iota // runner reserved; release must be called
+	acquireUnavailable                       // circuit open or load failure → the caller may try a fallback
+	acquireBusy                              // the gate is saturated → backpressure, the caller should stop
+	acquireCancelled                         // the caller went away while queued → write nothing
+)
+
 // acquireRunner reserves a concurrency slot and loads one candidate model. The
-// returned release must be called when the request finishes. busy=true means the
-// gate is saturated for this model (backpressure — not a fallback trigger, the
-// caller should stop). ok=false with busy=false means the model is unavailable
-// (circuit open or load failure) and the caller may try a fallback. wait is the
-// time spent queued for a gate slot (0 when gating is disabled or a slot was
-// immediately free), reported regardless of the final outcome.
-func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Runner, release func(), wait time.Duration, busy, ok bool) {
-	rel, wait, acquired := s.gate.acquire(r.Context(), model)
-	if !acquired {
-		return nil, nil, wait, true, false
+// returned release must be called when the request finishes (it is nil unless
+// the outcome is acquireOK). wait is the time spent queued for a gate slot (0
+// when gating is disabled or a slot was immediately free), reported regardless
+// of the final outcome.
+func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Runner, release func(), wait time.Duration, out acquireOutcome) {
+	rel, wait, res := s.gate.acquire(r.Context(), model)
+	switch res {
+	case gateFull:
+		return nil, nil, wait, acquireBusy
+	case gateCancelled:
+		return nil, nil, wait, acquireCancelled
 	}
 	if !s.breaker.Allow(model) {
 		rel()
-		return nil, nil, wait, false, false
+		return nil, nil, wait, acquireUnavailable
 	}
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
 		s.breaker.OnResult(model, false)
 		rel()
-		return nil, nil, wait, false, false
+		return nil, nil, wait, acquireUnavailable
 	}
-	return runner, rel, wait, false, true
+	return runner, rel, wait, acquireOK
 }

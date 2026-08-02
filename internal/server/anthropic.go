@@ -141,10 +141,14 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
 		return
 	}
-	release, queueWait, ok := s.gate.acquire(r.Context(), model)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
+	release, queueWait, res := s.gate.acquire(r.Context(), model)
+	if res != gateAcquired {
+		// gateCancelled means the caller is already gone: writing a 503 there would
+		// report backpressure that never happened, to a dead connection.
+		if res == gateFull {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
+		}
 		return
 	}
 	defer release()
@@ -194,7 +198,14 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	// would otherwise be recorded as a success. Without any of this the breaker never
 	// learns that a /v1/messages request succeeded — and a half-open probe consumed by
 	// this path would never resolve.
-	s.breaker.OnResult(model, !backendFailed && cap.status < 500)
+	//
+	// A caller that abandoned its own request learned nothing about the backend, so
+	// it votes neither way — see Group.OnAbandoned.
+	if clientGone(r.Context()) {
+		s.breaker.OnAbandoned(model)
+	} else {
+		s.breaker.OnResult(model, !backendFailed && cap.status < 500)
+	}
 
 	charge := completion
 	if exact {
