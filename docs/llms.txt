@@ -13,7 +13,9 @@ MIT and already win; Mainspring wraps them).
 ## What it does
 
 - One versioned API: OpenAI (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-  `/v1/models`) and Anthropic (`/v1/messages`, tool use + images + streaming translated).
+  `/v1/models`) and Anthropic (`/v1/messages`, tool use + images + streaming translated). Both dialects
+  are SDK-verified in CI: the real `openai` and `anthropic` Python and JS clients drive a running
+  server on every push, over the happy path *and* the failure paths (upstream 5xx, truncated stream).
 - Per-model backend routing: one server can serve a GGUF via llama.cpp, an MLX model, and an adopted
   Ollama/LM Studio/llamafile/GPT4All model simultaneously.
 - Per-model fallback chains: a model can declare ordered `fallbacks`; if the primary backend can't
