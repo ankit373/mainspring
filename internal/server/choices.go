@@ -81,7 +81,10 @@ func (cc *choiceCheck) observe(resp *http.Response) (io.Reader, string, error) {
 		return resp.Body, "", nil
 	}
 	if isEventStream(resp.Header.Get("Content-Type")) {
-		cc.seen = make(map[int]bool, cc.want)
+		// Deliberately unsized: want is caller-controlled, so hinting the map with it
+		// would let `"n": 1000000000` reserve gigabytes. The map only ever grows to
+		// the indices the engine really emitted.
+		cc.seen = map[int]bool{}
 		return io.TeeReader(resp.Body, cc), "", nil
 	}
 	head, err := io.ReadAll(io.LimitReader(resp.Body, choiceBodyCap+1))
