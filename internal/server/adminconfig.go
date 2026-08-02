@@ -11,10 +11,6 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if r.Method != http.MethodGet {
-		writeErr(w, codeMethodNotAllowed, "method not allowed")
-		return
-	}
 
 	// Timeouts.
 	timeouts := map[string]any{"default_seconds": s.defaultTimeout.Seconds()}

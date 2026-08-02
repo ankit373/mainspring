@@ -6,19 +6,8 @@ import (
 	"testing"
 )
 
-func TestEveryCodeHasMeta(t *testing.T) {
-	all := []errorCode{
-		codeInvalidRequest, codeMethodNotAllowed, codeModelNotFound, codeUnauthorized,
-		codeForbidden, codeRateLimited, codeTokenBudget, codeServerBusy, codeCircuitOpen,
-		codeBackendUnavailable, codeUpstreamError, codeTimeout, codeInternal,
-	}
-	for _, c := range all {
-		m, ok := codeMeta[c]
-		if !ok || m.status == 0 || m.typ == "" {
-			t.Fatalf("code %q missing status/type in codeMeta", c)
-		}
-	}
-}
+// The taxonomy itself is tested in internal/apierr. What matters here is that
+// this package's helpers still route through it and emit the same shape.
 
 func TestWriteErrShape(t *testing.T) {
 	w := httptest.NewRecorder()
@@ -39,26 +28,7 @@ func TestWriteErrShape(t *testing.T) {
 	}
 }
 
-func TestStatusToCodeMapping(t *testing.T) {
-	cases := map[int]errorCode{
-		400: codeInvalidRequest,
-		404: codeModelNotFound,
-		401: codeUnauthorized,
-		403: codeForbidden,
-		429: codeRateLimited,
-		502: codeUpstreamError,
-		503: codeBackendUnavailable,
-		504: codeTimeout,
-		418: codeInternal, // unknown => internal
-	}
-	for status, want := range cases {
-		if got := statusToCode(status); got != want {
-			t.Fatalf("statusToCode(%d) = %q, want %q", status, got, want)
-		}
-	}
-}
-
-// legacy writeError must now emit a correct type/code, not a hardcoded one.
+// legacy writeError must emit a correct type/code, not a hardcoded one.
 func TestLegacyWriteErrorClassifies(t *testing.T) {
 	w := httptest.NewRecorder()
 	writeError(w, 404, "nope")

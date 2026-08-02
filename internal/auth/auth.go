@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/apierr"
 )
 
 type ctxKey int
@@ -251,10 +253,12 @@ func bearer(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("x-api-key"))
 }
 
+// The middleware rejects requests before any handler runs, so unauthorized and
+// tooManyRequests emit through the shared taxonomy (internal/apierr) rather
+// than hand-rolling the JSON: a 401 from here and a 401 from a handler are the
+// same wire shape by construction, not by two literals being kept in sync.
 func unauthorized(w http.ResponseWriter) {
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(`{"error":{"message":"invalid or missing API key","type":"authentication_error","code":"unauthorized"}}`))
+	apierr.Write(w, apierr.Unauthorized, "invalid or missing API key")
 }
 
 func tooManyRequests(w http.ResponseWriter, retry time.Duration) {
@@ -263,7 +267,5 @@ func tooManyRequests(w http.ResponseWriter, retry time.Duration) {
 		secs = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusTooManyRequests)
-	_, _ = w.Write([]byte(`{"error":{"message":"rate limit exceeded","type":"rate_limit_error","code":"rate_limited"}}`))
+	apierr.Write(w, apierr.RateLimited, "rate limit exceeded")
 }

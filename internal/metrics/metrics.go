@@ -12,9 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/util"
 )
 
 // Event is one completed inference request.
@@ -272,13 +273,6 @@ func (r *Recorder) LatencyPercentiles(model string) Percentiles {
 	}
 }
 
-// TTFTp50 returns the median time-to-first-token (ms) for a model over its
-// recent samples, or 0 when there are none. Kept for existing callers;
-// equivalent to LatencyPercentiles(model).TTFTP50.
-func (r *Recorder) TTFTp50(model string) float64 {
-	return r.LatencyPercentiles(model).TTFTP50
-}
-
 // Costs returns accumulated USD spend per model and the grand total. Models with
 // no configured rate contribute 0.
 func (r *Recorder) Costs() (perModel map[string]float64, total float64) {
@@ -372,7 +366,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 		}
 		sort.Ints(statuses)
 		for _, s := range statuses {
-			fmt.Fprintf(w, "mainspring_requests_total{model=%q,status=\"%d\"} %d\n", esc(rw.model), s, rw.statuses[s])
+			fmt.Fprintf(w, "mainspring_requests_total{model=\"%s\",status=\"%d\"} %d\n", util.PromLabelValue(rw.model), s, rw.statuses[s])
 		}
 	}
 
@@ -419,7 +413,7 @@ type rowT = struct {
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
 	for _, rw := range rows {
-		fmt.Fprintf(w, "%s{model=%q} %g\n", name, esc(rw.model), val(rw))
+		fmt.Fprintf(w, "%s{model=\"%s\"} %g\n", name, util.PromLabelValue(rw.model), val(rw))
 	}
 }
 
@@ -428,21 +422,13 @@ func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) fl
 func writeGauge(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
 	for _, rw := range rows {
-		fmt.Fprintf(w, "%s{model=%q} %g\n", name, esc(rw.model), val(rw))
+		fmt.Fprintf(w, "%s{model=\"%s\"} %g\n", name, util.PromLabelValue(rw.model), val(rw))
 	}
 }
 
 func writeCounterI(w io.Writer, name, help string, rows []rowT, val func(rowT) int64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
 	for _, rw := range rows {
-		fmt.Fprintf(w, "%s{model=%q} %d\n", name, esc(rw.model), val(rw))
+		fmt.Fprintf(w, "%s{model=\"%s\"} %d\n", name, util.PromLabelValue(rw.model), val(rw))
 	}
-}
-
-// esc escapes a Prometheus label value.
-func esc(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	return s
 }

@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
 )
 
@@ -45,8 +44,7 @@ type modelQuality struct {
 // quality implements GET /v1/quality. Gated like /capabilities: an authenticated
 // caller must be admin; open mode allows it.
 func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
-	if t, ok := auth.FromContext(r.Context()); ok && t.Role != auth.RoleAdmin {
-		writeError(w, http.StatusForbidden, "admin role required")
+	if !s.requireAdmin(w, r) {
 		return
 	}
 

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ankit373/mainspring/internal/apierr"
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
 	"github.com/ankit373/mainspring/internal/breaker"
@@ -287,9 +288,7 @@ func (s *Server) modelDetail(w http.ResponseWriter, r *http.Request) {
 // the real backend/device/effective-ctx for every loaded model and whether any
 // is running degraded (CPU fallback or shrunk context).
 func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
-	// Management endpoint: admin role required (open mode has no tenant → allow).
-	if t, ok := auth.FromContext(r.Context()); ok && t.Role != auth.RoleAdmin {
-		writeError(w, http.StatusForbidden, "admin role required")
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -625,17 +624,14 @@ func (s *Server) recordRejected(ctx context.Context, model string, code errorCod
 	if s.metrics == nil {
 		return
 	}
-	m, ok := codeMeta[code]
-	if !ok {
-		m = codeMeta[codeInternal]
-	}
+	status, _ := apierr.Meta(code)
 	s.metrics.Record(metrics.Event{
 		Time:       since,
 		RequestID:  RequestID(ctx),
 		TraceID:    TraceID(ctx),
 		Model:      model,
 		Tenant:     auth.TenantOf(ctx),
-		Status:     m.status,
+		Status:     status,
 		ErrorCode:  string(code),
 		DurationMs: ms(time.Since(since)),
 	})

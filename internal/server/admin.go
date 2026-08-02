@@ -19,8 +19,11 @@ import (
 // When nil, the endpoint reports 501 Not Implemented.
 func (s *Server) SetReloadFunc(fn func() error) { s.reloadFn = fn }
 
-// requireAdmin returns true if the caller may use management endpoints: an
-// authenticated caller must be admin; open mode (no auth) allows.
+// requireAdmin is the single admin gate for every management endpoint — the
+// /admin/* actions plus /capabilities and /v1/quality. It returns true if the
+// caller may proceed: an authenticated caller must be admin; open mode (no
+// auth, so no tenant to check) allows. One authorization decision, one place:
+// a second copy is how an authorization bug ships.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if t, ok := auth.FromContext(r.Context()); ok && t.Role != auth.RoleAdmin {
 		writeErr(w, codeForbidden, "admin role required")

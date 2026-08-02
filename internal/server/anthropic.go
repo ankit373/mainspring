@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ankit373/mainspring/internal/apierr"
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/metrics"
 )
@@ -734,12 +735,9 @@ func writeUpstreamFailure(w http.ResponseWriter, resp *http.Response) {
 // streamError emits an Anthropic `error` SSE event carrying Mainspring's error
 // taxonomy, so a stream that ends abnormally says so on the wire.
 func streamError(send func(event string, data any), code errorCode, msg string) {
-	m, ok := codeMeta[code]
-	if !ok {
-		m = codeMeta[codeInternal]
-	}
+	_, typ := apierr.Meta(code)
 	send("error", map[string]any{"type": "error", "error": map[string]string{
-		"type": m.typ, "code": string(code), "message": msg,
+		"type": typ, "code": string(code), "message": msg,
 	}})
 }
 

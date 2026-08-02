@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/apierr"
 )
 
 // proxyClient streams from backend runners. No overall timeout — generations and
@@ -159,13 +161,7 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 // OpenAI dialect and carrying Mainspring's error taxonomy — the counterpart to
 // streamError on the Anthropic path.
 func sseError(w http.ResponseWriter, code errorCode, msg string) {
-	m, ok := codeMeta[code]
-	if !ok {
-		m = codeMeta[codeInternal]
-	}
-	b, _ := json.Marshal(map[string]any{
-		"error": map[string]string{"message": msg, "type": m.typ, "code": string(code)},
-	})
+	b, _ := json.Marshal(apierr.Body(code, msg))
 	fmt.Fprintf(w, "event: error\ndata: %s\n\n", b)
 	if fl, ok := w.(http.Flusher); ok {
 		fl.Flush()
