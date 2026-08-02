@@ -115,12 +115,15 @@ MIT and already win; Mainspring wraps them).
   A replay only carries headers that describe the stored payload (`content-type`,
   `X-Mainspring-Backend`/`-Device`/`-Warning`). The caller's own `X-Request-ID` and quota headroom come
   from this request, never from the leader's — no cross-tenant header ever replays.
-- Path scope (what applies where): the admission pipeline — API-key auth, per-tenant rate + token budgets,
+- Path scope: there is no longer one. The whole pipeline — API-key auth, per-tenant rate + token budgets,
   the context guardrail, `clamp_max_tokens`, `precise_context`, the concurrency gate + queue, the circuit
-  breaker, per-request timeouts, cost accounting, and now the response cache and request coalescing —
-  applies to **both** the OpenAI endpoints and Anthropic `/v1/messages`. Each dialect caches its own wire
-  shape (an Anthropic caller is replayed an Anthropic message), keyed by request path, so the two can
-  never serve one another's bodies. Still OpenAI-path only: retry-with-backoff and model fallback chains.
+  breaker, per-request timeouts, cost accounting, the response cache, request coalescing,
+  retry-with-backoff and model fallback chains — applies to **both** the OpenAI endpoints and Anthropic
+  `/v1/messages`. The two dialects differ in what they put on the wire, not in how a request is governed.
+  Each caches its own wire shape (an Anthropic caller is replayed an Anthropic message), keyed by request
+  path, so they can never serve one another's bodies. Retry on the Anthropic path carries the same safety
+  property as the OpenAI one: it is decided after the upstream status is known and before a single SSE
+  frame is emitted, never once a stream has started.
 - Cost accounting: optional per-model USD pricing (`input_usd_per_mtok` / `output_usd_per_mtok`, 0 =
   local/free) turns real token usage into spend. Cost lands in the usage ledger (`cost_usd`), a
   `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real

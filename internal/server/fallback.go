@@ -85,3 +85,54 @@ func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Ru
 	}
 	return runner, rel, wait, acquireOK
 }
+
+// selectRunner picks a model that can actually serve this request: the requested
+// one, then each configured model_fallback in turn. A candidate is skipped only
+// for a pre-serve failure (circuit open or load error) — gate saturation is
+// backpressure, not a reason to answer as a different model.
+//
+// When nothing is servable, or the caller went away, it writes and records the
+// outcome itself and returns ok=false, meaning the handler must return
+// immediately. Otherwise release must be deferred by the caller.
+//
+// Shared by both dialects: they differ in what they send upstream, not in how
+// they choose who sends it.
+func (s *Server) selectRunner(w http.ResponseWriter, r *http.Request, model string, recvd time.Time) (runner backend.Runner, release func(), served string, queueWait time.Duration, ok bool) {
+	sawBreaker := false // a candidate was refused by an open circuit, not a load failure
+candidates:
+	for _, cand := range s.candidatesFor(model) {
+		rr, rel, wait, out := s.acquireRunner(r, cand)
+		queueWait += wait
+		switch out {
+		case acquireBusy:
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
+			s.recordRejected(r.Context(), cand, codeServerBusy, recvd)
+			return nil, nil, "", queueWait, false
+		case acquireCancelled:
+			// The caller disconnected while queued; a 503 would be written to a
+			// dead connection and would misreport why the request ended.
+			return nil, nil, "", queueWait, false
+		case acquireCircuitOpen:
+			sawBreaker = true
+		case acquireOK:
+			runner, release, served = rr, rel, cand
+			break candidates
+		}
+	}
+	if runner == nil {
+		// `circuit_open` is only true when a breaker actually refused a candidate.
+		// Every other way to get here — including every way to get here with the
+		// breaker disabled — is a load failure, and a client branching on the
+		// stable code must not be told a circuit tripped when none exists.
+		code := codeBackendUnavailable
+		if sawBreaker {
+			code = codeCircuitOpen
+		}
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, code, "no available backend for "+model+" or its fallbacks")
+		s.recordRejected(r.Context(), model, code, recvd)
+		return nil, nil, "", queueWait, false
+	}
+	return runner, release, served, queueWait, true
+}

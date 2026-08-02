@@ -30,6 +30,8 @@ type msgEvent struct {
 	PromptTokens int64   `json:"prompt_tokens"`
 	TokensEst    int64   `json:"tokens_est"`
 	CostUSD      float64 `json:"cost_usd"`
+	Retries      int     `json:"retries"`
+	Fallback     bool    `json:"fallback"`
 }
 
 // messagesLedgerServer builds a /v1/messages handler over baseURL with a JSONL

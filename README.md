@@ -32,10 +32,10 @@ layer around them **fail loud, VRAM-aware, and governed**.
 - **One stable, versioned OpenAI *and* Anthropic API** — `/v1/chat/completions`, `/completions`,
   `/embeddings`, `/models`, and Anthropic `/v1/messages` (text **and** tool use, streaming translated) —
   **both dialects validated against their real Python and JS SDKs in CI**, failure paths included (an
-  upstream 5xx, a stream cut mid-flight). Both dialects run the same admission
-  pipeline: auth, per-tenant budgets, context guardrail, clamp, concurrency gate, timeouts, circuit
-  breaker and cost accounting. (The response cache, request coalescing, retry and model fallback
-  chains are OpenAI-path only today.)
+  upstream 5xx, a stream cut mid-flight). Both dialects also run the **same** pipeline — auth,
+  per-tenant budgets, context guardrail, clamp, concurrency gate, timeouts, circuit breaker, cost
+  accounting, response cache, coalescing, retry and model fallback. They differ in what they put on
+  the wire, not in how a request is governed.
 - **Pluggable backends** behind a `Backend`/`Runner` interface: `llamacpp` and `mlx` (managed
   subprocess) · `ollama` / `lmstudio` / `llamafile` / `gpt4all` (detect-and-adopt-only, never installed).
   **Per-model routing, aliases, and ordered fallback chains** — one server can serve several models on
