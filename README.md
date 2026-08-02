@@ -73,7 +73,9 @@ layer around them **fail loud, VRAM-aware, and governed**.
 - **Cost accounting** — optional per-model USD pricing turns real usage into spend, surfaced in the
   usage ledger, a `mainspring_cost_usd_total` metric, and `/v1/quality` (a real cost signal for routing).
 - **Operability** — Prometheus `/metrics`, JSONL usage ledger, `X-Request-ID` + W3C `traceparent`
-  propagation, optional access log, **SIGHUP hot-reload** (carries flag-supplied models and keys
+  propagation, optional access log, **a config file read strictly** (a misspelled key is a startup
+  error naming the nearest real field, never a silently dropped line that leaves a guardrail off),
+  **SIGHUP hot-reload** (carries flag-supplied models and keys
   across, and refuses any reload that would leave a running server unauthenticated), an **admin API**
   (drain / reload / model load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a
   trust control plane like Hydra can consume.
