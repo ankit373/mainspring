@@ -147,8 +147,11 @@ MIT and already win; Mainspring wraps them).
   via `GET /admin/config`'s `lint_warnings` field — reflecting the config as of the last successful
   load/reload, not just startup, so an operator can check for silently-inert settings on a running server
   without digging through logs.
-- Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
-  Never installs anything unless you run `mainspring install`.
+- Opt-in, verified managed install: never installs anything unless you run `mainspring install`, and
+  every install is SHA-256-verified against an expected hash, refusing on a mismatch. Mainspring ships
+  no curated artifact catalogue — the embedded manifest is empty by design, so you supply the artifact
+  with `--url` + `--sha256`, or your own manifest file (optionally ed25519-signed via `--pubkey`).
+  Running `mainspring install <backend>` with nothing supplied says so plainly rather than guessing.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
   ServiceMonitor, GPU node scheduling). Optional TLS (tls_cert/tls_key => HTTPS, TLS 1.2 minimum).
 - Graceful drain: `/readyz` flips to 503 on shutdown so load balancers stop routing while in-flight
