@@ -182,5 +182,40 @@ try {
   check("unknown model raises 404", e.status === 404);
 }
 
+// ── 8. count_tokens ───────────────────────────────────────────────────────────
+// Cheap by construction: the pre-flight count never reaches the upstream.
+const ct = await client.messages.countTokens({
+  model: MODEL, messages: [{ role: "user", content: "hi" }],
+});
+check("countTokens reports input_tokens", ct.input_tokens > 0);
+
+const { data: counted, response: countRes } = await client.messages.countTokens({
+  model: MODEL, messages: [{ role: "user", content: "a considerably longer prompt".repeat(20) }],
+}).withResponse();
+check("countTokens grows with the prompt", counted.input_tokens > ct.input_tokens);
+// The body is fixed by the Anthropic contract, so exact-vs-estimated rides on a
+// header rather than being left for the caller to assume.
+check("countTokens declares whether the count was exact or estimated",
+  ["exact", "estimated"].includes(countRes.headers.get("x-mainspring-tokens-method")));
+
+try {
+  await client.messages.countTokens({
+    model: "does-not-exist", messages: [{ role: "user", content: "x" }],
+  });
+  fail("countTokens on an unknown model raises 404", "no error raised");
+} catch (e) {
+  check("countTokens on an unknown model raises 404", e.status === 404);
+  check("countTokens 404 carries the model_not_found code", errCode(e) === "model_not_found");
+}
+
+// ── 9. an unrouted path answers inside the error taxonomy ─────────────────────
+try {
+  await client.get("/v1/no-such-endpoint");
+  fail("an unrouted path raises 404", "no error raised");
+} catch (e) {
+  check("an unrouted path raises 404", e.status === 404);
+  check("an unrouted path carries the route_not_found code", errCode(e) === "route_not_found");
+}
+
 if (failed) process.exit(1);
 console.log("ALL PASS (anthropic node)");

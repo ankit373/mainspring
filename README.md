@@ -30,7 +30,8 @@ layer around them **fail loud, VRAM-aware, and governed**.
 ## What it does
 
 - **One stable, versioned OpenAI *and* Anthropic API** — `/v1/chat/completions`, `/completions`,
-  `/embeddings`, `/models`, and Anthropic `/v1/messages` (text **and** tool use, streaming translated) —
+  `/embeddings`, `/models`, and Anthropic `/v1/messages` (text **and** tool use, streaming translated)
+  plus `/v1/messages/count_tokens` for pre-flighting a context budget —
   **both dialects validated against their real Python and JS SDKs in CI**, failure paths included (an
   upstream 5xx, a stream cut mid-flight). Both dialects also run the **same** pipeline — auth,
   per-tenant budgets, context guardrail, clamp, concurrency gate, timeouts, circuit breaker, cost
@@ -49,7 +50,8 @@ layer around them **fail loud, VRAM-aware, and governed**.
 - **Reliability** — per-model concurrency limit + bounded queue (503 backpressure), a **circuit breaker**
   with a background health probe, **retry-with-backoff** on transient upstream failures (safe for streams),
   **model-level fallback chains** (a different model answers when the primary is down), and a structured
-  error taxonomy (stable `code` per failure class).
+  error taxonomy (stable `code` per failure class) that **every** response goes through — an unrouted
+  path answers `route_not_found` and a wrong method `method_not_allowed`, not Go's plain text.
 - **Opt-in response cache** — identical deterministic (temperature 0) non-streaming requests return from a
   bounded TTL+LRU cache without re-running the model; hits carry `X-Mainspring-Cache: hit`.
 - **Request coalescing** — a burst of identical in-flight deterministic requests shares one backend
