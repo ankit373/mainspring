@@ -132,7 +132,15 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 		logs:    logs,
 		spec:    spec,
 		mem:     estimateMemory(spec.Path, spec.CtxSize),
+		exited:  make(chan struct{}),
 	}
+	// One reaper, started here, so an engine that dies at any point — during the
+	// readiness wait or long after — is observable rather than something we only
+	// find out about by polling a socket that stopped answering.
+	go func() {
+		r.waitErr = r.cmd.Wait()
+		close(r.exited)
+	}()
 
 	if err := r.waitReady(ctx); err != nil {
 		_ = r.Stop(context.Background())
@@ -193,6 +201,17 @@ type runner struct {
 	mu      sync.Mutex
 	stopped bool
 
+	// exited is closed by the reaper goroutine once the process has been waited
+	// on; waitErr is set before the close, so receiving from exited establishes
+	// happens-before and makes waitErr safe to read.
+	//
+	// Reaping in one place is what lets both waitReady and Stop learn that the
+	// process is gone. Consulting cmd.ProcessState instead cannot work: only
+	// Wait populates it, so before Wait it is always nil, and after Wait it is
+	// being written by whoever called it.
+	exited  chan struct{}
+	waitErr error
+
 	capsMu sync.Mutex
 	caps   *backend.Capabilities // cached once device+ctx are resolved
 }
@@ -210,18 +229,34 @@ func (r *runner) waitReady(ctx context.Context) error {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if r.cmd.ProcessState != nil && r.cmd.ProcessState.Exited() {
-			return fmt.Errorf("llamacpp: server exited during load:\n%s", util.Tail(r.logs.String(), 40))
+		select {
+		case <-r.exited:
+			return r.exitErr()
+		default:
 		}
 		if r.Health(ctx) == backend.StatusReady {
 			return nil
 		}
 		select {
+		case <-r.exited:
+			return r.exitErr()
 		case <-ctx.Done():
 			return fmt.Errorf("llamacpp: server not ready before timeout:\n%s", util.Tail(r.logs.String(), 40))
 		case <-tick.C:
 		}
 	}
+}
+
+// exitErr describes a process that died during load. Only safe to call once
+// r.exited is closed. The engine's own output is the whole value here — a bad
+// weights file or a missing CUDA runtime says exactly what is wrong, and
+// reporting a timeout instead throws that away and points at the wrong cause.
+func (r *runner) exitErr() error {
+	if r.waitErr != nil {
+		return fmt.Errorf("llamacpp: server exited during load (%v):\n%s",
+			r.waitErr, util.Tail(r.logs.String(), 40))
+	}
+	return fmt.Errorf("llamacpp: server exited during load:\n%s", util.Tail(r.logs.String(), 40))
 }
 
 // Health implements backend.Runner.
@@ -278,10 +313,19 @@ func (r *runner) Capabilities(ctx context.Context) (backend.Capabilities, error)
 	if parsed {
 		caps.Device = device
 		caps.GPUOffload = offloaded > 0
-		if offloaded == 0 && r.spec.GPULayers >= 0 {
+		// Warn only when the result differs from what was asked for. Capabilities
+		// .Degraded() defers entirely to these warnings, so anything appended
+		// here for a correctly-honoured request marks the model degraded — which
+		// is how #135's CPU-only false positive worked, and re-appeared here.
+		switch {
+		case offloaded == 0 && r.spec.GPULayers >= 0:
+			// GPU layers were wanted and none were offloaded.
 			caps.Warnings = append(caps.Warnings,
 				"GPU offload requested but engine loaded on CPU (silent fallback)")
-		} else if total > 0 && offloaded < total {
+		case offloaded > 0 && total > 0 && offloaded < total:
+			// Some but not all: genuinely partial. Zero offload is never "partial"
+			// — with GPULayers < 0 it is the documented CPU-only request being
+			// honoured exactly, and reporting it warns about working correctly.
 			caps.Warnings = append(caps.Warnings,
 				fmt.Sprintf("partial GPU offload: %d/%d layers", offloaded, total))
 		}
@@ -376,10 +420,10 @@ func (r *runner) Stop(ctx context.Context) error {
 	r.mu.Unlock()
 
 	r.cancel() // sends kill via exec.CommandContext
-	done := make(chan error, 1)
-	go func() { done <- r.cmd.Wait() }()
+	// Observe the reaper started in Start rather than calling Wait again: a
+	// second Wait on the same Cmd returns an error and races the first.
 	select {
-	case <-done:
+	case <-r.exited:
 		return nil
 	case <-time.After(10 * time.Second):
 		if r.cmd.Process != nil {
