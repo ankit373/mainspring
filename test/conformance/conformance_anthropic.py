@@ -85,7 +85,6 @@ check("usage reports input and output tokens",
 up = echoed(
     system="Be terse.",
     temperature=0.25, top_p=0.9, top_k=7,
-    stop_sequences=["END", "STOP"],
     messages=[{"role": "user", "content": [{"type": "text", "text": "[[echo]] hello"}]}],
 )
 check("system prompt becomes a leading system message",
@@ -95,7 +94,48 @@ check("max_tokens is forwarded", up.get("max_tokens") == 64)
 check("temperature is forwarded", up.get("temperature") == 0.25)
 check("top_p is forwarded", up.get("top_p") == 0.9)
 check("top_k is forwarded (not silently dropped)", up.get("top_k") == 7)
-check("stop_sequences become OpenAI stop", up.get("stop") == ["END", "STOP"])
+
+# ── 2b. stop sequences ────────────────────────────────────────────────────────
+# Anthropic names the sequence that ended a generation. OpenAI's finish_reason
+# cannot express it, and every engine erases the match before returning, so the
+# stop set is deliberately NOT forwarded: Mainspring matches it itself. A
+# non-streaming request is streamed upstream so it can be cut off at the match
+# instead of running on to max_tokens.
+up = echoed(stop_sequences=["END", "STOP"])
+check("stop sequences are not forwarded to the engine", "stop" not in up)
+check("a non-streaming request with stop sequences is streamed upstream",
+      up.get("stream") is True)
+
+# The fakeserver's canned reply is "Hello from fakeserver ." — stopping on
+# "fakeserver" must cut the text there and name the sequence that did it.
+r = client.messages.create(model=MODEL, max_tokens=64, stop_sequences=["fakeserver"],
+                           messages=[{"role": "user", "content": "hi"}])
+check("a stop sequence reports stop_reason stop_sequence", r.stop_reason == "stop_sequence")
+check("the stop sequence that hit is named", r.stop_sequence == "fakeserver")
+check("text is cut at the stop sequence", r.content[0].text == "Hello from ")
+check("a stopped reply still reports input tokens", r.usage.input_tokens > 0)
+
+evts = list(client.messages.create(model=MODEL, max_tokens=64, stream=True,
+                                   stop_sequences=["fakeserver"],
+                                   messages=[{"role": "user", "content": "hi"}]))
+stext = "".join(e.delta.text for e in evts
+                if e.type == "content_block_delta" and e.delta.type == "text_delta")
+sdelta = [e for e in evts if e.type == "message_delta"]
+check("streamed text is cut at the stop sequence", stext == "Hello from ")
+check("a stopped stream still ends with message_stop", evts[-1].type == "message_stop")
+check("a stopped stream is not reported as an error",
+      all(e.type != "error" for e in evts))
+check("streamed stop sequence reports stop_reason stop_sequence",
+      bool(sdelta) and sdelta[0].delta.stop_reason == "stop_sequence")
+check("streamed stop sequence is named",
+      bool(sdelta) and sdelta[0].delta.stop_sequence == "fakeserver")
+
+# A sequence the model never produces must leave the natural ending alone.
+r = client.messages.create(model=MODEL, max_tokens=64, stop_sequences=["[[never]]"],
+                           messages=[{"role": "user", "content": "hi"}])
+check("an unmatched stop sequence leaves stop_reason alone", r.stop_reason == "end_turn")
+check("an unmatched stop sequence reports stop_sequence null", r.stop_sequence is None)
+check("an unmatched stop sequence loses no text", r.content[0].text == "Hello from fakeserver . ")
 
 up = echoed(system=[{"type": "text", "text": "Block system."}])
 check("system given as text blocks also becomes a system message",

@@ -198,9 +198,9 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	s.sched.MarkBusy(served)
 	var gen messagesResult
 	if req.Stream {
-		gen = s.messagesStream(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
+		gen = s.messagesStream(cap, r.Context(), runner.BaseURL(), oaiBody, requested, req.StopSequences)
 	} else {
-		gen = s.messagesJSON(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
+		gen = s.messagesJSON(cap, r.Context(), runner.BaseURL(), oaiBody, requested, req.StopSequences)
 	}
 	prompt, completion, exact, backendFailed := gen.prompt, gen.completion, gen.exact, gen.backendFailed
 	s.sched.MarkIdle(served)
@@ -291,6 +291,11 @@ func toOpenAIRequest(req anthropicRequest) ([]byte, error) {
 	if req.TopK != nil {
 		oai["top_k"] = *req.TopK
 	}
+	// stop is carried on the translated body even though the engine never sees it
+	// (ownedStopBody strips it just before the upstream call — see stopWatch for
+	// why Mainspring matches the sequences itself). It belongs here so that the
+	// cache key, which is computed over this body, still tells two requests that
+	// differ only in their stop sequences apart.
 	if len(req.StopSequences) > 0 {
 		oai["stop"] = req.StopSequences
 	}
@@ -490,24 +495,172 @@ type oaiToolCall struct {
 	} `json:"function"`
 }
 
+// ownedStopBody prepares the OpenAI body actually sent to the engine when
+// Mainspring owns stop-sequence detection. It drops `stop`, so the engine cannot
+// stop-and-erase the match before we see it, and — for a request the client asked
+// for non-streaming — promotes the upstream call to a stream, so generation can be
+// cut off at the match instead of running on to max_tokens. Without that promotion
+// owning the stop would trade a wrong stop_reason for a far worse bug: a local
+// engine grinding out thousands of tokens the caller asked it not to produce.
+//
+// A body that will not parse is passed through untouched: a malformed request is
+// the upstream's to report, not ours to guess at.
+func ownedStopBody(body []byte, promoteToStream bool) []byte {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	delete(m, "stop")
+	if promoteToStream {
+		m["stream"] = json.RawMessage("true")
+		m["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// writeUpstreamCallFailure reports a failed upstream POST, distinguishing the
+// three cases that must not be conflated: a caller that vanished (say nothing —
+// there is no one to tell, and a 502 here would record a backend failure that did
+// not happen), an expired deadline, and a genuine backend error.
+func writeUpstreamCallFailure(w http.ResponseWriter, ctx context.Context, err error) {
+	switch {
+	case clientGone(ctx):
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		writeErr(w, codeTimeout, "request timed out")
+	default:
+		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
+	}
+}
+
+// oaiStreamChunk is one parsed chunk of an OpenAI chat-completions SSE stream.
+type oaiStreamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content   string        `json:"content"`
+			ToolCalls []oaiToolCall `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// scanOAIStream reads an OpenAI SSE stream, calling on for each parsed chunk.
+// Returning false from on stops the read early and reports stopped=true; the
+// caller closing the response body is what tears the upstream connection down and
+// tells the engine to stop generating. Unparseable frames are skipped rather than
+// aborting the stream — a chunk we cannot read is not a broken connection.
+func scanOAIStream(r io.Reader, on func(*oaiStreamChunk) bool) (stopped bool, err error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		data, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		data = strings.TrimSpace(data)
+		if data == "[DONE]" {
+			break
+		}
+		var chunk oaiStreamChunk
+		if json.Unmarshal([]byte(data), &chunk) != nil {
+			continue
+		}
+		if !on(&chunk) {
+			return true, nil
+		}
+	}
+	return false, sc.Err()
+}
+
+// oaiAccum reassembles a streamed OpenAI response into the whole-message shape the
+// non-streaming Anthropic body needs. Tool calls arrive as indexed fragments whose
+// arguments are concatenated across chunks.
+type oaiAccum struct {
+	text  strings.Builder
+	tools []oaiToolCall
+	index map[int]int // OpenAI tool-call index → position in tools
+}
+
+func (a *oaiAccum) tool(tc oaiToolCall) {
+	pos, ok := a.index[tc.Index]
+	if !ok {
+		if a.index == nil {
+			a.index = map[int]int{}
+		}
+		pos = len(a.tools)
+		a.index[tc.Index] = pos
+		a.tools = append(a.tools, oaiToolCall{Index: tc.Index})
+	}
+	t := &a.tools[pos]
+	if tc.ID != "" {
+		t.ID = tc.ID
+	}
+	if tc.Type != "" {
+		t.Type = tc.Type
+	}
+	if tc.Function.Name != "" {
+		t.Function.Name = tc.Function.Name
+	}
+	t.Function.Arguments += tc.Function.Arguments
+}
+
+// writeAnthropicMessage writes the non-streaming Anthropic message body. Both
+// non-streaming paths — the plain upstream call and the internally-streamed one
+// used when Mainspring owns the stop sequences — end here, so the wire shape is
+// defined exactly once.
+func writeAnthropicMessage(w http.ResponseWriter, model, content string, toolCalls []oaiToolCall,
+	finish, hit string, prompt, completion int64, exact bool) {
+	blocks := make([]map[string]any, 0, 1+len(toolCalls))
+	if content != "" {
+		blocks = append(blocks, map[string]any{"type": "text", "text": content})
+	}
+	for _, tc := range toolCalls {
+		blocks = append(blocks, map[string]any{
+			"type":  "tool_use",
+			"id":    tc.ID,
+			"name":  tc.Function.Name,
+			"input": argsToInput(tc.Function.Arguments),
+		})
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, map[string]any{"type": "text", "text": ""})
+	}
+	if exact {
+		// We own the writer here, so surface usage as headers too (set before body).
+		w.Header().Set("X-Mainspring-Tokens-Input", strconv.FormatInt(prompt, 10))
+		w.Header().Set("X-Mainspring-Tokens-Output", strconv.FormatInt(completion, 10))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":            fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       blocks,
+		"stop_reason":   stopReasonFor(finish, hit),
+		"stop_sequence": stopSequenceField(hit),
+		"usage":         map[string]int64{"input_tokens": prompt, "output_tokens": completion},
+	})
+}
+
 // messagesJSON does a non-streaming upstream call and writes the Anthropic body.
 // It returns the real prompt/completion token counts and whether the upstream
 // supplied a usage object.
-func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) messagesResult {
+func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string, stops []string) messagesResult {
+	if sw := newStopWatch(stops); sw != nil {
+		return s.messagesJSONStreamed(w, ctx, baseURL, ownedStopBody(oaiBody, true), model, sw)
+	}
 	var exact bool
 	resp, retries, err := s.postUpstreamRetrying(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
-		if clientGone(ctx) {
-			// The caller cancelled: the connection is gone, so writing a 502 would
-			// both report a backend failure that did not happen and record it as
-			// one. Say nothing.
-			return messagesResult{retries: retries}
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			writeErr(w, codeTimeout, "request timed out")
-			return messagesResult{retries: retries}
-		}
-		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
+		writeUpstreamCallFailure(w, ctx, err)
 		return messagesResult{retries: retries}
 	}
 	defer resp.Body.Close()
@@ -541,41 +694,85 @@ func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseUR
 		finish = oai.Choices[0].FinishReason
 		toolCalls = oai.Choices[0].Message.ToolCalls
 	}
-
-	blocks := make([]map[string]any, 0, 1+len(toolCalls))
-	if content != "" {
-		blocks = append(blocks, map[string]any{"type": "text", "text": content})
-	}
-	for _, tc := range toolCalls {
-		blocks = append(blocks, map[string]any{
-			"type":  "tool_use",
-			"id":    tc.ID,
-			"name":  tc.Function.Name,
-			"input": argsToInput(tc.Function.Arguments),
-		})
-	}
-	if len(blocks) == 0 {
-		blocks = append(blocks, map[string]any{"type": "text", "text": ""})
-	}
-
-	out := map[string]any{
-		"id":            fmt.Sprintf("msg_%d", time.Now().UnixNano()),
-		"type":          "message",
-		"role":          "assistant",
-		"model":         model,
-		"content":       blocks,
-		"stop_reason":   mapStopReason(finish),
-		"stop_sequence": nil,
-		"usage":         map[string]int64{"input_tokens": oai.Usage.PromptTokens, "output_tokens": oai.Usage.CompletionTokens},
-	}
+	// No stop sequences on this path (messagesJSON routes those to the streamed
+	// variant), so nothing can have matched: hit is empty.
 	exact = oai.Usage.CompletionTokens > 0 || oai.Usage.PromptTokens > 0
-	if exact {
-		// We own the writer here, so surface usage as headers too (set before body).
-		w.Header().Set("X-Mainspring-Tokens-Input", strconv.FormatInt(oai.Usage.PromptTokens, 10))
-		w.Header().Set("X-Mainspring-Tokens-Output", strconv.FormatInt(oai.Usage.CompletionTokens, 10))
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeAnthropicMessage(w, model, content, toolCalls, finish, "",
+		oai.Usage.PromptTokens, oai.Usage.CompletionTokens, exact)
 	return messagesResult{prompt: oai.Usage.PromptTokens, completion: oai.Usage.CompletionTokens, exact: exact, retries: retries}
+}
+
+// messagesJSONStreamed answers a non-streaming /v1/messages request by streaming
+// from the upstream and buffering the result. It exists for one reason: when the
+// caller supplied stop_sequences, Mainspring — not the engine — decides where the
+// generation ends (see stopWatch), and only a stream can be cut off at the match.
+// Because nothing is written until the whole message is in hand, this path can
+// still fail loud with a real status when the stream breaks, which the SSE path
+// cannot.
+func (s *Server) messagesJSONStreamed(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string, sw *stopWatch) messagesResult {
+	resp, retries, err := s.postUpstreamRetrying(ctx, baseURL+"/v1/chat/completions", oaiBody)
+	if err != nil {
+		writeUpstreamCallFailure(w, ctx, err)
+		return messagesResult{retries: retries}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		writeUpstreamFailure(w, resp)
+		return messagesResult{retries: retries}
+	}
+
+	var acc oaiAccum
+	var prompt, completion, deltas int64
+	var exact bool
+	finish := "stop"
+	stopped, scanErr := scanOAIStream(resp.Body, func(c *oaiStreamChunk) bool {
+		if c.Usage != nil {
+			prompt, completion, exact = c.Usage.PromptTokens, c.Usage.CompletionTokens, true
+		}
+		if len(c.Choices) == 0 {
+			return true
+		}
+		ch := c.Choices[0]
+		if txt := ch.Delta.Content; txt != "" {
+			deltas++
+			emit, matched := sw.feed(txt)
+			acc.text.WriteString(emit)
+			if matched {
+				return false
+			}
+		}
+		for _, tc := range ch.Delta.ToolCalls {
+			deltas++
+			acc.tool(tc)
+		}
+		if ch.FinishReason != "" {
+			finish = ch.FinishReason
+		}
+		return true
+	})
+	if !stopped {
+		// Nothing matched, so text held back as a possible partial match is real
+		// output and must not be dropped.
+		acc.text.WriteString(sw.flush())
+		if scanErr != nil || ctx.Err() != nil {
+			switch {
+			case clientGone(ctx):
+			case errors.Is(ctx.Err(), context.DeadlineExceeded):
+				writeErr(w, codeTimeout, "request timed out")
+			case scanErr != nil:
+				writeErr(w, codeUpstreamError, "upstream stream ended prematurely: "+scanErr.Error())
+			default:
+				writeErr(w, codeInternal, "stream cancelled before completion")
+			}
+			return messagesResult{retries: retries, backendFailed: !clientGone(ctx)}
+		}
+	}
+	if !exact {
+		completion = deltas
+		prompt = stoppedPromptTokens(prompt, sw, oaiBody)
+	}
+	writeAnthropicMessage(w, model, acc.text.String(), acc.tools, finish, sw.hitSeq(), prompt, completion, exact)
+	return messagesResult{prompt: prompt, completion: completion, exact: exact, retries: retries}
 }
 
 // argsToInput turns an OpenAI tool-call arguments JSON string into a JSON value
@@ -596,22 +793,18 @@ func argsToInput(args string) json.RawMessage {
 // events. It returns the prompt/completion token counts and whether they came
 // from an upstream usage object (stream_options.include_usage); when absent,
 // completion falls back to the number of streamed fragments.
-func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) messagesResult {
+func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string, stops []string) messagesResult {
 	var prompt, completion int64
 	var exact bool
+	sw := newStopWatch(stops)
+	if sw != nil {
+		// Already a stream, so nothing to promote — just keep the stop set away from
+		// the engine so the match survives long enough for us to see it.
+		oaiBody = ownedStopBody(oaiBody, false)
+	}
 	resp, retries, err := s.postUpstreamRetrying(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
-		if clientGone(ctx) {
-			// The caller cancelled: the connection is gone, so writing a 502 would
-			// both report a backend failure that did not happen and record it as
-			// one. Say nothing.
-			return messagesResult{retries: retries}
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			writeErr(w, codeTimeout, "request timed out")
-			return messagesResult{retries: retries}
-		}
-		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
+		writeUpstreamCallFailure(w, ctx, err)
 		return messagesResult{retries: retries}
 	}
 	defer resp.Body.Close()
@@ -645,45 +838,26 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 
 	var deltas int64
 	finish := "stop"
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		data, ok := strings.CutPrefix(line, "data:")
-		if !ok {
-			continue
-		}
-		data = strings.TrimSpace(data)
-		if data == "[DONE]" {
-			break
-		}
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content   string        `json:"content"`
-					ToolCalls []oaiToolCall `json:"tool_calls"`
-				} `json:"delta"`
-				FinishReason string `json:"finish_reason"`
-			} `json:"choices"`
-			Usage *struct {
-				PromptTokens     int64 `json:"prompt_tokens"`
-				CompletionTokens int64 `json:"completion_tokens"`
-			} `json:"usage"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) != nil {
-			continue
-		}
+	stopped, scanErr := scanOAIStream(resp.Body, func(c *oaiStreamChunk) bool {
 		// The include_usage final chunk carries usage with an empty choices list.
-		if chunk.Usage != nil {
-			prompt, completion, exact = chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, true
+		if c.Usage != nil {
+			prompt, completion, exact = c.Usage.PromptTokens, c.Usage.CompletionTokens, true
 		}
-		if len(chunk.Choices) == 0 {
-			continue
+		if len(c.Choices) == 0 {
+			return true
 		}
-		ch := chunk.Choices[0]
-		if c := ch.Delta.Content; c != "" {
+		ch := c.Choices[0]
+		if txt := ch.Delta.Content; txt != "" {
 			deltas++
-			st.textDelta(c)
+			// Only the part that cannot be the start of a stop sequence goes out; the
+			// rest is held until the next fragment resolves it.
+			emit, matched := sw.feed(txt)
+			if emit != "" {
+				st.textDelta(emit)
+			}
+			if matched {
+				return false
+			}
 		}
 		for _, tc := range ch.Delta.ToolCalls {
 			deltas++
@@ -692,12 +866,21 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 		if ch.FinishReason != "" {
 			finish = ch.FinishReason
 		}
+		return true
+	})
+	if !stopped {
+		// Nothing matched, so text held back as a possible partial match is real
+		// output and must not be dropped.
+		if tail := sw.flush(); tail != "" {
+			st.textDelta(tail)
+		}
 	}
 
 	// Prefer real usage from the upstream include_usage chunk; else the fragment
 	// count is the best available output estimate.
 	if !exact {
 		completion = deltas
+		prompt = stoppedPromptTokens(prompt, sw, oaiBody)
 	}
 
 	// Fail loud on a truncated stream: a cut connection or an expired deadline must
@@ -706,11 +889,14 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 	// event instead of message_delta/message_stop. The status is already 200 on the
 	// wire by now, so this error event is the only signal the client will get — and
 	// the returned flag is the only signal the breaker will get.
-	if err := sc.Err(); err != nil || ctx.Err() != nil {
+	//
+	// `stopped` excludes the one case that looks identical from here but is not a
+	// failure at all: we closed the stream ourselves on a stop-sequence match.
+	if !stopped && (scanErr != nil || ctx.Err() != nil) {
 		st.closeOpen()
 		switch {
-		case err != nil:
-			streamError(send, codeUpstreamError, "upstream stream ended prematurely: "+err.Error())
+		case scanErr != nil:
+			streamError(send, codeUpstreamError, "upstream stream ended prematurely: "+scanErr.Error())
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			streamError(send, codeTimeout, "stream exceeded the per-request timeout")
 		default:
@@ -728,8 +914,9 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 		st.textDelta("")
 	}
 	st.closeOpen()
+	hit := sw.hitSeq()
 	send("message_delta", map[string]any{"type": "message_delta",
-		"delta": map[string]any{"stop_reason": mapStopReason(finish), "stop_sequence": nil},
+		"delta": map[string]any{"stop_reason": stopReasonFor(finish, hit), "stop_sequence": stopSequenceField(hit)},
 		"usage": map[string]int64{"input_tokens": prompt, "output_tokens": completion}})
 	send("message_stop", map[string]any{"type": "message_stop"})
 	return messagesResult{prompt: prompt, completion: completion, exact: exact, retries: retries}
