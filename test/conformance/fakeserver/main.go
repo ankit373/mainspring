@@ -1,21 +1,52 @@
 // Command fakeserver is a deterministic OpenAI/Ollama upstream used only by the
 // conformance suite. It lets us run Mainspring exactly as shipped (the Ollama
-// adopt path) against a scripted engine, so the real OpenAI SDKs exercise
-// Mainspring's proxy/streaming/error surface without a model download.
+// adopt path) against a scripted engine, so the real OpenAI and Anthropic SDKs
+// exercise Mainspring's proxy/translation/streaming/error surface without a
+// model download.
 //
 // It intentionally emits the CORRECT-but-easy-to-get-wrong OpenAI shapes:
 // tool_call function.arguments as a JSON *string*, SSE framed as
 // `data: {..}\n\n` ending with `data: [DONE]`, and a usage block.
+//
+// # Steering the upstream from a test
+//
+// A conformance script cannot reach this process directly — it only talks to
+// Mainspring. So the behaviour of a single request is selected by a marker
+// embedded in the prompt text, which both dialects carry through untouched into
+// `messages[].content`:
+//
+//	[[echo]]        reply with the exact OpenAI body this server received, as the
+//	                assistant's text. Lets a test assert what the Anthropic →
+//	                OpenAI translation actually put on the wire (system prompt,
+//	                top_k, stop, image parts, role:tool messages …), which the
+//	                client-visible response alone cannot show.
+//	[[status:NNN]]  reply with HTTP NNN and an error body, before any SSE byte.
+//	[[truncate]]    streaming only: emit a few deltas, then abort the connection
+//	                mid-body with no terminating chunk and no [DONE].
+//
+// No marker means the default scripted behaviour, so the OpenAI scripts are
+// unaffected.
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+)
+
+// maxBody bounds how much of a request we buffer (echo returns it verbatim).
+const maxBody = 8 << 20
+
+const (
+	dirEcho     = "[[echo]]"
+	dirTruncate = "[[truncate]]"
+	dirStatus   = "[[status:" // [[status:503]]
 )
 
 func main() {
@@ -59,22 +90,55 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }
 
+// oaiRequest is the slice of the incoming OpenAI body this server steers on.
+type oaiRequest struct {
+	Stream        bool `json:"stream"`
+	StreamOptions *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options"`
+	Tools    []json.RawMessage `json:"tools"`
+	Messages []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	} `json:"messages"`
+}
+
 func chatCompletions(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Stream bool              `json:"stream"`
-		Tools  []json.RawMessage `json:"tools"`
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+	if err != nil {
+		writeStatus(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	var req oaiRequest
+	_ = json.Unmarshal(raw, &req)
 	hasTools := len(req.Tools) > 0
+	prompt := promptText(req)
+
+	if code, ok := statusDirective(prompt); ok {
+		writeStatus(w, code, fmt.Sprintf("fakeserver was asked for status %d", code))
+		return
+	}
+	// Echo wins over the tool-call script: a test that sends tools *and* asks to
+	// echo wants to inspect the translated request, not a canned tool call.
+	echo := strings.Contains(prompt, dirEcho)
 
 	if req.Stream {
-		streamChat(w, hasTools)
+		streamChat(w, script{
+			tools:    hasTools && !echo,
+			echo:     echo,
+			truncate: strings.Contains(prompt, dirTruncate),
+			usage:    req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
+			raw:      raw,
+		})
 		return
 	}
 
 	msg := map[string]any{"role": "assistant", "content": "Hello from fakeserver."}
 	finish := "stop"
-	if hasTools {
+	switch {
+	case echo:
+		msg["content"] = string(raw)
+	case hasTools:
 		// OpenAI shape: function.arguments is a JSON-encoded STRING, not an object.
 		msg["content"] = nil
 		msg["tool_calls"] = []map[string]any{{
@@ -97,7 +161,58 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func streamChat(w http.ResponseWriter, hasTools bool) {
+// promptText concatenates every text fragment in the request's messages, so a
+// directive is found whether the client sent a plain string or content parts.
+func promptText(req oaiRequest) string {
+	var b strings.Builder
+	for _, m := range req.Messages {
+		var s string
+		if json.Unmarshal(m.Content, &s) == nil {
+			b.WriteString(s)
+			continue
+		}
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(m.Content, &parts) == nil {
+			for _, p := range parts {
+				if p.Type == "text" || p.Type == "" {
+					b.WriteString(p.Text)
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+// statusDirective returns the HTTP status a [[status:NNN]] marker asks for.
+func statusDirective(prompt string) (int, bool) {
+	_, rest, ok := strings.Cut(prompt, dirStatus)
+	if !ok {
+		return 0, false
+	}
+	num, _, ok := strings.Cut(rest, "]]")
+	if !ok {
+		return 0, false
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(num))
+	if err != nil || code < 100 || code > 599 {
+		return 0, false
+	}
+	return code, true
+}
+
+// script is what one request asked this upstream to do while streaming.
+type script struct {
+	tools    bool // emit the canned tool call
+	echo     bool // reply with the body we received
+	truncate bool // abort the connection mid-stream
+	usage    bool // append a stream_options.include_usage chunk
+	raw      []byte
+}
+
+func streamChat(w http.ResponseWriter, sc script) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	fl, ok := w.(http.Flusher)
@@ -118,17 +233,51 @@ func streamChat(w http.ResponseWriter, hasTools bool) {
 		}
 	}
 	send(base(map[string]any{"role": "assistant"}, nil))
-	if hasTools {
+
+	if sc.truncate {
+		// Emit real content, then die mid-body: no finish_reason, no [DONE] and no
+		// terminating chunk, so the reader sees an unexpected EOF. This is the
+		// abnormal end a translating proxy must not paper over with a stop event.
+		send(base(map[string]any{"content": "partial "}, nil))
+		send(base(map[string]any{"content": "answer "}, nil))
+		panic(http.ErrAbortHandler)
+	}
+
+	switch {
+	case sc.echo:
+		send(base(map[string]any{"content": string(sc.raw)}, nil))
+		send(base(map[string]any{}, "stop"))
+	case sc.tools:
+		// Text first, then a tool call: a real engine narrates before it calls, and
+		// the translation layer has to close the text block and allocate a second
+		// content-block index for the tool_use rather than reusing index 0.
+		send(base(map[string]any{"content": "Checking. "}, nil))
+		// Arguments arrive split across frames, as a real engine emits them: the
+		// translation layer must stitch them into one tool_use block.
 		send(base(map[string]any{"tool_calls": []map[string]any{{
 			"index": 0, "id": "call_1", "type": "function",
-			"function": map[string]any{"name": "get_weather", "arguments": `{"location":"SF"}`},
+			"function": map[string]any{"name": "get_weather", "arguments": `{"location":`},
+		}}}, nil))
+		send(base(map[string]any{"tool_calls": []map[string]any{{
+			"index": 0, "function": map[string]any{"arguments": `"SF"}`},
 		}}}, nil))
 		send(base(map[string]any{}, "tool_calls"))
-	} else {
+	default:
 		for _, tok := range strings.Fields("Hello from fakeserver .") {
 			send(base(map[string]any{"content": tok + " "}, nil))
 		}
 		send(base(map[string]any{}, "stop"))
+	}
+
+	// stream_options.include_usage: a final choices-less chunk carrying real token
+	// counts. Mainspring always asks for it on the Anthropic path, and it is what
+	// lets the terminal message_delta report exact usage instead of a frame count.
+	if sc.usage {
+		send(map[string]any{
+			"id": "chatcmpl-fake", "object": "chat.completion.chunk", "model": "mock-model",
+			"choices": []any{},
+			"usage":   map[string]int{"prompt_tokens": 7, "completion_tokens": 13, "total_tokens": 20},
+		})
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	fl.Flush()
@@ -137,4 +286,13 @@ func streamChat(w http.ResponseWriter, hasTools bool) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeStatus emits an OpenAI-shaped error body with an explicit status.
+func writeStatus(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{"message": msg, "type": "fakeserver_error", "code": code},
+	})
 }
