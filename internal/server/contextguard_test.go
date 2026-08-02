@@ -53,3 +53,22 @@ func TestEstimatePromptTokens(t *testing.T) {
 		t.Fatalf("prompt estimate = %d, want 5", got)
 	}
 }
+
+func TestEstimatePromptTokensSystemShapes(t *testing.T) {
+	// Bare string system: 20 chars ≈ 5 tokens.
+	if got := estimatePromptTokens([]byte(`{"system":"` + strings.Repeat("s", 20) + `"}`)); got != 5 {
+		t.Fatalf("string system estimate = %d, want 5", got)
+	}
+	// Anthropic block-array system counts its text, exactly like the string form.
+	blocks := []byte(`{"system":[{"type":"text","text":"` + strings.Repeat("s", 20) + `"}]}`)
+	if got := estimatePromptTokens(blocks); got != 5 {
+		t.Fatalf("block-array system estimate = %d, want 5", got)
+	}
+	// The critical case: a block-array system must not zero the *whole* request.
+	// 40 chars of content ≈ 10 + 4 overhead, plus 5 for the system = 19.
+	both := []byte(`{"system":[{"type":"text","text":"` + strings.Repeat("s", 20) + `"}],` +
+		`"messages":[{"role":"user","content":"` + strings.Repeat("x", 40) + `"}]}`)
+	if got := estimatePromptTokens(both); got != 19 {
+		t.Fatalf("estimate with block-array system = %d, want 19 (0 means the guardrail failed open)", got)
+	}
+}

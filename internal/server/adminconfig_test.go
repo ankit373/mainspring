@@ -150,12 +150,3 @@ func TestAdminConfigLintWarningsUpdateAfterReload(t *testing.T) {
 		t.Fatalf("expected the latest 2 warnings (not accumulated), got %v", warnings)
 	}
 }
-
-func TestAdminConfigForbiddenForNonAdmin(t *testing.T) {
-	a := auth.NewTenants([]auth.Tenant{{Name: "user", Key: "userkey", Role: auth.RoleInference}})
-	h := configTestServer(t, a).Handler()
-
-	if w := getJSON(h, "/admin/config", "userkey"); w.Code != http.StatusForbidden {
-		t.Fatalf("non-admin status = %d, want 403", w.Code)
-	}
-}

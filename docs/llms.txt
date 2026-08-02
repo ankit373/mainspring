@@ -74,14 +74,19 @@ MIT and already win; Mainspring wraps them).
   specifically probing recovery) and /v1/quality.
 - Token counting: `POST /v1/tokenize {model, input}` returns `{tokens, exact}` — the model's real token
   count (exact) when the model is resident on an engine that exposes a tokenizer (llama.cpp `/tokenize`),
-  otherwise the character-based estimate (exact:false). No forced load; no extra dependency.
+  otherwise the character-based estimate (exact:false). No forced load; no extra dependency. `input` is a
+  bare string or an array of strings (the embeddings shape); an array is reported as the sum of its
+  elements and is `exact` only if every element was counted exactly. Any other shape is a 400 naming the
+  field rather than a silently miscounted request.
 - Graceful clamp (opt-in): `clamp_max_tokens` shrinks an over-budget `max_tokens`/`max_completion_tokens`
   to the room left in the context window and proceeds (header `X-Mainspring-Clamped: <from>-><to>`),
   instead of rejecting — runs before the guardrail; a request with no room left falls through to it.
 - Embeddings-aware token counting: the guardrail, `clamp_max_tokens`, `precise_context`, and
   `/v1/tokenize` all count an embeddings request's `input` field (bare string or array of strings), not
   just `messages`/`prompt` — a large `/v1/embeddings` input now correctly trips the guardrail instead of
-  estimating as 0.
+  estimating as 0. A `system` field is likewise counted in either shape — a bare string or an Anthropic
+  block array. It used to be parsed as a string only, so a block array failed the *whole* estimate and
+  scored the request at 0 tokens: the guardrail failed open on exactly the requests it exists for.
 - Precise guardrail (opt-in): `precise_context` refines the guardrail — when the target model is resident
   on a tokenizing engine, prompt tokens are counted *exactly* (via `/tokenize`) instead of estimated (no
   forced load; falls back to the estimate otherwise). The method is reported on `X-Mainspring-Context-Method:
@@ -140,7 +145,9 @@ MIT and already win; Mainspring wraps them).
   A single healthy or half-open (recovering) model keeps readyz at 200.
 - Request correlation: every request carries an `X-Request-ID` (accepted from the client or generated,
   echoed on the response and recorded in the usage ledger); an optional JSONL access log records every
-  request (method, path, status, duration). W3C `traceparent` is accepted/continued (or generated), the
+  request (tenant, method, path, status, duration) — the `tenant` field names the authenticated
+  principal, so the log attributes an admin action to whoever performed it (omitted in open mode, where
+  there is no principal, and for a rejected key). W3C `traceparent` is accepted/continued (or generated), the
   `trace_id` is recorded alongside `request_id`, and a child traceparent is forwarded to the engine so
   distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK.
 - Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
@@ -179,13 +186,16 @@ MIT and already win; Mainspring wraps them).
 ## Endpoints
 
 - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
-- `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta)
+- `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta;
+  `temperature`, `top_p`, `top_k` and `stop_sequences` are all forwarded to the engine — `top_k` is not in
+  the OpenAI schema but every engine Mainspring drives accepts it, so it is passed on rather than dropped)
 - `GET /v1/models`, `GET /v1/models/{id}` (OpenAI "retrieve a model"; resolves aliases; adds
   resident/backend/device/effective_ctx/degraded when the model is loaded), `GET /capabilities`,
   `GET /metrics`, `GET /healthz`, `GET /readyz`
 - `GET /v1/quality` (optional Hydra routing signal: per-model resident/device/degraded/effective_ctx/
   inflight/queue_depth/ttft_ms_p50; admin-gated)
-- Admin API (admin-gated, audited via the access log): `GET /admin/config` (effective runtime settings —
+- Admin API (admin-gated; audited via the access log, whose `tenant` field names the admin who performed
+  the action — in open mode there is no principal to record): `GET /admin/config` (effective runtime settings —
   timeouts, retry, breaker, cache, coalesce, guardrail, concurrency, fallbacks; secret-free by construction),
   `GET /admin/usage` (per-tenant consumption actuals — requests, prompt/output tokens, USD cost; open-mode
   traffic bucketed as "(anonymous)"), `POST /admin/drain[?on=false]`, `POST /admin/reload`,
@@ -199,10 +209,11 @@ MIT and already win; Mainspring wraps them).
 ## Errors
 
 All errors are OpenAI-shaped `{"error":{"message","type","code"}}` with a stable machine-branchable
-`code`: `invalid_request`, `method_not_allowed`, `model_not_found`, `unauthorized`, `forbidden`,
-`rate_limited`, `token_budget_exceeded`, `server_busy`, `circuit_open`, `backend_unavailable`,
-`upstream_error`, `timeout`, `internal_error`. Same-status/different-cause conditions (503) are
-distinguished by `code` (server_busy vs circuit_open vs backend_unavailable).
+`code`: `invalid_request`, `context_length_exceeded`, `method_not_allowed`, `model_not_found`,
+`unauthorized`, `forbidden`, `rate_limited`, `token_budget_exceeded`, `server_busy`, `circuit_open`,
+`backend_unavailable`, `upstream_error`, `timeout`, `internal_error`. Same-status/different-cause
+conditions are distinguished by `code` (503: server_busy vs circuit_open vs backend_unavailable;
+400: invalid_request vs context_length_exceeded).
 
 ## Non-goals
 

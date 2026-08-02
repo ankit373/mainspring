@@ -18,7 +18,10 @@ import (
 
 type ctxKey int
 
-const tenantCtxKey ctxKey = 0
+const (
+	tenantCtxKey    ctxKey = 0
+	principalCtxKey ctxKey = 1
+)
 
 // Role gates which endpoints a tenant may call.
 type Role string
@@ -136,6 +139,9 @@ func (a *Authenticator) Wrap(next http.Handler) http.Handler {
 			unauthorized(w)
 			return
 		}
+		// Name the principal before the quota checks, so a request rejected for
+		// exceeding its rate limit is still attributable in the access log.
+		setPrincipal(r.Context(), t.Name)
 		if t.RateRPM > 0 {
 			if ok, retry := a.lim.AllowRequest(t.Key, t.RateRPM); !ok {
 				tooManyRequests(w, retry)
@@ -186,6 +192,39 @@ func (a *Authenticator) AddTokens(t *Tenant, n int64) {
 		return
 	}
 	a.lim.AddTokens(t.Key, n, t.tokenWindow())
+}
+
+// principalSlot is a mutable, per-request holder for the authenticated tenant
+// name. An audit trail needs the principal, but the middleware that writes it
+// (the access log) has to sit *outside* authentication so that rejected and
+// exempt requests are logged too — which means it never sees the resolved
+// tenant on the way in. It instead installs an empty slot on the way in and
+// reads it back on the way out, after Wrap has filled it. Both the write and
+// the read happen on the single goroutine net/http runs the handler chain on,
+// so the slot needs no synchronization.
+type principalSlot struct{ name string }
+
+// NewPrincipalSlot returns a context carrying an empty principal slot for Wrap
+// to fill. Install it before authentication runs.
+func NewPrincipalSlot(ctx context.Context) context.Context {
+	return context.WithValue(ctx, principalCtxKey, &principalSlot{})
+}
+
+// Principal returns the tenant name authenticated for this request, or "" when
+// the request was rejected, exempt, served in open mode, or carries no slot.
+func Principal(ctx context.Context) string {
+	if p, ok := ctx.Value(principalCtxKey).(*principalSlot); ok {
+		return p.name
+	}
+	return ""
+}
+
+// setPrincipal records the authenticated tenant in the request's slot, if one
+// was installed.
+func setPrincipal(ctx context.Context, name string) {
+	if p, ok := ctx.Value(principalCtxKey).(*principalSlot); ok {
+		p.name = name
+	}
 }
 
 // FromContext returns the authenticated tenant, if any (absent in open mode).

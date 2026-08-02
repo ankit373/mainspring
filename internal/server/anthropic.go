@@ -20,7 +20,7 @@ import (
 // This file implements Anthropic Messages API compatibility (POST /v1/messages)
 // by translating to/from the OpenAI chat-completions upstream. Text content is
 // fully supported (string or text blocks, system prompt, temperature, top_p,
-// stop_sequences, streaming). Tool use is translated in both directions:
+// top_k, stop_sequences, streaming). Tool use is translated in both directions:
 // Anthropic tools/tool_choice ↔ OpenAI tools/tool_choice, assistant tool_use
 // blocks ↔ OpenAI tool_calls, and user tool_result blocks ↔ OpenAI role:tool
 // messages, including streaming (input_json_delta). Images are not yet translated.
@@ -32,6 +32,7 @@ type anthropicRequest struct {
 	Messages      []anthropicMessage `json:"messages"`
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
+	TopK          *int               `json:"top_k,omitempty"` // forwarded; llama.cpp/MLX accept it
 	StopSequences []string           `json:"stop_sequences,omitempty"`
 	Stream        bool               `json:"stream,omitempty"`
 	Tools         []anthropicTool    `json:"tools,omitempty"`
@@ -255,6 +256,12 @@ func toOpenAIRequest(req anthropicRequest) ([]byte, error) {
 	}
 	if req.TopP != nil {
 		oai["top_p"] = *req.TopP
+	}
+	// top_k is not in the OpenAI schema but every engine Mainspring drives
+	// (llama.cpp, MLX, and the adopted local daemons) accepts it, so it is
+	// forwarded rather than silently dropped.
+	if req.TopK != nil {
+		oai["top_k"] = *req.TopK
 	}
 	if len(req.StopSequences) > 0 {
 		oai["stop"] = req.StopSequences
