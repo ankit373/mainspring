@@ -82,8 +82,10 @@ layer around them **fail loud, VRAM-aware, and governed**.
   (drain / reload / model load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a
   trust control plane like Hydra can consume.
 - **Detect-first, opt-in managed install** — use whatever engine is present; install a missing one only
-  when you explicitly run `mainspring install`, never silently. Every install is SHA-256-verified and
-  refuses on a mismatch. Mainspring does **not** bundle a catalogue of engine builds: you point it at
+  when you explicitly run `mainspring install`, never silently. Every download is staged to a temp file
+  and SHA-256-verified *before* it is put in place, so a mismatch never reaches the install path and
+  never disturbs an engine already installed there. Mainspring does **not** bundle a catalogue of
+  engine builds: you point it at
   the artifact you want with `--url` + `--sha256`, or at your own manifest (optionally ed25519-signed
   via `--pubkey`). Shipping a curated, pinned manifest is tracked separately.
 - **Deploy anywhere** — a single static binary, a distroless container image, and a Helm chart
