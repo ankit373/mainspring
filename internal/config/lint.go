@@ -52,6 +52,17 @@ func (c Config) Lint() []LintWarning {
 				"path is ignored for the adopt-only backend %q — the model id must be the name %s "+
 					"knows it by, so you likely want `id: %s`", b, b, m.Path)})
 		}
+		// mlx_lm.server exposes no context-window setting (checked against 0.31.3:
+		// its only related flag is --max-tokens, the generation cap). So ctx cannot
+		// be handed to the engine. It still drives Mainspring's own guardrail, which
+		// is why this is a caveat and not "ignored" — but the engine is unaware of
+		// the limit and reports no effective window to check it against.
+		if c.modelBackend(m) == "mlx" && m.Ctx > 0 {
+			warnings = append(warnings, LintWarning{m.ID,
+				"ctx cannot be applied to the mlx backend — mlx_lm.server has no context-window flag, " +
+					"so Mainspring's own guardrail enforces it but the engine is not told and the " +
+					"effective window cannot be verified"})
+		}
 		if m.Ctx <= 0 {
 			if c.EnforceContext || boolOverride(m.EnforceContext) {
 				warnings = append(warnings, LintWarning{m.ID,
