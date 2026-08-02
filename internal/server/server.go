@@ -378,91 +378,15 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Response cache: serve identical deterministic non-stream requests without
-	// touching the gate, breaker, loader, or backend. A hit still meters the
-	// tenant's token budget so accounting is consistent whether or not the model
-	// actually ran.
-	cacheKey, cached, hit := s.cacheLookup(model, r.URL.Path, body)
-	if hit {
-		serveCached(w, cached)
-		charge := cached.Completion
-		if cached.Exact {
-			charge = cached.Prompt + cached.Completion
-		}
-		s.auth.AddTokens(tenant, charge)
-		if s.metrics != nil {
-			s.metrics.Record(metrics.Event{
-				Time:         recvd,
-				RequestID:    RequestID(r.Context()),
-				TraceID:      TraceID(r.Context()),
-				Model:        model,
-				Tenant:       auth.TenantOf(r.Context()),
-				Status:       cached.Status,
-				Cached:       true,
-				DurationMs:   ms(time.Since(recvd)),
-				Bytes:        int64(len(cached.Body)),
-				PromptTokens: cached.Prompt,
-				TokensEst:    cached.Completion,
-				Exact:        cached.Exact,
-				CostUSD:      s.costFor(model, cached.Prompt, cached.Completion, cached.Exact),
-			})
-		}
+	// Response cache + request coalescing. A hit, or a concurrent leader's result,
+	// answers the caller here without touching the gate, breaker, loader or backend.
+	// Otherwise this request becomes the leader that later callers wait on, and
+	// doneSharing must run on every exit or those followers wait forever.
+	sh, doneSharing, answered := s.beginShare(w, r, model, tenant, body, recvd)
+	if answered {
 		return
 	}
-
-	// Request coalescing: identical deterministic requests already in flight share
-	// one backend computation. Followers wait for the leader and replay its result.
-	var (
-		coKey    string
-		coLeader bool
-		coVal    cache.Value
-		coOK     bool
-	)
-	if s.coalesce != nil && cacheable(body) {
-		coKey = cacheKey
-		if coKey == "" {
-			coKey = cache.Key(model, r.URL.Path, body)
-		}
-		leader, f := s.coalesce.join(coKey)
-		if !leader {
-			select {
-			case <-f.done:
-				if f.ok {
-					serveCoalesced(w, f.val)
-					charge := f.val.Completion
-					if f.val.Exact {
-						charge = f.val.Prompt + f.val.Completion
-					}
-					s.auth.AddTokens(tenant, charge)
-					if s.metrics != nil {
-						s.metrics.Record(metrics.Event{
-							Time:         recvd,
-							RequestID:    RequestID(r.Context()),
-							TraceID:      TraceID(r.Context()),
-							Model:        model,
-							Tenant:       auth.TenantOf(r.Context()),
-							Status:       f.val.Status,
-							Coalesced:    true,
-							DurationMs:   ms(time.Since(recvd)),
-							Bytes:        int64(len(f.val.Body)),
-							PromptTokens: f.val.Prompt,
-							TokensEst:    f.val.Completion,
-							Exact:        f.val.Exact,
-							CostUSD:      s.costFor(model, f.val.Prompt, f.val.Completion, f.val.Exact),
-						})
-					}
-					return
-				}
-				// Leader produced no shareable result → fall through and run normally.
-			case <-r.Context().Done():
-				writeErr(w, codeTimeout, "request cancelled while waiting for coalesced result")
-				return
-			}
-		} else {
-			coLeader = true
-			defer func() { s.coalesce.publish(coKey, coVal, coOK) }()
-		}
-	}
+	defer doneSharing()
 
 	// Select a servable model: try the requested one, then its fallback chain.
 	// A candidate is skipped only for a pre-serve failure (circuit open or load
@@ -534,7 +458,7 @@ candidates:
 	// Record the full body when the response may be shared — cached and/or
 	// coalesced — and only when the primary model served (a fallback's output is
 	// never stored under the primary key).
-	if ((cacheKey != "") || coLeader) && served == model {
+	if sh.wanted() && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
 	// Mark the runner busy for the actual generation call so the scheduler's
@@ -573,12 +497,7 @@ candidates:
 			Completion: completion,
 			Exact:      exact,
 		}
-		if cacheKey != "" {
-			s.cache.Put(cacheKey, shared)
-		}
-		if coLeader {
-			coVal, coOK = shared, true
-		}
+		sh.store(shared)
 	}
 	// Token budgets charge total consumption when we have exact usage; otherwise
 	// only the (estimated) output count is known.

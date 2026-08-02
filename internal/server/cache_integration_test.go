@@ -350,3 +350,107 @@ func TestReplayableHeaderSetIsClosed(t *testing.T) {
 		t.Fatalf("cache-hit headers = %v, want %v", got, want)
 	}
 }
+
+// ── /v1/messages sharing (the Anthropic dialect) ─────────────────────────────
+
+// postMessagesAs sends a cacheable Anthropic request as one tenant.
+func postMessagesAs(h http.Handler, key, reqID, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("X-Request-ID", reqID)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+const anthropicCacheable = `{"model":"m1","max_tokens":16,"temperature":0,"messages":[{"role":"user","content":"hi"}]}`
+
+// TestMessagesCacheHitSkipsBackend — /v1/messages used to call the backend for
+// every request no matter what, so N identical deterministic requests cost N
+// generations. It now shares the same cache the OpenAI path uses.
+func TestMessagesCacheHitSkipsBackend(t *testing.T) {
+	var hits atomic.Int64
+	eng := countingEngine(t, &hits)
+	srv := twoTenantServer(t, eng.URL)
+	srv.SetCache(time.Minute, 16)
+	h := srv.Handler()
+
+	first := postMessagesAs(h, "key-alpha", "req-alpha", anthropicCacheable)
+	if first.Code != 200 {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	second := postMessagesAs(h, "key-alpha", "req-2", anthropicCacheable)
+	if second.Code != 200 || second.Header().Get("X-Mainspring-Cache") != "hit" {
+		t.Fatalf("second should be a cache hit: code=%d cache=%q", second.Code, second.Header().Get("X-Mainspring-Cache"))
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("backend hits=%d, want 1", hits.Load())
+	}
+	// The replay must still be an Anthropic-shaped message, not the OpenAI body
+	// the upstream returned — each dialect caches its own wire shape.
+	if !strings.Contains(second.Body.String(), `"type":"message"`) {
+		t.Fatalf("replay is not an Anthropic message:\n%s", second.Body.String())
+	}
+	if strings.Contains(second.Body.String(), `"choices"`) {
+		t.Fatalf("replay leaked the OpenAI upstream shape:\n%s", second.Body.String())
+	}
+}
+
+// TestMessagesCacheDoesNotCollideWithOpenAI — cache.Key includes the request
+// path, so the same logical request through the two dialects must not serve one
+// dialect's body to the other.
+func TestMessagesCacheDoesNotCollideWithOpenAI(t *testing.T) {
+	var hits atomic.Int64
+	eng := countingEngine(t, &hits)
+	srv := twoTenantServer(t, eng.URL)
+	srv.SetCache(time.Minute, 16)
+	h := srv.Handler()
+
+	postMessagesAs(h, "key-alpha", "a1", anthropicCacheable)
+	w := postAs(h, "key-alpha", "a2", `{"model":"m1","temperature":0,"messages":[{"role":"user","content":"hi"}]}`)
+	if w.Header().Get("X-Mainspring-Cache") == "hit" {
+		t.Fatal("an OpenAI request was served from the Anthropic cache entry")
+	}
+	if !strings.Contains(w.Body.String(), `"choices"`) {
+		t.Fatalf("OpenAI caller did not get an OpenAI body:\n%s", w.Body.String())
+	}
+}
+
+// TestMessagesCacheReplayDoesNotLeakTenantHeaders — the whitelist from #157 has
+// to hold on this dialect too, now that it replays responses at all.
+func TestMessagesCacheReplayDoesNotLeakTenantHeaders(t *testing.T) {
+	var hits atomic.Int64
+	eng := countingEngine(t, &hits)
+	srv := twoTenantServer(t, eng.URL)
+	srv.SetCache(time.Minute, 16)
+	h := srv.Handler()
+
+	if w := postMessagesAs(h, "key-alpha", "req-alpha", anthropicCacheable); w.Code != 200 {
+		t.Fatalf("leader status=%d body=%s", w.Code, w.Body.String())
+	}
+	w2 := postMessagesAs(h, "key-beta", "req-beta", anthropicCacheable)
+	if w2.Header().Get("X-Mainspring-Cache") != "hit" {
+		t.Fatalf("second tenant should be served from cache: %q", w2.Header().Get("X-Mainspring-Cache"))
+	}
+	assertOwnHeaders(t, "messages cache hit", w2.Header(), "req-beta", "7", "700")
+}
+
+// TestMessagesStreamingBypassesCache — a stream can never be replayed, and
+// cacheable() already refuses it; assert that holds through the new wiring.
+func TestMessagesStreamingBypassesCache(t *testing.T) {
+	var hits atomic.Int64
+	eng := countingEngine(t, &hits)
+	srv := twoTenantServer(t, eng.URL)
+	srv.SetCache(time.Minute, 16)
+	h := srv.Handler()
+
+	const body = `{"model":"m1","max_tokens":16,"temperature":0,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	postMessagesAs(h, "key-alpha", "s1", body)
+	w := postMessagesAs(h, "key-alpha", "s2", body)
+	if w.Header().Get("X-Mainspring-Cache") == "hit" {
+		t.Fatal("a streaming response must never be served from cache")
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("backend hits=%d, want 2 (both streams ran)", hits.Load())
+	}
+}
