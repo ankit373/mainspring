@@ -38,12 +38,16 @@ func (s *Server) candidatesFor(primary string) []string {
 	return out
 }
 
-// acquireOutcome is why acquireRunner ended.
+// acquireOutcome is why acquireRunner ended. Circuit-open and load-failure are
+// distinct: both let the caller try a fallback, but they are different facts
+// about the server, and collapsing them is what made a load failure report the
+// stable error code `circuit_open` on a server with no breaker configured.
 type acquireOutcome int
 
 const (
 	acquireOK          acquireOutcome = iota // runner reserved; release must be called
-	acquireUnavailable                       // circuit open or load failure → the caller may try a fallback
+	acquireCircuitOpen                       // the breaker is open for this model → try a fallback
+	acquireLoadFailed                        // the model failed to load → try a fallback
 	acquireBusy                              // the gate is saturated → backpressure, the caller should stop
 	acquireCancelled                         // the caller went away while queued → write nothing
 )
@@ -63,13 +67,13 @@ func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Ru
 	}
 	if !s.breaker.Allow(model) {
 		rel()
-		return nil, nil, wait, acquireUnavailable
+		return nil, nil, wait, acquireCircuitOpen
 	}
 	runner, err := s.sched.EnsureLoaded(r.Context(), model)
 	if err != nil {
 		s.breaker.OnResult(model, false)
 		rel()
-		return nil, nil, wait, acquireUnavailable
+		return nil, nil, wait, acquireLoadFailed
 	}
 	return runner, rel, wait, acquireOK
 }

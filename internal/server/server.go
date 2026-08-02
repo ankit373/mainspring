@@ -332,6 +332,11 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// Handler entry. Every outcome that never reaches the backend — a rejection, a
+	// cache hit, a coalesced replay — is timed from here, because for those there
+	// is no generation phase to time and reporting 0ms is not the same as
+	// reporting how long the client actually waited.
+	recvd := time.Now()
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read request body: "+err.Error())
@@ -370,6 +375,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := auth.FromContext(r.Context())
 	if !s.auth.AllowTokens(tenant) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
+		s.recordRejected(r.Context(), model, codeTokenBudget, recvd)
 		return
 	}
 
@@ -387,13 +393,14 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		s.auth.AddTokens(tenant, charge)
 		if s.metrics != nil {
 			s.metrics.Record(metrics.Event{
-				Time:         time.Now(),
+				Time:         recvd,
 				RequestID:    RequestID(r.Context()),
 				TraceID:      TraceID(r.Context()),
 				Model:        model,
 				Tenant:       auth.TenantOf(r.Context()),
 				Status:       cached.Status,
 				Cached:       true,
+				DurationMs:   ms(time.Since(recvd)),
 				Bytes:        int64(len(cached.Body)),
 				PromptTokens: cached.Prompt,
 				TokensEst:    cached.Completion,
@@ -430,13 +437,14 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 					s.auth.AddTokens(tenant, charge)
 					if s.metrics != nil {
 						s.metrics.Record(metrics.Event{
-							Time:         time.Now(),
+							Time:         recvd,
 							RequestID:    RequestID(r.Context()),
 							TraceID:      TraceID(r.Context()),
 							Model:        model,
 							Tenant:       auth.TenantOf(r.Context()),
 							Status:       f.val.Status,
 							Coalesced:    true,
+							DurationMs:   ms(time.Since(recvd)),
 							Bytes:        int64(len(f.val.Body)),
 							PromptTokens: f.val.Prompt,
 							TokensEst:    f.val.Completion,
@@ -461,10 +469,11 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// A candidate is skipped only for a pre-serve failure (circuit open or load
 	// error); gate saturation is backpressure, not a fallback trigger.
 	var (
-		runner    backend.Runner
-		release   func()
-		served    string
-		queueWait time.Duration
+		runner     backend.Runner
+		release    func()
+		served     string
+		queueWait  time.Duration
+		sawBreaker bool // a candidate was refused by an open circuit, not a load failure
 	)
 candidates:
 	for _, cand := range s.candidatesFor(model) {
@@ -474,19 +483,31 @@ candidates:
 		case acquireBusy:
 			w.Header().Set("Retry-After", "1")
 			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
+			s.recordRejected(r.Context(), cand, codeServerBusy, recvd)
 			return
 		case acquireCancelled:
 			// The caller disconnected while queued; a 503 would be written to a
 			// dead connection and would misreport why the request ended.
 			return
+		case acquireCircuitOpen:
+			sawBreaker = true
 		case acquireOK:
 			runner, release, served = rr, rel, cand
 			break candidates
 		}
 	}
 	if runner == nil {
+		// `circuit_open` is only true when a breaker actually refused a candidate.
+		// Every other way to get here — including every way to get here with the
+		// breaker disabled — is a load failure, and a client branching on the
+		// stable code must not be told a circuit tripped when none exists.
+		code := codeBackendUnavailable
+		if sawBreaker {
+			code = codeCircuitOpen
+		}
 		w.Header().Set("Retry-After", "5")
-		writeErr(w, codeCircuitOpen, "no available backend for "+model+" or its fallbacks")
+		writeErr(w, code, "no available backend for "+model+" or its fallbacks")
+		s.recordRejected(r.Context(), model, code, recvd)
 		return
 	}
 	defer release()
@@ -576,7 +597,7 @@ candidates:
 			Tenant:       auth.TenantOf(r.Context()),
 			Status:       cap.status,
 			Stream:       cap.stream,
-			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
+			DurationMs:   ms(time.Since(start)),
 			TTFTMs:       cap.ttftMs(),
 			Bytes:        cap.bytes,
 			PromptTokens: prompt,
@@ -585,9 +606,39 @@ candidates:
 			CostUSD:      s.costFor(served, prompt, completion, exact),
 			Retries:      pr.retries,
 			Fallback:     served != model,
-			QueueWaitMs:  float64(queueWait.Microseconds()) / 1000.0,
+			QueueWaitMs:  ms(queueWait),
 		})
 	}
+}
+
+// ms renders a duration as fractional milliseconds for the metrics event.
+func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
+
+// recordRejected records a request refused before it reached a backend — the
+// gate was saturated, a circuit was open, the tenant's token budget was spent,
+// or the context guardrail rejected it. The model is already resolved at every
+// one of those sites, so leaving them unrecorded is what makes /metrics and the
+// usage ledger describe a server that never refuses anything, which is precisely
+// the signal an operator needs most. `since` is when the handler received the
+// request; the event carries the real time spent deciding to refuse.
+func (s *Server) recordRejected(ctx context.Context, model string, code errorCode, since time.Time) {
+	if s.metrics == nil {
+		return
+	}
+	m, ok := codeMeta[code]
+	if !ok {
+		m = codeMeta[codeInternal]
+	}
+	s.metrics.Record(metrics.Event{
+		Time:       since,
+		RequestID:  RequestID(ctx),
+		TraceID:    TraceID(ctx),
+		Model:      model,
+		Tenant:     auth.TenantOf(ctx),
+		Status:     m.status,
+		ErrorCode:  string(code),
+		DurationMs: ms(time.Since(since)),
+	})
 }
 
 // failLoudHeaders builds the X-Mainspring-* signal headers and logs loudly when

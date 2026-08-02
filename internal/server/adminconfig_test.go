@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,36 @@ func TestAdminConfigReportsEffectiveSettings(t *testing.T) {
 	}
 	if priced := cfg["cost_rates_set"].(map[string]any); priced["m1"] != true {
 		t.Fatal("cost rate presence for m1 missing")
+	}
+}
+
+// TestAdminConfigReportsLedgerReality proves /admin/config answers "is the usage
+// ledger actually recording?" rather than "was a path configured?".
+func TestAdminConfigReportsLedgerReality(t *testing.T) {
+	// configTestServer wires a recorder with no ledger path at all.
+	w := getJSON(configTestServer(t, auth.New(nil)).Handler(), "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if l := cfg["usage_ledger"].(map[string]any); l["active"] != false {
+		t.Fatalf("usage_ledger = %v, want active:false when no ledger is open", l)
+	}
+
+	// A server whose ledger really opened reports active.
+	eng := fakeEngine(t)
+	rec, err := metrics.New(filepath.Join(t.TempDir(), "usage.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	h := server.New(fakeSched(eng.URL), auth.New(nil), rec).Handler()
+	w = getJSON(h, "/admin/config", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if l := cfg["usage_ledger"].(map[string]any); l["active"] != true {
+		t.Fatalf("usage_ledger = %v, want active:true for an open ledger", l)
 	}
 }
 

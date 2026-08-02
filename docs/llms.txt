@@ -126,7 +126,16 @@ MIT and already win; Mainspring wraps them).
   wait is the time a request actually spent queued for a concurrency-gate slot, measured separately from
   total duration so backpressure latency is distinguishable from real generation time. The same percentiles
   are in `/v1/quality` per model. Token counts are real when the upstream reports a usage object (non-stream
-  body, or the streaming `include_usage` final chunk), else estimated.
+  body, or the streaming `include_usage` final chunk), else estimated — including an `/v1/embeddings`
+  response, whose usage object carries `prompt_tokens` and no `completion_tokens`.
+  Refusals are counted too: 503 backpressure, 503 circuit-open/backend-unavailable, 429 token budget and
+  400 context-guardrail rejections all record an event with their real status, and the ledger's `error_code`
+  disambiguates causes that share one status. Cache hits and coalesced followers carry the latency the caller
+  actually saw, not 0ms. In-flight and queue-depth counters are maintained whether or not the concurrency
+  gate is enabled (it is off by default) — only the admission decision depends on `max_inflight`.
+  The ledger reports whether it really opened: the startup banner warns loudly on a failed open instead of
+  claiming an active ledger, `GET /admin/config` exposes `usage_ledger.active`, and the first write failure
+  is logged rather than discarded.
 - Config lint: catches config combinations that are valid YAML but silently do nothing — enforce_context/
   clamp_max_tokens/precise_context set but a model has no ctx (guardrail is a no-op for it), model_fallbacks
   targeting an unresolvable model/alias, a negative cost rate, or a missing tls_cert/tls_key file. Surfaced
@@ -149,7 +158,9 @@ MIT and already win; Mainspring wraps them).
   principal, so the log attributes an admin action to whoever performed it (omitted in open mode, where
   there is no principal, and for a rejected key). W3C `traceparent` is accepted/continued (or generated), the
   `trace_id` is recorded alongside `request_id`, and a child traceparent is forwarded to the engine so
-  distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK.
+  distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK. The caller's trace flags
+  are propagated unchanged, so a request that opted out of sampling is not sampled downstream; only a
+  trace Mainspring mints itself is marked sampled.
 - Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
   in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
   are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand —

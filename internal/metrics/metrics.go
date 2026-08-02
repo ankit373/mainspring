@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,6 +25,7 @@ type Event struct {
 	Model        string    `json:"model"`
 	Tenant       string    `json:"tenant,omitempty"`
 	Status       int       `json:"status"`
+	ErrorCode    string    `json:"error_code,omitempty"` // taxonomy code when the request was refused (503 busy vs circuit-open, …)
 	Stream       bool      `json:"stream"`
 	Cached       bool      `json:"cached,omitempty"`    // served from the response cache (no backend hit)
 	Coalesced    bool      `json:"coalesced,omitempty"` // served by sharing an in-flight leader's result
@@ -123,8 +125,9 @@ type Recorder struct {
 	stats   map[string]*modelStat
 	tenants map[string]*tenantStat
 
-	ledgerMu sync.Mutex
-	ledger   io.WriteCloser
+	ledgerMu  sync.Mutex
+	ledger    io.WriteCloser
+	writeErrd bool // a ledger write has already failed and been logged
 }
 
 // anonymousTenant is the rollup bucket for unauthenticated (open-mode) requests.
@@ -147,6 +150,16 @@ func New(ledgerPath string) (*Recorder, error) {
 	}
 	r.ledger = f
 	return r, nil
+}
+
+// LedgerActive reports whether the JSONL usage ledger is really open. A
+// configured path that failed to open leaves the recorder in-memory only, and an
+// operator must be able to see that instead of being told the ledger is on
+// because a path was set.
+func (r *Recorder) LedgerActive() bool {
+	r.ledgerMu.Lock()
+	defer r.ledgerMu.Unlock()
+	return r.ledger != nil
 }
 
 // Close flushes and closes the ledger.
@@ -206,14 +219,23 @@ func (r *Recorder) Record(ev Event) {
 	r.appendLedger(ev)
 }
 
+// appendLedger writes one event to the JSONL ledger. A write failure — a full
+// disk, a rotated-away file — silently stops the accounting record, so the first
+// one is logged; the rest are suppressed so a failing disk cannot flood the log
+// at request rate.
 func (r *Recorder) appendLedger(ev Event) {
 	r.ledgerMu.Lock()
 	defer r.ledgerMu.Unlock()
 	if r.ledger == nil {
 		return
 	}
-	if b, err := json.Marshal(ev); err == nil {
-		_, _ = r.ledger.Write(append(b, '\n'))
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	if _, err := r.ledger.Write(append(b, '\n')); err != nil && !r.writeErrd {
+		r.writeErrd = true
+		log.Printf("usage ledger write failed, accounting records are being lost (further errors suppressed): %v", err)
 	}
 }
 

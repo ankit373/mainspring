@@ -40,8 +40,12 @@ func fakeEngine(t *testing.T) *httptest.Server {
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Hello"}}]}`)
 	})
 	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		// The real /v1/embeddings usage shape: prompt_tokens + total_tokens, and no
+		// completion_tokens at all (an embedding has no completion). The fixture
+		// used to invent a completion_tokens:0 field, which is exactly why the
+		// bill-nothing bug in captureWriter.usage went unnoticed.
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"data":[{"embedding":[0.1,0.2,0.3],"index":0}],"usage":{"prompt_tokens":2,"completion_tokens":0}}`)
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2,0.3],"index":0}],"model":"m1","usage":{"prompt_tokens":2,"total_tokens":2}}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

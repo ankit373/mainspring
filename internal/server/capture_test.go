@@ -25,6 +25,20 @@ func TestUsageNonStreamExact(t *testing.T) {
 	}
 }
 
+// TestUsagePromptTokensOnlyIsExact pins the embeddings shape: a usage object
+// with prompt_tokens and no completion_tokens (an embedding has no completion)
+// must bill the prompt it reported, not zero.
+func TestUsagePromptTokensOnlyIsExact(t *testing.T) {
+	rr := httptest.NewRecorder()
+	c := newCapture(rr, time.Now())
+	c.Header().Set("Content-Type", "application/json")
+	feed(c, `{"object":"list","data":[{"embedding":[0.1],"index":0}],"usage":{"prompt_tokens":17,"total_tokens":17}}`)
+	p, cmp, exact := c.usage()
+	if !exact || p != 17 || cmp != 0 {
+		t.Fatalf("usage=(%d,%d,%v), want (17,0,true)", p, cmp, exact)
+	}
+}
+
 func TestUsageStreamIncludeUsage(t *testing.T) {
 	rr := httptest.NewRecorder()
 	c := newCapture(rr, time.Now())

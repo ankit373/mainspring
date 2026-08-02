@@ -87,6 +87,13 @@ func clientGone(ctx context.Context) bool {
 // decided *before* any byte reaches the client, so it is safe for both
 // streaming and non-streaming responses.
 func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string, body []byte, extra map[string]string) proxyResult {
+	// Apply the fail-loud extras (backend, device, degraded warning, served model)
+	// to the header map once, up front. Applying them only on the commit path is
+	// what left every error return below — timeout, 502, retries exhausted —
+	// silent about which backend and which model the failure came from.
+	for k, v := range extra {
+		w.Header().Set(k, v)
+	}
 	attempts := s.retryMax + 1
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 && !sleepBackoff(r.Context(), s.retryBackoff, attempt) {
@@ -125,7 +132,7 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 		if attempt > 0 {
 			w.Header().Set("X-Mainspring-Retries", strconv.Itoa(attempt))
 		}
-		copyErr := s.commitResponse(w, resp, extra)
+		copyErr := s.commitResponse(w, resp)
 		stream := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 		_ = resp.Body.Close()
 		if copyErr == nil {
@@ -182,20 +189,21 @@ func (s *Server) upstreamDo(r *http.Request, baseURL string, body []byte) (*http
 	return proxyClient.Do(outReq)
 }
 
-// commitResponse copies the upstream headers (minus hop-by-hop), applies the
-// fail-loud extras, writes the status, and streams the body to the client. It
-// returns the body-copy error, nil only when the whole body was delivered.
-func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response, extra map[string]string) error {
+// commitResponse copies the upstream headers (minus hop-by-hop), writes the
+// status, and streams the body to the client. It returns the body-copy error,
+// nil only when the whole body was delivered. The fail-loud extras are already
+// on the header map (see proxyTo) and win: a header we set describes this hop,
+// so an upstream that echoes the same name — Mainspring proxying Mainspring —
+// must not append a second, stale value.
+func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response) error {
 	for k, vs := range resp.Header {
-		if hopByHop[http.CanonicalHeaderKey(k)] {
+		ck := http.CanonicalHeaderKey(k)
+		if hopByHop[ck] || w.Header().Get(ck) != "" {
 			continue
 		}
 		for _, v := range vs {
-			w.Header().Add(k, v)
+			w.Header().Add(ck, v)
 		}
-	}
-	for k, v := range extra {
-		w.Header().Set(k, v)
 	}
 	w.WriteHeader(resp.StatusCode)
 	return flushCopy(w, resp.Body)

@@ -3,6 +3,7 @@ package metrics
 import (
 	"bufio"
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,5 +177,66 @@ func TestLedgerAppends(t *testing.T) {
 	}
 	if lines != 2 {
 		t.Fatalf("expected 2 ledger lines, got %d", lines)
+	}
+}
+
+// TestLedgerOpenFailureIsVisible proves an operator can tell a configured ledger
+// from a working one. A failed open used to be a one-line stderr warning that
+// nothing downstream could see, so the banner and /admin/config went on claiming
+// the ledger was active while every accounting record was being dropped.
+func TestLedgerOpenFailureIsVisible(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(filepath.Join(blocker, "usage.jsonl"))
+	if err == nil {
+		t.Fatal("opening a ledger under a regular file should fail")
+	}
+	if r.LedgerActive() {
+		t.Fatal("LedgerActive must be false after a failed open")
+	}
+	// In-memory metrics still work — that is why the failure is non-fatal.
+	r.Record(Event{Time: time.Unix(1700000000, 0), Model: "m1", Status: 200})
+	var buf bytes.Buffer
+	r.WritePrometheus(&buf, Gauges{})
+	if !strings.Contains(buf.String(), `mainspring_requests_total{model="m1",status="200"} 1`) {
+		t.Fatalf("in-memory metrics should survive a ledger failure:\n%s", buf.String())
+	}
+
+	// A working ledger reports active.
+	ok, err := New(filepath.Join(t.TempDir(), "usage.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ok.Close()
+	if !ok.LedgerActive() {
+		t.Fatal("LedgerActive must be true for a ledger that opened")
+	}
+}
+
+// TestLedgerWriteFailureIsLoggedOnce proves a ledger that stops accepting writes
+// says so — once. Silently discarding every write is how an audit trail goes
+// missing without anyone noticing.
+func TestLedgerWriteFailureIsLoggedOnce(t *testing.T) {
+	r, err := New(filepath.Join(t.TempDir(), "usage.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil { // every subsequent write now fails
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(os.Stderr); log.SetFlags(log.LstdFlags) })
+
+	now := time.Unix(1700000000, 0)
+	r.Record(Event{Time: now, Model: "m1", Status: 200})
+	r.Record(Event{Time: now, Model: "m1", Status: 200})
+
+	if n := strings.Count(logs.String(), "usage ledger write failed"); n != 1 {
+		t.Fatalf("logged the write failure %d times, want exactly 1:\n%s", n, logs.String())
 	}
 }
