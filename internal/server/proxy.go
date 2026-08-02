@@ -65,6 +65,7 @@ type proxyResult struct {
 	retries       int  // additional upstream attempts incurred (0 = succeeded first try)
 	incomplete    bool // the body did not arrive in full → never cacheable or shareable
 	backendFailed bool // the break was the backend's fault (not a caller's own abort)
+	abandoned     bool // the caller went away; the request says nothing about the backend
 }
 
 // clientGone reports whether the caller cancelled its own request. Such a
@@ -89,9 +90,10 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 	attempts := s.retryMax + 1
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 && !sleepBackoff(r.Context(), s.retryBackoff, attempt) {
-			if !clientGone(r.Context()) {
-				writeErr(w, codeTimeout, "request timed out")
+			if clientGone(r.Context()) {
+				return proxyResult{retries: attempt, abandoned: true}
 			}
+			writeErr(w, codeTimeout, "request timed out")
 			return proxyResult{retries: attempt}
 		}
 		last := attempt == attempts-1
@@ -99,7 +101,7 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 		resp, err := s.upstreamDo(r, baseURL, body)
 		if err != nil {
 			if clientGone(r.Context()) {
-				return proxyResult{retries: attempt}
+				return proxyResult{retries: attempt, abandoned: true}
 			}
 			if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 				writeErr(w, codeTimeout, "request timed out")
@@ -142,7 +144,7 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 				sseError(w, codeUpstreamError, "upstream stream ended prematurely: "+copyErr.Error())
 			}
 		}
-		return proxyResult{retries: attempt, incomplete: true, backendFailed: !clientLeft}
+		return proxyResult{retries: attempt, incomplete: true, backendFailed: !clientLeft, abandoned: clientLeft}
 	}
 }
 

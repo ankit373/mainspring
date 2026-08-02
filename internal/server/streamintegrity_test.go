@@ -278,3 +278,58 @@ func TestClientCancelledWhileQueuedGetsNoBusyError(t *testing.T) {
 		t.Fatalf("nothing should be written to an abandoned connection, got: %s", w.Body.String())
 	}
 }
+
+// TestClientAbortDoesNotClearBankedFailures is the other half of "an abort is not
+// evidence". Not charging the abort to the breaker is only half right: routing it
+// to OnResult(success) instead would zero the failure count, because any success
+// closes the breaker. A client on a flaky connection — or one doing it on purpose —
+// could then hold a genuinely broken backend's circuit closed forever, which is
+// worse than the bug being fixed.
+func TestClientAbortDoesNotClearBankedFailures(t *testing.T) {
+	hold := make(chan struct{})
+	defer close(hold)
+	var holding atomic.Bool
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		if holding.Load() {
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable) // a real backend failure
+	})
+	eng := httptest.NewServer(mux)
+	t.Cleanup(eng.Close)
+
+	h := integrityServer(t, eng.URL, func(srv *server.Server) {
+		srv.SetBreaker(2, time.Hour) // two failures to trip
+		srv.SetConcurrency(1, 4)     // so /metrics reports in-flight
+	})
+	const body = `{"model":"m1","messages":[]}`
+
+	// 1. One genuine failure banked (1 of 2).
+	postBody(h, body)
+	if out := scrape(t, h); strings.Contains(out, `mainspring_breaker_open{model="m1"} 1`) {
+		t.Fatal("one failure of two must not open the circuit yet")
+	}
+
+	// 2. A client starts a request and abandons it.
+	holding.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); h.ServeHTTP(httptest.NewRecorder(), req) }()
+	waitForMetric(t, h, `mainspring_inflight_requests{model="m1"} 1`)
+	cancel()
+	<-done
+	holding.Store(false)
+
+	// 3. The second genuine failure must still open the circuit.
+	postBody(h, body)
+	if out := scrape(t, h); !strings.Contains(out, `mainspring_breaker_open{model="m1"} 1`) {
+		t.Fatalf("the abort cleared the banked failure — a flaky client can now hold a broken backend closed:\n%s", out)
+	}
+}

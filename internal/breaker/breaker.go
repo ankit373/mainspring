@@ -99,6 +99,30 @@ func (g *Group) Allow(key string) bool {
 	return false
 }
 
+// OnAbandoned releases a request that produced no verdict about the backend —
+// a caller that cancelled before the answer arrived. Such a request says nothing
+// about backend health, so the failure count must not move in either direction:
+// recording a failure would let client disconnects open the circuit for every
+// tenant, and recording a success would clear the count, letting a client with a
+// flaky connection hold a genuinely broken backend's circuit closed indefinitely.
+//
+// The one thing that must not leak is a consumed probe. Allow() moves
+// Open -> HalfOpen and then refuses every later caller until OnResult resolves it,
+// so an abandoned probe would wedge the breaker half-open forever. Put it back to
+// Open, leaving openedAt alone: the cooldown has already elapsed, so the next
+// caller takes the probe immediately rather than serving another full cooldown for
+// someone else's cancellation.
+func (g *Group) OnAbandoned(key string) {
+	if !g.Enabled() {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if b := g.breakers[key]; b != nil && b.state == HalfOpen {
+		b.state = Open
+	}
+}
+
 // OnResult records the outcome of a request (or health probe) for key.
 func (g *Group) OnResult(key string, success bool) {
 	if !g.Enabled() {

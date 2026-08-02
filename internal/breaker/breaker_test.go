@@ -189,3 +189,54 @@ func TestWritePrometheusDistinguishesHalfOpen(t *testing.T) {
 		t.Fatalf("expected half_open=1, got:\n%s", out)
 	}
 }
+
+// TestOnAbandonedDoesNotClearFailures is the regression test for treating a
+// client's own cancellation as evidence. A cancelled request learned nothing
+// about the backend, but OnResult(key, true) zeroes the failure count — so
+// routing cancellations through it would let a client with a flaky connection
+// hold a genuinely broken backend's circuit closed indefinitely.
+func TestOnAbandonedDoesNotClearFailures(t *testing.T) {
+	g := NewGroup(3, time.Minute)
+
+	g.OnResult("m", false)
+	g.OnResult("m", false) // 2 of 3 failures banked
+
+	g.OnAbandoned("m") // a caller gave up; this is not evidence either way
+
+	g.OnResult("m", false) // the third real failure must still open the circuit
+	if got := g.State("m"); got != Open {
+		t.Fatalf("state = %v, want open: an abandoned request must not clear the failure count", got)
+	}
+}
+
+// TestOnAbandonedReleasesAHalfOpenProbe — Allow() moves Open->HalfOpen and then
+// refuses everyone until OnResult resolves it, so a caller that takes the probe
+// and then disconnects would wedge the breaker half-open forever.
+func TestOnAbandonedReleasesAHalfOpenProbe(t *testing.T) {
+	clock := int64(0)
+	g := NewGroup(1, time.Minute)
+	g.now = func() time.Time { return time.Unix(0, clock) }
+
+	g.OnResult("m", false)
+	if got := g.State("m"); got != Open {
+		t.Fatalf("state = %v, want open", got)
+	}
+	clock = int64(2 * time.Minute)
+	if !g.Allow("m") {
+		t.Fatal("cooldown elapsed: this caller should get the probe")
+	}
+	if got := g.State("m"); got != HalfOpen {
+		t.Fatalf("state = %v, want half-open (probe in flight)", got)
+	}
+
+	g.OnAbandoned("m") // that caller disconnected without ever reaching the backend
+
+	if got := g.State("m"); got != Open {
+		t.Fatalf("state = %v, want open again — an unresolved probe must not be left in flight", got)
+	}
+	// The cooldown already elapsed, so the *next* caller takes the probe straight
+	// away rather than serving another full cooldown for someone else's abort.
+	if !g.Allow("m") {
+		t.Fatal("next caller should immediately get the released probe")
+	}
+}

@@ -526,10 +526,17 @@ candidates:
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
 	// (4xx is a client error, not the backend's fault). backendFailed covers what
 	// the status cannot: once a response is committed — 200 for a stream — a body
-	// that stops early would otherwise be recorded as a success. A caller that
-	// cancelled its own request is excluded, so client aborts cannot open the
-	// circuit for every tenant.
-	s.breaker.OnResult(served, !pr.backendFailed && cap.status < 500)
+	// that stops early would otherwise be recorded as a success.
+	//
+	// A caller that abandoned its own request is neither: it never learned whether
+	// the backend was healthy. Recording a failure would let client disconnects open
+	// the circuit for every tenant; recording a success would clear the failure
+	// count, letting a flaky client hold a broken backend's circuit closed.
+	if pr.abandoned {
+		s.breaker.OnAbandoned(served)
+	} else {
+		s.breaker.OnResult(served, !pr.backendFailed && cap.status < 500)
+	}
 
 	prompt, completion, exact := cap.usage()
 	// Build the shareable value once for a successful, non-streaming, within-cap,
