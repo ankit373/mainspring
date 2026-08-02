@@ -6,5 +6,7 @@ backend: ollama
 ollama_host: "http://127.0.0.1:18080"
 usage_ledger: "off"
 models:
+  # No `path`: for an adopt-only backend the model id IS the engine's model name,
+  # and nothing is loaded from disk. This used to say `path: mock-model`, which
+  # made id and path identical and so hid that distinction from every test.
   - id: mock-model
-    path: mock-model
