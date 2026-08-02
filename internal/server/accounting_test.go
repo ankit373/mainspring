@@ -388,3 +388,57 @@ func postKeyed(h http.Handler, key, body string) *httptest.ResponseRecorder {
 	h.ServeHTTP(w, req)
 	return w
 }
+
+// ── /v1/messages rejection coverage ──────────────────────────────────────────
+
+// postKeyedMessages posts an Anthropic request with an API key.
+func postKeyedMessages(h http.Handler, key, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+// TestMessagesTokenBudgetRejectionIsRecorded — /v1/messages has its own budget,
+// gate and breaker checks that return before the generation path, so each needs
+// its own recording call. Without them /metrics shows an Anthropic API that
+// never refuses anything, which is precisely the signal an operator needs.
+func TestMessagesTokenBudgetRejectionIsRecorded(t *testing.T) {
+	eng := usageEngine(t)
+	a := auth.NewTenants([]auth.Tenant{{Name: "t", Key: "k", TokenBudget: 1, WindowSec: 60}})
+	h, events := acctServer(t, fakeSched(eng.URL), a, nil)
+
+	const body = `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	if w := postKeyedMessages(h, "k", body); w.Code != 200 {
+		t.Fatalf("first status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := postKeyedMessages(h, "k", body); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status=%d, want 429", w.Code)
+	}
+	ev := lastEvent(t, events())
+	if ev.Status != http.StatusTooManyRequests || ev.ErrorCode != "token_budget_exceeded" {
+		t.Fatalf("recorded %+v, want a 429 token_budget_exceeded", ev)
+	}
+}
+
+// TestMessagesCircuitOpenRejectionIsRecorded covers the breaker fast-fail on the
+// Anthropic path.
+func TestMessagesCircuitOpenRejectionIsRecorded(t *testing.T) {
+	var hits atomic.Int64
+	eng := flakyEngine(t, -1, &hits) // always 503
+	h, events := acctServer(t, fakeSched(eng.URL), auth.New(nil), func(srv *server.Server) {
+		srv.SetBreaker(1, time.Hour)
+	})
+
+	const body = `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	postMessages(h, body) // trips the breaker
+	w := postMessages(h, body)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503 (circuit open); body=%s", w.Code, w.Body.String())
+	}
+	ev := lastEvent(t, events())
+	if ev.ErrorCode != "circuit_open" {
+		t.Fatalf("recorded %+v, want a circuit_open rejection", ev)
+	}
+}
