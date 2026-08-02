@@ -161,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/embeddings", s.inference)
 	mux.HandleFunc("/v1/tokenize", s.tokenize) // token-counting utility
 	mux.HandleFunc("/v1/messages", s.messages) // Anthropic Messages API
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.messagesCountTokens)
 	// Admin API (management actions; admin-gated, audited via the access log).
 	mux.HandleFunc("GET /admin/config", s.adminConfig)
 	mux.HandleFunc("GET /admin/usage", s.adminUsage)
@@ -171,8 +172,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/breaker/{id}/reset", s.adminBreakerReset)
 	mux.HandleFunc("POST /admin/cache/clear", s.adminCacheClear)
 	// requestID is outermost so every request — including auth rejections and
-	// health checks — gets a correlation id and an access-log line.
-	return s.requestID(s.auth.Wrap(mux))
+	// health checks — gets a correlation id and an access-log line. routeErrors is
+	// innermost: an unauthenticated request is still rejected with 401 before
+	// anything learns which paths exist.
+	return s.requestID(s.auth.Wrap(routeErrors(mux)))
 }
 
 // metricsHandler renders the Prometheus exposition, merging live residency.

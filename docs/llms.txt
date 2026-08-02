@@ -13,7 +13,8 @@ MIT and already win; Mainspring wraps them).
 ## What it does
 
 - One versioned API: OpenAI (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-  `/v1/models`) and Anthropic (`/v1/messages`, tool use + images + streaming translated). Both dialects
+  `/v1/models`) and Anthropic (`/v1/messages`, tool use + images + streaming translated, plus
+  `/v1/messages/count_tokens` for pre-flighting a context budget). Both dialects
   are SDK-verified in CI: the real `openai` and `anthropic` Python and JS clients drive a running
   server on every push, over the happy path *and* the failure paths (upstream 5xx, truncated stream).
 - Per-model backend routing: one server can serve a GGUF via llama.cpp, an MLX model, and an adopted
@@ -83,6 +84,12 @@ MIT and already win; Mainspring wraps them).
   bare string or an array of strings (the embeddings shape); an array is reported as the sum of its
   elements and is `exact` only if every element was counted exactly. Any other shape is a 400 naming the
   field rather than a silently miscounted request.
+- Anthropic pre-flight counting: `POST /v1/messages/count_tokens {model, messages, system?, tools?}` —
+  the endpoint the Anthropic SDK's `client.messages.count_tokens(...)` calls — returns exactly
+  `{"input_tokens": N}`, counted through the same path as `/v1/tokenize` (no second tokenizer). Because
+  the count is exact or estimated on the same terms, which one it was is reported on
+  `X-Mainspring-Tokens-Method: exact|estimated` rather than left to be assumed; the body stays the
+  Anthropic contract. Tool *definitions* are not counted, only messages and the system prompt.
 - Graceful clamp (opt-in): `clamp_max_tokens` shrinks an over-budget `max_tokens`/`max_completion_tokens`
   to the room left in the context window and proceeds (header `X-Mainspring-Clamped: <from>-><to>`),
   instead of rejecting — runs before the guardrail; a request with no room left falls through to it.
@@ -213,6 +220,8 @@ MIT and already win; Mainspring wraps them).
 - `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta;
   `temperature`, `top_p`, `top_k` and `stop_sequences` are all forwarded to the engine — `top_k` is not in
   the OpenAI schema but every engine Mainspring drives accepts it, so it is passed on rather than dropped)
+- `POST /v1/messages/count_tokens` (Anthropic token pre-flight; body is exactly `{"input_tokens": N}`,
+  with `X-Mainspring-Tokens-Method: exact|estimated` saying how it was counted)
 - `GET /v1/models`, `GET /v1/models/{id}` (OpenAI "retrieve a model"; resolves aliases; adds
   resident/backend/device/effective_ctx/degraded when the model is loaded), `GET /capabilities`,
   `GET /metrics`, `GET /healthz`, `GET /readyz`
@@ -234,10 +243,13 @@ MIT and already win; Mainspring wraps them).
 
 All errors are OpenAI-shaped `{"error":{"message","type","code"}}` with a stable machine-branchable
 `code`: `invalid_request`, `context_length_exceeded`, `method_not_allowed`, `model_not_found`,
-`unauthorized`, `forbidden`, `rate_limited`, `token_budget_exceeded`, `server_busy`, `circuit_open`,
-`backend_unavailable`, `upstream_error`, `timeout`, `internal_error`. Same-status/different-cause
-conditions are distinguished by `code` (503: server_busy vs circuit_open vs backend_unavailable;
-400: invalid_request vs context_length_exceeded).
+`route_not_found`, `unauthorized`, `forbidden`, `rate_limited`, `token_budget_exceeded`, `server_busy`,
+`circuit_open`, `backend_unavailable`, `upstream_error`, `timeout`, `internal_error`.
+Same-status/different-cause conditions are distinguished by `code` (503: server_busy vs circuit_open vs
+backend_unavailable; 400: invalid_request vs context_length_exceeded; 404: model_not_found — the model
+— vs route_not_found — the endpoint). Paths the server does not route are inside the taxonomy too: an
+unknown path is a `route_not_found` 404 and a wrong method a `method_not_allowed` 405 carrying `Allow`,
+never Go's plain-text default.
 
 ## Non-goals
 

@@ -282,6 +282,47 @@ except anthropic.NotFoundError:
 except Exception as ex:  # noqa: BLE001
     fail("unknown model raises NotFoundError", "raised " + type(ex).__name__)
 
+# ── 12. count_tokens ──────────────────────────────────────────────────────────
+# The SDK's pre-flight budget check. No generation happens, so this is cheap: the
+# request never reaches the upstream at all.
+ct = client.messages.count_tokens(model=MODEL, messages=[{"role": "user", "content": "hi"}])
+check("count_tokens reports input_tokens", ct.input_tokens > 0)
+
+longer = client.messages.count_tokens(
+    model=MODEL, system="Be terse.",
+    messages=[{"role": "user", "content": "a considerably longer prompt " * 20}])
+check("count_tokens grows with the prompt", longer.input_tokens > ct.input_tokens)
+
+# A count that might be exact or estimated must say which — the body is fixed by
+# the Anthropic contract, so the answer rides on a header.
+raw = client.messages.with_raw_response.count_tokens(
+    model=MODEL, messages=[{"role": "user", "content": "hi"}])
+check("count_tokens declares whether the count was exact or estimated",
+      raw.headers.get("x-mainspring-tokens-method") in ("exact", "estimated"))
+
+try:
+    client.messages.count_tokens(model="does-not-exist",
+                                 messages=[{"role": "user", "content": "x"}])
+    fail("count_tokens on an unknown model raises NotFoundError", "no error raised")
+except anthropic.NotFoundError as e:
+    check("count_tokens on an unknown model raises NotFoundError", True)
+    check("count_tokens 404 carries the model_not_found code", err_code(e) == "model_not_found")
+except Exception as ex:  # noqa: BLE001
+    fail("count_tokens on an unknown model raises NotFoundError", "raised " + type(ex).__name__)
+
+# ── 13. an unrouted path answers inside the error taxonomy ────────────────────
+# Not an SDK call: no SDK asks for a path the server does not serve. It is here
+# because it is the same promise every other error on this list keeps — a stable
+# `code` to branch on — and Go's ServeMux breaks it by default with plain text.
+try:
+    client.get("/v1/no-such-endpoint", cast_to=object)
+    fail("an unrouted path raises NotFoundError", "no error raised")
+except anthropic.NotFoundError as e:
+    check("an unrouted path raises NotFoundError", True)
+    check("an unrouted path carries the route_not_found code", err_code(e) == "route_not_found")
+except Exception as ex:  # noqa: BLE001
+    fail("an unrouted path raises NotFoundError", "raised " + type(ex).__name__)
+
 if failed:
     sys.exit(1)
 print("ALL PASS (anthropic python)")

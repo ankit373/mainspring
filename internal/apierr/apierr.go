@@ -23,6 +23,7 @@ const (
 	ContextLength      Code = "context_length_exceeded"
 	MethodNotAllowed   Code = "method_not_allowed"
 	ModelNotFound      Code = "model_not_found"
+	RouteNotFound      Code = "route_not_found" // no such endpoint — not "no such model"
 	Unauthorized       Code = "unauthorized"
 	Forbidden          Code = "forbidden"
 	RateLimited        Code = "rate_limited"
@@ -44,6 +45,7 @@ var codeMeta = map[Code]struct {
 	ContextLength:      {http.StatusBadRequest, "invalid_request_error"},
 	MethodNotAllowed:   {http.StatusMethodNotAllowed, "invalid_request_error"},
 	ModelNotFound:      {http.StatusNotFound, "not_found_error"},
+	RouteNotFound:      {http.StatusNotFound, "not_found_error"},
 	Unauthorized:       {http.StatusUnauthorized, "authentication_error"},
 	Forbidden:          {http.StatusForbidden, "permission_error"},
 	RateLimited:        {http.StatusTooManyRequests, "rate_limit_error"},

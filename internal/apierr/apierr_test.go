@@ -8,8 +8,8 @@ import (
 
 func TestEveryCodeHasMeta(t *testing.T) {
 	all := []Code{
-		InvalidRequest, ContextLength, MethodNotAllowed, ModelNotFound, Unauthorized,
-		Forbidden, RateLimited, TokenBudget, ServerBusy, CircuitOpen,
+		InvalidRequest, ContextLength, MethodNotAllowed, ModelNotFound, RouteNotFound,
+		Unauthorized, Forbidden, RateLimited, TokenBudget, ServerBusy, CircuitOpen,
 		BackendUnavailable, UpstreamError, Timeout, Internal,
 	}
 	for _, c := range all {
