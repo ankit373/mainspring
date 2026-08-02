@@ -23,7 +23,9 @@ import (
 // top_k, stop_sequences, streaming). Tool use is translated in both directions:
 // Anthropic tools/tool_choice ↔ OpenAI tools/tool_choice, assistant tool_use
 // blocks ↔ OpenAI tool_calls, and user tool_result blocks ↔ OpenAI role:tool
-// messages, including streaming (input_json_delta). Images are not yet translated.
+// messages, including streaming (input_json_delta). Image blocks are translated
+// to OpenAI image_url parts (a base64 source becomes a data: URI). The one
+// content caveat that is real: a tool_result's body is read as text only.
 
 type anthropicRequest struct {
 	Model         string             `json:"model"`
