@@ -65,6 +65,33 @@ const accumulated = await client.messages.stream({
 }).finalMessage();
 check("SDK stream accumulator rebuilds the message", accumulated.content[0].text === text);
 
+// ── 2b. a stop sequence Mainspring matched itself ─────────────────────────────
+// The Python suite owns the translation assertions. What only a second client can
+// disagree about is whether a stop the *server* decided on survives SSE decoding
+// and the SDK's accumulator — the fakeserver keeps emitting past the match, so
+// anything after "Hello from " reaching the caller is a real failure.
+const stopped = [];
+for await (const e of await client.messages.create({
+  model: MODEL, max_tokens: 64, stream: true, stop_sequences: ["fakeserver"],
+  messages: [{ role: "user", content: "hi" }],
+})) stopped.push(e);
+const stoppedText = stopped
+  .filter((e) => e.type === "content_block_delta" && e.delta.type === "text_delta")
+  .map((e) => e.delta.text).join("");
+const stopDelta = stopped.find((e) => e.type === "message_delta");
+check("streamed text is cut at the stop sequence", stoppedText === "Hello from ");
+check("streamed stop_reason is stop_sequence", stopDelta?.delta?.stop_reason === "stop_sequence");
+check("streamed stop_sequence is named", stopDelta?.delta?.stop_sequence === "fakeserver");
+check("a stopped stream still ends with message_stop", stopped.at(-1).type === "message_stop");
+
+const stopFinal = await client.messages.stream({
+  model: MODEL, max_tokens: 64, stop_sequences: ["fakeserver"],
+  messages: [{ role: "user", content: "hi" }],
+}).finalMessage();
+check("accumulator carries stop_reason through", stopFinal.stop_reason === "stop_sequence");
+check("accumulator carries the stop sequence through", stopFinal.stop_sequence === "fakeserver");
+check("accumulator carries the cut text through", stopFinal.content[0].text === "Hello from ");
+
 // ── 3. tool use ───────────────────────────────────────────────────────────────
 const t = await client.messages.create({
   model: MODEL, max_tokens: 64, tools: TOOLS, tool_choice: { type: "any" },

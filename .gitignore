@@ -28,3 +28,6 @@ BUILD_STATE.md
 
 # Go
 /vendor/
+
+# Conformance suites npm-install the SDKs into the repo root (--no-save).
+node_modules/

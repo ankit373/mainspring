@@ -42,6 +42,14 @@ MIT and already win; Mainspring wraps them).
   stream is already open at 200. A truncated *non-streaming* body is never treated as a result: it is
   not stored in the response cache and not published to coalescing followers, so one severed read can
   never be replayed as a success.
+- Stop sequences that are answered truthfully. Anthropic reports *which* sequence ended a generation
+  (`stop_reason: "stop_sequence"` plus the sequence itself); OpenAI's `finish_reason` says only "stop",
+  which it also uses for a natural end, and every engine erases the matched sequence from the text before
+  returning it — so once the stop set is forwarded, the hit is unrecoverable. Mainspring therefore keeps
+  the stop set away from the engine and matches the sequences itself, incrementally, so one split across
+  two stream deltas is still found. A non-streaming request is streamed from the engine internally so the
+  generation can be cut off at the match instead of running on to `max_tokens`; that also cuts off the
+  upstream usage chunk, so a stopped reply's token counts are estimates and are labelled as such.
 - Correct failure attribution: a caller that cancels its own request (Ctrl-C, closed tab, aborted SDK
   call) learned nothing about the backend, so it votes neither way. It is not charged to the circuit
   breaker as a failure — client disconnects cannot open the circuit for every tenant — and equally it
@@ -218,8 +226,9 @@ MIT and already win; Mainspring wraps them).
 
 - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
 - `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta;
-  `temperature`, `top_p`, `top_k` and `stop_sequences` are all forwarded to the engine — `top_k` is not in
-  the OpenAI schema but every engine Mainspring drives accepts it, so it is passed on rather than dropped)
+  `temperature`, `top_p` and `top_k` are forwarded to the engine — `top_k` is not in the OpenAI schema but
+  every engine Mainspring drives accepts it, so it is passed on rather than dropped. `stop_sequences` are
+  deliberately *not* forwarded; Mainspring matches them itself — see "Stop sequences" above)
 - `POST /v1/messages/count_tokens` (Anthropic token pre-flight; body is exactly `{"input_tokens": N}`,
   with `X-Mainspring-Tokens-Method: exact|estimated` saying how it was counted)
 - `GET /v1/models`, `GET /v1/models/{id}` (OpenAI "retrieve a model"; resolves aliases; adds

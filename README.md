@@ -36,7 +36,9 @@ layer around them **fail loud, VRAM-aware, and governed**.
   upstream 5xx, a stream cut mid-flight). Both dialects also run the **same** pipeline — auth,
   per-tenant budgets, context guardrail, clamp, concurrency gate, timeouts, circuit breaker, cost
   accounting, response cache, coalescing, retry and model fallback. They differ in what they put on
-  the wire, not in how a request is governed.
+  the wire, not in how a request is governed. Anthropic `stop_sequences` are matched by Mainspring
+  rather than forwarded to the engine, because an engine that stops also erases the match — so
+  `stop_reason: "stop_sequence"` actually names the sequence that hit.
 - **Pluggable backends** behind a `Backend`/`Runner` interface: `llamacpp` and `mlx` (managed
   subprocess) · `ollama` / `lmstudio` / `llamafile` / `gpt4all` (detect-and-adopt-only, never installed).
   **Per-model routing, aliases, and ordered fallback chains** — one server can serve several models on
