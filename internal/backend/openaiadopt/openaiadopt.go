@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,12 +52,11 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", b.name, err)
 	}
-	for _, m := range models {
-		if m == spec.ID {
-			return &runner{name: b.name, host: b.host, spec: spec}, nil
-		}
+	if !slices.Contains(models, spec.ID) {
+		return nil, backend.MissingModelError(b.name, b.host, spec, models,
+			fmt.Sprintf("Load it in %s first (Mainspring will not load it).", b.name))
 	}
-	return nil, fmt.Errorf("%s: model %q not loaded — load it in %s first (Mainspring will not load it)", b.name, spec.ID, b.name)
+	return &runner{name: b.name, host: b.host, spec: spec}, nil
 }
 
 // ListModels enumerates the models the adopted OpenAI-compatible server exposes.

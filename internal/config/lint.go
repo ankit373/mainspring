@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+
+	"github.com/ankit373/mainspring/internal/backend"
 )
 
 // LintWarning is one config combination that is valid YAML but has no effect
@@ -39,6 +41,17 @@ func (c Config) Lint() []LintWarning {
 	}
 
 	for _, m := range c.Models {
+		// An adopt-only backend runs its own process and holds its own weights, so
+		// there is no file for Mainspring to open: the model id must be the name the
+		// daemon knows it by, and path is read by nothing. Setting it is usually a
+		// sign the id is wrong — the real name was put in path — which otherwise
+		// surfaces much later as a request-time failure naming a model that does not
+		// exist.
+		if b := c.modelBackend(m); backend.IsAdopt(b) && m.Path != "" {
+			warnings = append(warnings, LintWarning{m.ID, fmt.Sprintf(
+				"path is ignored for the adopt-only backend %q — the model id must be the name %s "+
+					"knows it by, so you likely want `id: %s`", b, b, m.Path)})
+		}
 		if m.Ctx <= 0 {
 			if c.EnforceContext || boolOverride(m.EnforceContext) {
 				warnings = append(warnings, LintWarning{m.ID,
@@ -114,4 +127,13 @@ func effective(global bool, override *bool) bool {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// modelBackend is the backend a model will actually run on: its own if set, else
+// the server-wide default.
+func (c Config) modelBackend(m Model) string {
+	if m.Backend != "" {
+		return m.Backend
+	}
+	return c.Backend
 }

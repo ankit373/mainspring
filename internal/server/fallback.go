@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -80,6 +81,13 @@ func (s *Server) acquireRunner(r *http.Request, model string) (runner backend.Ru
 			s.breaker.OnAbandoned(model)
 			return nil, nil, wait, acquireCancelled
 		}
+		// The reason is the only thing that makes this actionable, and it used to be
+		// dropped here: the caller's 503 says "no available backend", which is true
+		// and useless. A backend knows exactly why — a model the daemon does not
+		// have, a binary that is missing, a subprocess that would not start — so say
+		// it where an operator will see it. It stays out of the response: the caller
+		// cannot act on another host's inventory, and the operator can.
+		log.Printf("LOAD-FAILED model=%s: %v", model, err)
 		s.breaker.OnResult(model, false)
 		return nil, nil, wait, acquireLoadFailed
 	}

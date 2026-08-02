@@ -44,8 +44,10 @@ layer around them **fail loud, VRAM-aware, and governed**.
   `stop_reason: "stop_sequence"` actually names the sequence that hit.
 - **Pluggable backends** behind a `Backend`/`Runner` interface: `llamacpp` and `mlx` (managed
   subprocess) · `ollama` / `lmstudio` / `llamafile` / `gpt4all` (detect-and-adopt-only, never installed).
-  **Per-model routing, aliases, and ordered fallback chains** — one server can serve several models on
-  different engines and fail over when one is down.
+  For an adopted daemon a model's **`id` is the name that daemon knows it by** and `path` is unused —
+  there is no file to open — and setting `path` anyway is flagged at startup rather than surfacing later
+  as a failed request. **Per-model routing, aliases, and ordered fallback chains** — one server can serve
+  several models on different engines and fail over when one is down.
 - **Fail loud, never silently degrade** — `/capabilities` and `X-Mainspring-{Backend,Device,Warning}`
   headers state the *actual* backend, whether it fell back to CPU, and the *effective* context window.
 - **`n` is checked against the answer** — ask for `n: 3` candidates from an engine that never

@@ -24,6 +24,14 @@ MIT and already win; Mainspring wraps them).
   `X-Mainspring-Backend`. An absent fallback backend is skipped at startup, not fatal.
 - Model aliases: map a friendly name (e.g. `gpt-4o`) to a real model id (chainable, cycle-checked at
   startup); aliases appear in `/v1/models` and resolve on every inference path.
+- Adopt-only backends (`ollama`, `lmstudio`, `llamafile`, `gpt4all`) run their own process and hold
+  their own weights, so a model's `id` is the name the daemon itself uses and `path` is read by nothing.
+  Setting `path` on one is warned about at startup — it is usually a sign the real name was put there
+  and the id is wrong. When a daemon does not have the requested model, the failure names the daemon,
+  lists what it actually holds, and says which id to use, instead of advising a pull of a model that
+  does not exist. A load failure's reason is logged (`LOAD-FAILED model=… : …`) rather than collapsing
+  into a bare `no available backend`; it stays out of the response, because the caller cannot act on
+  another host's inventory and the operator can.
 - Model auto-discovery (opt-in `discover_models: true`): enumerate models from present adopt backends
   (Ollama `/api/tags`, LM Studio / llamafile / GPT4All `/v1/models`) and expose them automatically;
   configured models win on an id clash. Adopted Ollama models also get a pre-admission size estimate
