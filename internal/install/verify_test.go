@@ -92,10 +92,18 @@ func TestDownloadIsBounded(t *testing.T) {
 	defer func(orig int64) { maxDownloadBytes = orig }(maxDownloadBytes)
 	maxDownloadBytes = 1 << 20
 
+	// The handler reads this local, never the package var. Deferred restores run
+	// before t.Cleanup closes the server, so a handler goroutine still writing
+	// when the test returns would otherwise read maxDownloadBytes concurrently
+	// with the restore — a real race, and one that only trips sometimes, which is
+	// the kind that turns up as an unexplained red CI run rather than a failure
+	// you can reproduce.
+	limit := maxDownloadBytes
+
 	// Serve past the cap, stopping as soon as the client hangs up.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		chunk := make([]byte, 1<<20)
-		for sent := int64(0); sent <= maxDownloadBytes; sent += int64(len(chunk)) {
+		for sent := int64(0); sent <= limit; sent += int64(len(chunk)) {
 			if _, err := w.Write(chunk); err != nil {
 				return
 			}
