@@ -189,6 +189,11 @@ MIT and already win; Mainspring wraps them).
   distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK. The caller's trace flags
   are propagated unchanged, so a request that opted out of sampling is not sampled downstream; only a
   trace Mainspring mints itself is marked sampled.
+- The config file is read strictly: a key the schema does not know is a startup error naming the key,
+  its line, and the nearest real field, not a silently dropped line. It has to be — a config is decoded
+  into a struct, so `enfore_context: true` would otherwise start a server with the guardrail *off* and
+  say nothing, which is the silent degradation this server exists to prevent, arriving through the
+  config file. A `SIGHUP` reload refuses the same way and keeps the running config.
 - Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
   in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
   are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand —
