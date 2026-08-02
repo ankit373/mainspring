@@ -160,62 +160,50 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	}
 	defer doneSharing()
 
-	release, queueWait, res := s.gate.acquire(r.Context(), model)
-	if res != gateAcquired {
-		// gateCancelled means the caller is already gone: writing a 503 there would
-		// report backpressure that never happened, to a dead connection.
-		if res == gateFull {
-			w.Header().Set("Retry-After", "1")
-			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
-			s.recordRejected(r.Context(), model, codeServerBusy, recvd)
-		}
+	// Same selection the OpenAI path uses: the requested model, then its fallback
+	// chain, with gate saturation, an open circuit and a load failure each reported
+	// as themselves.
+	runner, release, served, queueWait, servable := s.selectRunner(w, r, model, recvd)
+	if !servable {
 		return
 	}
 	defer release()
 
-	if !s.breaker.Allow(model) {
-		w.Header().Set("Retry-After", "5")
-		writeErr(w, codeCircuitOpen, "circuit open: backend for "+model+" is unavailable")
-		s.recordRejected(r.Context(), model, codeCircuitOpen, recvd)
-		return
-	}
-
-	// Per-request timeout: bound total generation time (0 = unbounded).
-	if d := s.timeoutFor(model); d > 0 {
+	// Per-request timeout for the model that will actually serve (0 = unbounded).
+	if d := s.timeoutFor(served); d > 0 {
 		tctx, cancel := context.WithTimeout(r.Context(), d)
 		defer cancel()
 		r = r.WithContext(tctx)
 	}
 
-	runner, err := s.sched.EnsureLoaded(r.Context(), model)
-	if err != nil {
-		s.breaker.OnResult(model, false)
-		writeErr(w, codeBackendUnavailable, "load model "+model+": "+err.Error())
-		return
-	}
 	for k, v := range s.failLoudHeaders(r.Context(), runner) {
 		w.Header().Set(k, v)
+	}
+	// If a fallback answered, point the upstream body at it and tell the client.
+	if served != model {
+		oaiBody = rewriteModelField(oaiBody, served)
+		w.Header().Set("X-Mainspring-Served-Model", served)
 	}
 
 	start := time.Now()
 	// Wrap the writer once so the recorded event reports what was actually written
 	// (status, bytes, TTFT) instead of an assumed 200.
 	cap := newCapture(w, start)
-	if sh.wanted() {
+	if sh.wanted() && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
-	var prompt, completion int64
-	var exact, backendFailed bool
 	// Mark the runner busy for the actual generation call so the scheduler's
 	// idle timer and LRU eviction never pull it out from under a long-running
 	// request (e.g. one that streams longer than KeepAlive).
-	s.sched.MarkBusy(model)
+	s.sched.MarkBusy(served)
+	var gen messagesResult
 	if req.Stream {
-		prompt, completion, exact, backendFailed = s.messagesStream(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
+		gen = s.messagesStream(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
 	} else {
-		prompt, completion, exact, backendFailed = s.messagesJSON(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
+		gen = s.messagesJSON(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
 	}
-	s.sched.MarkIdle(model)
+	prompt, completion, exact, backendFailed := gen.prompt, gen.completion, gen.exact, gen.backendFailed
+	s.sched.MarkIdle(served)
 	// A 5xx counts as a backend failure; 2xx/4xx are healthy (4xx is a client error,
 	// not the backend's fault). backendFailed covers what the status cannot: once an
 	// SSE stream is open the status is pinned at 200, so a stream that died mid-flight
@@ -226,15 +214,15 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	// A caller that abandoned its own request learned nothing about the backend, so
 	// it votes neither way — see Group.OnAbandoned.
 	if clientGone(r.Context()) {
-		s.breaker.OnAbandoned(model)
+		s.breaker.OnAbandoned(served)
 	} else {
-		s.breaker.OnResult(model, !backendFailed && cap.status < 500)
+		s.breaker.OnResult(served, !backendFailed && cap.status < 500)
 	}
 
 	// Share a successful, complete, non-streaming response with later callers. The
 	// same bar as the OpenAI path: a truncated or failed body is never stored, or
 	// one severed answer is replayed for the life of the entry.
-	if !backendFailed && sh.wanted() && !cap.stream && !cap.bodyOver &&
+	if !backendFailed && sh.wanted() && served == model && !cap.stream && !cap.bodyOver &&
 		cap.status >= 200 && cap.status < 300 && cap.body != nil {
 		sh.store(cache.Value{
 			Status:     cap.status,
@@ -254,12 +242,14 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	if s.metrics != nil {
 		s.metrics.Record(metrics.Event{
 			Time: start, RequestID: RequestID(r.Context()), TraceID: TraceID(r.Context()),
-			Model: model, Tenant: auth.TenantOf(r.Context()),
+			Model: served, Tenant: auth.TenantOf(r.Context()),
 			Status: cap.status, Stream: cap.stream,
 			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
 			TTFTMs:       cap.ttftMs(),
 			Bytes:        cap.bytes,
 			PromptTokens: prompt, TokensEst: completion, Exact: exact,
+			Retries:     gen.retries,
+			Fallback:    served != model,
 			CostUSD:     s.costFor(model, prompt, completion, exact),
 			QueueWaitMs: float64(queueWait.Microseconds()) / 1000.0,
 		})
@@ -503,28 +493,29 @@ type oaiToolCall struct {
 // messagesJSON does a non-streaming upstream call and writes the Anthropic body.
 // It returns the real prompt/completion token counts and whether the upstream
 // supplied a usage object.
-func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact, backendFailed bool) {
-	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
+func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) messagesResult {
+	var exact bool
+	resp, retries, err := s.postUpstreamRetrying(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
 		if clientGone(ctx) {
 			// The caller cancelled: the connection is gone, so writing a 502 would
 			// both report a backend failure that did not happen and record it as
 			// one. Say nothing.
-			return 0, 0, false, false
+			return messagesResult{retries: retries}
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			writeErr(w, codeTimeout, "request timed out")
-			return 0, 0, false, false
+			return messagesResult{retries: retries}
 		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-		return 0, 0, false, false
+		return messagesResult{retries: retries}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		// Fail loud: an upstream error body decodes into zero choices, which would
 		// otherwise be served as a well-formed empty 200 Anthropic message.
 		writeUpstreamFailure(w, resp)
-		return 0, 0, false, false
+		return messagesResult{retries: retries}
 	}
 	var oai struct {
 		Choices []struct {
@@ -541,7 +532,7 @@ func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseUR
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBody)).Decode(&oai); err != nil {
 		writeError(w, http.StatusBadGateway, "decode backend response: "+err.Error())
-		return 0, 0, false, false
+		return messagesResult{retries: retries}
 	}
 	content, finish := "", ""
 	var toolCalls []oaiToolCall
@@ -584,7 +575,7 @@ func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseUR
 		w.Header().Set("X-Mainspring-Tokens-Output", strconv.FormatInt(oai.Usage.CompletionTokens, 10))
 	}
 	writeJSON(w, http.StatusOK, out)
-	return oai.Usage.PromptTokens, oai.Usage.CompletionTokens, exact, false
+	return messagesResult{prompt: oai.Usage.PromptTokens, completion: oai.Usage.CompletionTokens, exact: exact, retries: retries}
 }
 
 // argsToInput turns an OpenAI tool-call arguments JSON string into a JSON value
@@ -605,28 +596,30 @@ func argsToInput(args string) json.RawMessage {
 // events. It returns the prompt/completion token counts and whether they came
 // from an upstream usage object (stream_options.include_usage); when absent,
 // completion falls back to the number of streamed fragments.
-func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact, backendFailed bool) {
-	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
+func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) messagesResult {
+	var prompt, completion int64
+	var exact bool
+	resp, retries, err := s.postUpstreamRetrying(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
 		if clientGone(ctx) {
 			// The caller cancelled: the connection is gone, so writing a 502 would
 			// both report a backend failure that did not happen and record it as
 			// one. Say nothing.
-			return 0, 0, false, false
+			return messagesResult{retries: retries}
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			writeErr(w, codeTimeout, "request timed out")
-			return 0, 0, false, false
+			return messagesResult{retries: retries}
 		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-		return 0, 0, false, false
+		return messagesResult{retries: retries}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		// Fail loud before any SSE byte goes out: once the stream is open the status
 		// can no longer be corrected.
 		writeUpstreamFailure(w, resp)
-		return 0, 0, false, false
+		return messagesResult{retries: retries}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -726,7 +719,8 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 		// A broken upstream or an exceeded deadline is the backend's fault. A caller
 		// that cancelled its own request is not — charging that to the breaker would
 		// let clients trip the circuit for every tenant by disconnecting.
-		return prompt, completion, exact, !errors.Is(ctx.Err(), context.Canceled)
+		return messagesResult{prompt: prompt, completion: completion, exact: exact,
+			backendFailed: !errors.Is(ctx.Err(), context.Canceled), retries: retries}
 	}
 
 	if !st.started {
@@ -738,7 +732,16 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 		"delta": map[string]any{"stop_reason": mapStopReason(finish), "stop_sequence": nil},
 		"usage": map[string]int64{"input_tokens": prompt, "output_tokens": completion}})
 	send("message_stop", map[string]any{"type": "message_stop"})
-	return prompt, completion, exact, false
+	return messagesResult{prompt: prompt, completion: completion, exact: exact, retries: retries}
+}
+
+// messagesResult reports what a /v1/messages generation did, beyond what the
+// status can express — the Anthropic counterpart to proxyResult.
+type messagesResult struct {
+	prompt, completion int64
+	exact              bool
+	backendFailed      bool // the break was the backend's fault, not a caller's abort
+	retries            int  // extra upstream attempts incurred
 }
 
 // upstreamErrorDetail bounds how much of an upstream error body is echoed back.
@@ -823,6 +826,41 @@ func (st *anthropicStreamState) closeOpen() {
 }
 
 // postJSON POSTs body to url and returns the response (caller closes Body).
+// postUpstreamRetrying sends body to url with the same bounded retry policy the
+// OpenAI path uses: transient connection errors and retryable statuses (502/503/
+// 504) are retried with exponential backoff, up to s.retryMax extra attempts.
+//
+// Retry is only safe because it is decided BEFORE any byte reaches the client,
+// and both callers check resp.StatusCode before writing anything — including the
+// streaming one, which has not yet emitted message_start. Retrying after a frame
+// has gone out would corrupt the stream, so this must never be called once a
+// response is committed. It returns the number of extra attempts incurred.
+func (s *Server) postUpstreamRetrying(ctx context.Context, url string, body []byte) (*http.Response, int, error) {
+	attempts := s.retryMax + 1
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 && !sleepBackoff(ctx, s.retryBackoff, attempt) {
+			return nil, attempt, ctx.Err()
+		}
+		last := attempt == attempts-1
+
+		resp, err := postJSON(ctx, url, body)
+		if err != nil {
+			// A dead or cancelled caller is not a transient upstream blip.
+			if last || ctx.Err() != nil {
+				return nil, attempt, err
+			}
+			continue
+		}
+		if !last && retryableStatus(resp.StatusCode) {
+			// Drain a bounded amount so the connection can be reused, then retry.
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+			_ = resp.Body.Close()
+			continue
+		}
+		return resp, attempt, nil
+	}
+}
+
 func postJSON(ctx context.Context, url string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

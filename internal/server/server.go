@@ -388,49 +388,8 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	}
 	defer doneSharing()
 
-	// Select a servable model: try the requested one, then its fallback chain.
-	// A candidate is skipped only for a pre-serve failure (circuit open or load
-	// error); gate saturation is backpressure, not a fallback trigger.
-	var (
-		runner     backend.Runner
-		release    func()
-		served     string
-		queueWait  time.Duration
-		sawBreaker bool // a candidate was refused by an open circuit, not a load failure
-	)
-candidates:
-	for _, cand := range s.candidatesFor(model) {
-		rr, rel, wait, out := s.acquireRunner(r, cand)
-		queueWait += wait
-		switch out {
-		case acquireBusy:
-			w.Header().Set("Retry-After", "1")
-			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
-			s.recordRejected(r.Context(), cand, codeServerBusy, recvd)
-			return
-		case acquireCancelled:
-			// The caller disconnected while queued; a 503 would be written to a
-			// dead connection and would misreport why the request ended.
-			return
-		case acquireCircuitOpen:
-			sawBreaker = true
-		case acquireOK:
-			runner, release, served = rr, rel, cand
-			break candidates
-		}
-	}
-	if runner == nil {
-		// `circuit_open` is only true when a breaker actually refused a candidate.
-		// Every other way to get here — including every way to get here with the
-		// breaker disabled — is a load failure, and a client branching on the
-		// stable code must not be told a circuit tripped when none exists.
-		code := codeBackendUnavailable
-		if sawBreaker {
-			code = codeCircuitOpen
-		}
-		w.Header().Set("Retry-After", "5")
-		writeErr(w, code, "no available backend for "+model+" or its fallbacks")
-		s.recordRejected(r.Context(), model, code, recvd)
+	runner, release, served, queueWait, servable := s.selectRunner(w, r, model, recvd)
+	if !servable {
 		return
 	}
 	defer release()
