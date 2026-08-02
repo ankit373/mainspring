@@ -961,13 +961,12 @@ func boolPtrDiffers(a, b *bool) bool {
 	return a != nil && *a != *b
 }
 
-// adoptBackendNames are the detect-and-adopt backends: they hold their own
-// weights (so a model needs no path) and can enumerate their own models for
-// auto-discovery. Every other backend loads weights from a file we point it at.
-var adoptBackendNames = []string{"ollama", "lmstudio", "llamafile", "gpt4all"}
+// The adopt-backend set lives in internal/backend, which is where the backends
+// that make it true are: a second list here is how the two drift.
+var adoptBackendNames = backend.AdoptNames
 
 // isAdoptBackend reports whether name is an adopt-only backend.
-func isAdoptBackend(name string) bool { return slices.Contains(adoptBackendNames, name) }
+func isAdoptBackend(name string) bool { return backend.IsAdopt(name) }
 
 // discoverModels queries each present backend that implements backend.ModelLister
 // and returns specs for models not already configured (configured wins on an id

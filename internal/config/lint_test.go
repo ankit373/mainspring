@@ -205,3 +205,60 @@ func TestLintTenantWithEmptyKey(t *testing.T) {
 		t.Fatalf("want an empty-key warning, got %v", got)
 	}
 }
+
+// path on an adopt-only backend is read by nothing: the daemon holds its own
+// weights and the model id must be the name it knows. Setting path is usually a
+// sign the id is wrong, which otherwise surfaces much later as a request-time
+// failure naming a model that does not exist.
+func TestLintFlagsPathOnAnAdoptBackend(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   Config
+		warns bool
+	}{
+		{
+			name: "adopt backend with a path set",
+			cfg: Config{Backend: "ollama", Models: []Model{
+				{ID: "qwen", Path: "Qwen2.5-Coder:7b"}}},
+			warns: true,
+		},
+		{
+			name: "adopt backend chosen per-model overrides a non-adopt default",
+			cfg: Config{Backend: "llamacpp", Models: []Model{
+				{ID: "qwen", Backend: "lmstudio", Path: "something"}}},
+			warns: true,
+		},
+		{
+			name: "adopt backend with no path is the correct shape",
+			cfg: Config{Backend: "ollama", Models: []Model{
+				{ID: "Qwen2.5-Coder:7b"}}},
+			warns: false,
+		},
+		{
+			name: "a real backend needs its path and must not be warned about",
+			cfg: Config{Backend: "llamacpp", Models: []Model{
+				{ID: "m", Path: "/models/m.gguf"}}},
+			warns: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			for _, w := range tc.cfg.Lint() {
+				if strings.Contains(w.Message, "path is ignored") {
+					got = w.Message
+				}
+			}
+			if tc.warns && got == "" {
+				t.Fatalf("expected a path-ignored warning, got %+v", tc.cfg.Lint())
+			}
+			if !tc.warns && got != "" {
+				t.Fatalf("unexpected warning: %s", got)
+			}
+			// The warning has to be actionable: name the id to use.
+			if tc.warns && !strings.Contains(got, "id: ") {
+				t.Errorf("warning does not say what to write instead: %s", got)
+			}
+		})
+	}
+}
