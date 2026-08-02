@@ -476,7 +476,13 @@ type oaiToolCall struct {
 func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact, backendFailed bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if clientGone(ctx) {
+			// The caller cancelled: the connection is gone, so writing a 502 would
+			// both report a backend failure that did not happen and record it as
+			// one. Say nothing.
+			return 0, 0, false, false
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			writeErr(w, codeTimeout, "request timed out")
 			return 0, 0, false, false
 		}
@@ -572,7 +578,13 @@ func argsToInput(args string) json.RawMessage {
 func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact, backendFailed bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if clientGone(ctx) {
+			// The caller cancelled: the connection is gone, so writing a 502 would
+			// both report a backend failure that did not happen and record it as
+			// one. Say nothing.
+			return 0, 0, false, false
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			writeErr(w, codeTimeout, "request timed out")
 			return 0, 0, false, false
 		}
