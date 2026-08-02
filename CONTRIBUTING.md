@@ -78,6 +78,7 @@ There are three layers, and it is worth knowing which one your change needs.
 
 ```bash
 go test -race ./...          # everything; the bar for any PR
+./deploy/helm/validate.sh    # the Helm chart, if you touched deploy/
 ./test/realengine/run.sh     # opt-in, needs a live engine (see below)
 ```
 
@@ -106,6 +107,13 @@ and exits 2 when it cannot run; it never skips quietly, because a silent skip re
 
 It earns its keep: its first run found the silently-ignored config key (#197) and the silently-dropped
 `n` (#198), and confirmed the upstream behaviour #192's design depends on.
+
+**Helm** (`deploy/helm/validate.sh`) renders the chart every way it can be installed, schema-validates
+each result with `kubeconform -strict`, and then feeds the `config.yaml` the chart writes into its
+Secret to `mainspring doctor`. That last step is the one that matters: the chart can emit valid
+Kubernetes carrying a config the server will not parse, and `helm lint` passes it happily. Every defect
+in #207 — including a documented `helm install` that produced a crash-loop — linted clean. Run it if you
+touch `deploy/`, `release-please-config.json`, or any config key.
 
 ## Reporting security issues
 

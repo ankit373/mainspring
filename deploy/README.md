@@ -38,9 +38,12 @@ helm install ms deploy/helm/mainspring \
 ```
 
 The full `config.yaml` is rendered into a Secret (it may hold tenant keys) and
-mounted at `/config/config.yaml`. Model weights mount at `/models`
-(`models.persistence.enabled=true` for a PVC). Liveness/readiness probes hit
-`/healthz`; scrape `/metrics` for Prometheus.
+mounted at `/config/config.yaml`. Either shape works: a map under `config:` in a
+values file, or a whole config file via `--set-file config=…`. Model weights
+mount at `/models` (`models.persistence.enabled=true` for a PVC). The liveness
+probe hits `/healthz` and the readiness probe `/readyz`, so a draining or
+all-backends-down pod stops receiving traffic without being restarted; scrape
+`/metrics` for Prometheus.
 
 ### GPU, autoscaling, and monitoring
 
@@ -59,3 +62,21 @@ helm install ms deploy/helm/mainspring \
 When `autoscaling.enabled=true` the Deployment omits `replicas` (the HPA owns
 it). `values-gpu.yaml` also bounds concurrency (`max_inflight`/`max_queue`) so a
 single GPU degrades gracefully under load.
+
+### Validating the chart
+
+```bash
+./deploy/helm/validate.sh
+```
+
+CI runs this on every PR. It renders every combination an operator can install —
+including HPA and ServiceMonitor, which both shipped values files leave off —
+schema-validates each with `kubeconform -strict`, and checks that `Chart.yaml`
+still tracks the released version, since `image.tag` defaults to `appVersion` and
+a stale value means `helm install` quietly pulls an old image.
+
+The check that `helm lint` cannot do is the last one: it extracts the `config.yaml`
+the chart writes into its Secret and feeds it to `mainspring doctor`. The chart can
+emit perfectly valid Kubernetes containing a config the server refuses to parse —
+that is precisely the shape of #207, where a chart-level bug produced a crash-loop
+that rendered and schema-validated cleanly.
