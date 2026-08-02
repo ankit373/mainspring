@@ -75,3 +75,26 @@ func TestContextGuardWithinLimitNoWarning(t *testing.T) {
 		t.Fatal("in-limit request should carry no context warning")
 	}
 }
+
+// TestContextGuardDoesNotFailOpenOnBlockArraySystem covers the shape that used
+// to defeat the guardrail entirely: a `system` sent as an Anthropic block array
+// made the whole prompt estimate 0, so an obviously over-context request was
+// waved through to the backend instead of rejected.
+func TestContextGuardDoesNotFailOpenOnBlockArraySystem(t *testing.T) {
+	var hits atomic.Int64
+	eng := countingEngine(t, &hits)
+	h := guardedServer(t, eng.URL, true) // 4096-token window, enforcing
+
+	big := strings.Repeat("a", 40000) // ≈10000 tokens, far past the window
+	w := postBody(h, `{"model":"m1","max_tokens":16,"system":[{"type":"text","text":"`+big+`"}],`+
+		`"messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 — the guardrail failed open on a block-array system", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "context_length_exceeded") {
+		t.Fatalf("body missing context_length_exceeded code: %s", w.Body.String())
+	}
+	if hits.Load() != 0 {
+		t.Fatal("over-context request must be rejected before hitting the backend")
+	}
+}

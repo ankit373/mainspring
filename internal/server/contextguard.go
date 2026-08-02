@@ -106,22 +106,27 @@ func maxTokensRequested(body []byte) int {
 
 // estimatePromptTokens is a tokenizer-free, conservative estimate of the input
 // token count. It handles the chat (messages[].content, string or multimodal
-// array), legacy completion (prompt), and embeddings (input) shapes. Non-text
-// parts (e.g. images) contribute only their fixed per-message overhead.
+// array), legacy completion (prompt), system (string or Anthropic block array),
+// and embeddings (input) shapes. Non-text parts (e.g. images) contribute only
+// their fixed per-message overhead. Fields whose shape differs between dialects
+// are decoded raw and interpreted afterwards: typing one concretely (as `system`
+// once was) makes an unfamiliar shape fail the *whole* unmarshal, estimating the
+// entire request at 0 tokens — the guardrail failing open on the requests most
+// likely to need it.
 func estimatePromptTokens(body []byte) int {
 	var req struct {
 		Messages []struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 		Prompt json.RawMessage `json:"prompt"`
-		System string          `json:"system"`
+		System json.RawMessage `json:"system"`
 		Input  json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &req) != nil {
 		return 0
 	}
 
-	total := charTokens(len(req.System))
+	total := contentTokens(req.System)
 	for _, m := range req.Messages {
 		total += perMessageOverhead + contentTokens(m.Content)
 	}

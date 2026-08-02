@@ -10,9 +10,10 @@ import (
 
 // This file implements the admin API: operational actions (drain, config
 // reload, per-model load/unload) that previously needed a restart or a signal.
-// Every endpoint is admin-gated and, because the request-ID middleware logs all
-// requests, each action is audited in the access log (method, path, status,
-// request_id).
+// Every endpoint is admin-gated and, when the access log is enabled, each
+// action is audited there with its principal (tenant, method, path, status,
+// request_id) — in open mode there is no principal to record, which is one more
+// reason not to run open on a network you do not control.
 
 // SetReloadFunc wires the config-reload action (used by POST /admin/reload).
 // When nil, the endpoint reports 501 Not Implemented.

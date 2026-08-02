@@ -39,9 +39,10 @@ func (s *Server) countTokens(ctx context.Context, model, text string) (int, bool
 // precisePromptTokens counts a request's prompt tokens exactly using the model's
 // real tokenizer, when the model is resident and supports it (ok=true). It sums
 // the tokenized text of each message (plus the fixed per-message chat-template
-// overhead), the system prompt, any legacy completion prompt, and an embeddings
-// `input` field (string or array of strings). ok=false (no forced load, or a
-// tokenizer error) tells the caller to fall back to the estimate.
+// overhead), the system prompt (string or Anthropic block array), any legacy
+// completion prompt, and an embeddings `input` field (string or array of
+// strings). ok=false (no forced load, or a tokenizer error) tells the caller to
+// fall back to the estimate.
 func (s *Server) precisePromptTokens(ctx context.Context, model string, body []byte) (int, bool) {
 	tc, ok := s.residentTokenCounter(model)
 	if !ok {
@@ -52,7 +53,7 @@ func (s *Server) precisePromptTokens(ctx context.Context, model string, body []b
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 		Prompt json.RawMessage `json:"prompt"`
-		System string          `json:"system"`
+		System json.RawMessage `json:"system"`
 		Input  json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &req) != nil {
@@ -70,7 +71,7 @@ func (s *Server) precisePromptTokens(ctx context.Context, model string, body []b
 		total += n
 		return true
 	}
-	if !count(req.System) {
+	if !count(contentText(req.System)) {
 		return 0, false
 	}
 	for _, m := range req.Messages {
@@ -92,7 +93,10 @@ func (s *Server) precisePromptTokens(ctx context.Context, model string, body []b
 
 // tokenize implements POST /v1/tokenize — a utility that counts tokens for a
 // piece of text against a model, exact when the engine can tokenize, estimated
-// otherwise. Body: {"model": "...", "input": "..."}.
+// otherwise. Body: {"model": "...", "input": "..."}, where `input` is a bare
+// string or an array of strings (the embeddings shape); an array is reported as
+// the sum of its elements, exact only if every element was counted exactly. Any
+// other shape is a 400 rather than a silently miscounted request.
 func (s *Server) tokenize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, codeMethodNotAllowed, "method not allowed")
@@ -104,8 +108,8 @@ func (s *Server) tokenize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Model string `json:"model"`
-		Input string `json:"input"`
+		Model string          `json:"model"`
+		Input json.RawMessage `json:"input"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -115,12 +119,26 @@ func (s *Server) tokenize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing required field: model")
 		return
 	}
+	// An absent input counts as nothing; a present but uncountable one (a number,
+	// an object, a pre-tokenized integer array) is named rather than counted as 0.
+	var texts []string
+	if len(req.Input) > 0 {
+		if texts = inputStrings(req.Input); texts == nil {
+			writeError(w, http.StatusBadRequest, "field input must be a string or an array of strings")
+			return
+		}
+	}
 	model, ok := s.sched.Resolve(req.Model)
 	if !ok {
 		writeError(w, http.StatusNotFound, "model not found: "+req.Model)
 		return
 	}
-	tokens, exact := s.countTokens(r.Context(), model, req.Input)
+	tokens, exact := 0, true
+	for _, text := range texts {
+		n, ex := s.countTokens(r.Context(), model, text)
+		tokens += n
+		exact = exact && ex
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "tokenization",
 		"model":  model,
