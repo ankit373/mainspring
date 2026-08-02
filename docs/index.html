@@ -719,7 +719,7 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
       <div class="card"><h3>Eviction never breaks a request</h3><p>Single-flight load, LRU and byte-budget eviction, KeepAlive idle-unload — and none of them pull a runner out from under an in-flight generation, even one that outlasts its own KeepAlive.</p></div>
       <div class="card"><h3>Circuit breaker + health probe</h3><p>After N consecutive failures a model fast-fails with 503 instead of paying the timeout, until a cooldown elapses and a half-open probe succeeds. A background prober can recover it without live traffic.</p></div>
       <div class="card"><h3>Backpressure, not collapse</h3><p>Per-model in-flight limit and a bounded queue return 503 with <code>Retry-After</code> rather than letting latency melt down.</p></div>
-      <div class="card"><h3>Retry &amp; coalescing</h3><p>Transient upstream failures retry with backoff, always decided before the first byte so streaming stays safe. Identical deterministic requests in flight together collapse to one backend call.</p></div>
+      <div class="card"><h3>Retry &amp; coalescing</h3><p>Transient upstream failures retry with backoff, always decided before the first byte so streaming stays safe. Identical requests that pin an explicit <code>temperature: 0</code> and are in flight together collapse to one backend call — the same bar the response cache uses, because sharing one sample is only honest when the caller asked for a deterministic one. A replay carries the payload's headers, never the leader's request id or quota headroom.</p></div>
     </div>
   </div>
 

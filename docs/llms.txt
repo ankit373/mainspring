@@ -79,14 +79,20 @@ MIT and already win; Mainspring wraps them).
   truncate it. The requested-output check (`max_tokens` > context) is exact; the prompt-size check is a
   conservative tokenizer-free estimate. A per-model override can downgrade enforcement to a warning
   header (`X-Mainspring-Context-Warning`). Turns the fail-loud context *warning* into an enforceable limit.
-- Request coalescing (opt-in): a burst of identical deterministic (temperature 0) non-streaming requests
-  in flight at once share ONE backend computation — the first is the leader, concurrent identical ones
-  wait and replay its result (`X-Mainspring-Coalesced: true`). Keyed by the same canonical hash the cache
-  uses; streaming and non-deterministic requests are never coalesced. Enable with `coalesce: true`.
-- Response cache (opt-in): identical deterministic (temperature 0) non-streaming requests are served
-  from a bounded TTL+LRU cache without touching the backend; hits carry `X-Mainspring-Cache: hit` and
-  are counted in /metrics (`mainspring_cache_hits_total`). Streaming and non-zero-temperature requests
-  bypass it. Enable with `cache_max_entries` (+ optional `cache_ttl_seconds`, default 300s).
+- Request coalescing (opt-in): a burst of identical deterministic (explicit `"temperature": 0`)
+  non-streaming requests in flight at once share ONE backend computation — the first is the leader,
+  concurrent identical ones wait and replay its result (`X-Mainspring-Coalesced: true`). Keyed by the
+  same canonical hash the cache uses; streaming and non-deterministic requests are never coalesced.
+  Enable with `coalesce: true`.
+- Response cache (opt-in): identical deterministic (explicit `"temperature": 0`) non-streaming requests
+  are served from a bounded TTL+LRU cache without touching the backend; hits carry
+  `X-Mainspring-Cache: hit` and are counted in /metrics (`mainspring_cache_hits_total`). Streaming and
+  any request that does not pin `temperature` to 0 — including one that omits it, since the default is
+  1, i.e. sample normally — bypass it. Enable with `cache_max_entries` (+ optional
+  `cache_ttl_seconds`, default 300s).
+  A replay only carries headers that describe the stored payload (`content-type`,
+  `X-Mainspring-Backend`/`-Device`/`-Warning`). The caller's own `X-Request-ID` and quota headroom come
+  from this request, never from the leader's — no cross-tenant header ever replays.
 - Path scope (what applies where): the admission pipeline — API-key auth, per-tenant rate + token budgets,
   the context guardrail, `clamp_max_tokens`, `precise_context`, the concurrency gate + queue, the circuit
   breaker, per-request timeouts, and cost accounting — applies to **both** the OpenAI endpoints and
