@@ -35,14 +35,25 @@ func newGate(maxInflight, maxQueue int) *gate {
 
 func (g *gate) enabled() bool { return g.maxInflight > 0 }
 
+// gateResult is how an acquire ended. Queue-full and caller-cancelled are
+// distinct outcomes: the first is backpressure the client must be told about,
+// the second means the client is already gone and a 503 would be written to a
+// dead connection.
+type gateResult int
+
+const (
+	gateAcquired  gateResult = iota // slot reserved; release is non-nil
+	gateFull                        // no slot and the wait queue is full → reject
+	gateCancelled                   // the caller's context ended while queued
+)
+
 // acquire reserves a slot for model, blocking (as a queued waiter) until one is
 // free. It returns a release func, the time spent waiting for a slot (0 when
-// gating is disabled or a slot was immediately free), and ok=true on success,
-// or ok=false when the queue is full (reject) or the context is cancelled.
-// release is nil when ok=false.
-func (g *gate) acquire(ctx context.Context, model string) (release func(), waitTime time.Duration, ok bool) {
+// gating is disabled or a slot was immediately free), and which of the three
+// outcomes occurred. release is nil unless the result is gateAcquired.
+func (g *gate) acquire(ctx context.Context, model string) (release func(), waitTime time.Duration, res gateResult) {
 	if !g.enabled() {
-		return func() {}, 0, true
+		return func() {}, 0, gateAcquired
 	}
 	start := time.Now()
 	g.mu.Lock()
@@ -54,7 +65,7 @@ func (g *gate) acquire(ctx context.Context, model string) (release func(), waitT
 	free := g.maxInflight - g.inflight[model]
 	if free <= 0 && g.queued[model] >= g.maxQueue {
 		g.mu.Unlock()
-		return nil, 0, false // no free slot and the wait queue is full → backpressure
+		return nil, 0, gateFull // no free slot and the wait queue is full → backpressure
 	}
 	g.queued[model]++
 	g.mu.Unlock()
@@ -70,12 +81,12 @@ func (g *gate) acquire(ctx context.Context, model string) (release func(), waitT
 			g.mu.Lock()
 			g.inflight[model]--
 			g.mu.Unlock()
-		}, time.Since(start), true
+		}, time.Since(start), gateAcquired
 	case <-ctx.Done():
 		g.mu.Lock()
 		g.queued[model]--
 		g.mu.Unlock()
-		return nil, time.Since(start), false
+		return nil, time.Since(start), gateCancelled
 	}
 }
 

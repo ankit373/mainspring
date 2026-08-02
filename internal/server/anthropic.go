@@ -141,10 +141,14 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
 		return
 	}
-	release, queueWait, ok := s.gate.acquire(r.Context(), model)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
+	release, queueWait, res := s.gate.acquire(r.Context(), model)
+	if res != gateAcquired {
+		// gateCancelled means the caller is already gone: writing a 503 there would
+		// report backpressure that never happened, to a dead connection.
+		if res == gateFull {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
+		}
 		return
 	}
 	defer release()
