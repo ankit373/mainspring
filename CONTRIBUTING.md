@@ -74,6 +74,39 @@ New behaviour needs a test that would fail without your change. A test that only
 compiles is not a test. When you fix a bug, add the test that would have caught it — several past
 bugs in this repo survived precisely because a code path had no coverage at all.
 
+There are three layers, and it is worth knowing which one your change needs.
+
+```bash
+go test -race ./...          # everything; the bar for any PR
+./test/realengine/run.sh     # opt-in, needs a live engine (see below)
+```
+
+**Conformance** (`test/conformance/`) drives the real `openai` and `anthropic` Python and JS SDKs
+against a running server, over the happy path and the failure paths. CI runs it on every PR. The
+upstream is `test/conformance/fakeserver`, so what it verifies is *our* side of the wire.
+
+**Real engine** (`test/realengine/`) is the same idea pointed at an actual local engine, and it is
+the only thing that checks the assumptions the fakeserver encodes rather than Mainspring's side of
+them. It needs a daemon and real weights, so it is `workflow_dispatch` only — never on the PR path.
+
+```bash
+ollama serve &
+ollama pull qwen2.5:0.5b
+./test/realengine/run.sh
+
+REAL_MODEL=llama3.2:1b ./test/realengine/run.sh   # any small chat model works
+PYTHON=./venv/bin/python ./test/realengine/run.sh  # a virtualenv, unactivated
+```
+
+Every assertion there is about mechanism, not output quality, so the model choice does not matter —
+that is deliberate, because a suite whose result depends on whether a 0.5B model followed an
+instruction is a suite nobody trusts. Run it before a release, and after touching anything that
+assumes how an engine behaves: stop handling, usage accounting, the adopt backends. It refuses loudly
+and exits 2 when it cannot run; it never skips quietly, because a silent skip reads as a pass.
+
+It earns its keep: its first run found the silently-ignored config key (#197) and the silently-dropped
+`n` (#198), and confirmed the upstream behaviour #192's design depends on.
+
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).
