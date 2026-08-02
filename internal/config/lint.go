@@ -52,6 +52,11 @@ func (c Config) Lint() []LintWarning {
 				warnings = append(warnings, LintWarning{m.ID,
 					"clamp_max_tokens is on but ctx is not set — has no effect for this model"})
 			}
+		} else if effective(c.PreciseContext, m.PreciseContext) && !effective(c.EnforceContext, m.EnforceContext) {
+			// precise_context only refines the guardrail's prompt count. With no
+			// guardrail to refine, exact tokenization is computed for nothing.
+			warnings = append(warnings, LintWarning{m.ID,
+				"precise_context has no effect without enforce_context — the guardrail never runs for this model"})
 		}
 		for _, fb := range m.ModelFallbacks {
 			if !known[fb] {
@@ -61,6 +66,25 @@ func (c Config) Lint() []LintWarning {
 		}
 		if m.InputUSDPerMTok < 0 || m.OutputUSDPerMTok < 0 {
 			warnings = append(warnings, LintWarning{m.ID, "a cost rate (input/output USD per Mtok) is negative"})
+		}
+	}
+
+	// Auth block. authTenants prefers tenants and ignores api_keys entirely when
+	// any tenant exists, and an unrecognised role silently becomes "inference" —
+	// so a typo'd "admin" quietly strips a tenant's privileges.
+	if len(c.Tenants) > 0 && len(c.APIKeys) > 0 {
+		warnings = append(warnings, LintWarning{Message: fmt.Sprintf(
+			"api_keys is ignored because tenants is set (%d key(s) will not authenticate anything)", len(c.APIKeys))})
+	}
+	for _, t := range c.Tenants {
+		switch t.Role {
+		case "", "admin", "inference":
+		default:
+			warnings = append(warnings, LintWarning{Message: fmt.Sprintf(
+				"tenant %q has unknown role %q — it will be treated as \"inference\"; valid roles are \"admin\" and \"inference\"", t.Name, t.Role)})
+		}
+		if t.Key == "" {
+			warnings = append(warnings, LintWarning{Message: fmt.Sprintf("tenant %q has an empty key and can never authenticate", t.Name)})
 		}
 	}
 
@@ -77,6 +101,15 @@ func (c Config) Lint() []LintWarning {
 // boolOverride reports whether a *bool per-model override is explicitly true;
 // nil (inherit global) or false are both "not on" for this check.
 func boolOverride(b *bool) bool { return b != nil && *b }
+
+// effective resolves a per-model override against the server-wide default the
+// same way the server wires it: set wins, nil inherits.
+func effective(global bool, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	return global
+}
 
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
