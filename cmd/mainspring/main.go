@@ -178,7 +178,7 @@ func checkModels(cfg config.Config, present map[string]bool) []string {
 		switch {
 		case !present[b]:
 			lines = append(lines, fmt.Sprintf("✗ %s → %s (backend not available)", m.ID, b))
-		case (b == "llamacpp" || b == "mlx") && m.Path != "" && !pathExists(m.Path):
+		case !isAdoptBackend(b) && m.Path != "" && !pathExists(m.Path):
 			lines = append(lines, fmt.Sprintf("✗ %s → %s (weights not found: %s)", m.ID, b, m.Path))
 		default:
 			lines = append(lines, fmt.Sprintf("✓ %s → %s", m.ID, b))
@@ -299,12 +299,15 @@ func cmdServe() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Flag overrides.
+			// Flag overrides. Anything a flag supplies is also recorded in flagSrc:
+			// reload re-reads the file, which has no idea these were ever given.
+			var flagSrc flagSources
 			if cmd.Flags().Changed("addr") {
 				cfg.Addr = addr
 			}
 			if cmd.Flags().Changed("api-key") {
 				cfg.APIKeys = apiKeys
+				flagSrc.apiKeys = apiKeys
 			}
 			if cmd.Flags().Changed("keep-alive") {
 				cfg.KeepAliveSeconds = keepAlive
@@ -340,21 +343,22 @@ func cmdServe() *cobra.Command {
 				cfg.TLSKey = tlsKey
 			}
 			for _, mf := range modelFlags {
-				m, err := parseModelFlag(mf)
+				m, err := parseModelFlag(mf, defaultBackendName(cfg))
 				if err != nil {
 					return err
 				}
 				cfg.Models = append(cfg.Models, m)
+				flagSrc.models = append(flagSrc.models, m)
 			}
 			if len(cfg.Models) == 0 && !cfg.DiscoverModels {
 				return fmt.Errorf("no models configured — pass --model id=/path/to/weights.gguf, add models to the config, or set discover_models: true")
 			}
 
-			return runServe(cmd.Context(), cfg, configPath(cmd))
+			return runServe(cmd.Context(), cfg, configPath(cmd), flagSrc)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", ":11500", "listen address")
-	cmd.Flags().StringArrayVar(&modelFlags, "model", nil, "model as id=/path/to/weights.gguf (repeatable)")
+	cmd.Flags().StringArrayVar(&modelFlags, "model", nil, "model as id=/path/to/weights.gguf, or id= on an adopt-only backend (repeatable)")
 	cmd.Flags().StringArrayVar(&apiKeys, "api-key", nil, "require this API key (repeatable); if none set, server runs OPEN")
 	cmd.Flags().IntVar(&keepAlive, "keep-alive", 300, "seconds to keep an idle model loaded (0 = never unload)")
 	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once by count (LRU-evicted beyond this)")
@@ -362,7 +366,7 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().IntVar(&maxInflight, "max-inflight", 0, "max concurrent requests per model (0 = unbounded)")
 	cmd.Flags().IntVar(&maxQueue, "max-queue", 0, "max queued waiters per model before returning 503")
 	cmd.Flags().StringVar(&usageLedger, "usage-ledger", "", "JSONL usage ledger path (empty = default location, \"off\" = disable)")
-	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | ollama | mlx")
+	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | mlx | ollama | lmstudio | llamafile | gpt4all")
 	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "", "Ollama daemon URL when --backend ollama")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
 	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate path (with --tls-key => serve HTTPS)")
@@ -420,8 +424,30 @@ func authTenants(cfg config.Config) []auth.Tenant {
 	return ts
 }
 
-func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
-	for _, w := range cfg.Lint() {
+// flagSources records the settings that came from the command line rather than
+// the config file. Reload re-reads the file, so without this record anything only
+// a flag supplied would silently vanish from a server that was working fine.
+type flagSources struct {
+	models  []config.Model // --model
+	apiKeys []string       // --api-key
+}
+
+// reloadSources is everything a reload needs that the config file does not hold:
+// the flag-supplied settings, plus the already-detected backends so auto-discovery
+// can be re-run without reconstructing them.
+type reloadSources struct {
+	flags    flagSources
+	backends map[string]backend.Backend
+	discover bool
+}
+
+// reloadDiscoverTimeout bounds re-running model discovery during a reload. A
+// wedged daemon must not hang a SIGHUP or an /admin/reload request.
+const reloadDiscoverTimeout = 5 * time.Second
+
+func runServe(ctx context.Context, cfg config.Config, cfgPath string, flagSrc flagSources) error {
+	startupLint := cfg.Lint()
+	for _, w := range startupLint {
 		fmt.Fprintln(os.Stderr, "warning: config:", w.String())
 	}
 
@@ -501,14 +527,17 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 		fmt.Fprintln(os.Stderr, "warning:", err) // metrics still work in-memory
 	}
 	defer func() { _ = rec.Close() }()
+	ledgerActive := rec.LedgerActive()
 
 	srv := server.New(sched, authn, rec)
 	srv.SetConcurrency(cfg.MaxInflight, cfg.MaxQueue)
 	if cfg.BreakerThreshold > 0 {
 		srv.SetBreaker(cfg.BreakerThreshold, cfg.BreakerCooldown())
 	}
+	srv.SetLintWarnings(lintStrings(startupLint))
 	// Wire the admin reload endpoint to the same reload path SIGHUP uses.
-	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, sched, authn) })
+	reloadSrc := reloadSources{flags: flagSrc, backends: backends, discover: cfg.DiscoverModels}
+	srv.SetReloadFunc(func() error { return reloadConfig(cfgPath, cfg, reloadSrc, sched, authn, srv) })
 	// Per-request timeouts: global default + per-model overrides.
 	perModelTimeout := map[string]time.Duration{}
 	for _, m := range cfg.Models {
@@ -551,27 +580,28 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 		srv.SetContextGuard(ctxPolicies)
 	}
 	// Precise (exact-tokenization) guardrail: per-model, active when precise is on
-	// globally or overridden true for that model and the model has a known ctx.
+	// for that model and the model has a known ctx. Unlike enforce_context this is
+	// on/off with no middle setting, so a per-model false means off, not "downgrade".
 	precise := map[string]bool{}
 	for _, m := range cfg.Models {
 		if m.Ctx <= 0 {
 			continue
 		}
-		if cfg.PreciseContext || (m.PreciseContext != nil && *m.PreciseContext) {
+		if resolveBool(cfg.PreciseContext, m.PreciseContext) {
 			precise[m.ID] = true
 		}
 	}
 	if len(precise) > 0 {
 		srv.SetPreciseContext(precise)
 	}
-	// max_tokens clamping: per-model window, active when clamping is on globally
-	// or overridden true for that model and the model has a known ctx.
+	// max_tokens clamping: per-model window, active when clamping is on for that
+	// model and the model has a known ctx. On/off, so a per-model false means off.
 	clampLimits := map[string]int{}
 	for _, m := range cfg.Models {
 		if m.Ctx <= 0 {
 			continue
 		}
-		if cfg.ClampMaxTokens || (m.ClampMaxTokens != nil && *m.ClampMaxTokens) {
+		if resolveBool(cfg.ClampMaxTokens, m.ClampMaxTokens) {
 			clampLimits[m.ID] = m.Ctx
 		}
 	}
@@ -619,9 +649,15 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	}
 	fmt.Println(build.String())
 	fmt.Printf("serving %d model(s) on %s (%s)\n", len(specs), cfg.Addr, scheme)
-	if ledgerPath != "" {
+	// Report whether the ledger actually opened, not merely whether one was
+	// configured: a failed open leaves the server accounting in memory only, and
+	// claiming an active ledger is how that goes unnoticed until the audit.
+	switch {
+	case ledgerActive:
 		fmt.Printf("metrics: %s/metrics   usage ledger: %s\n", cfg.Addr, ledgerPath)
-	} else {
+	case ledgerPath != "":
+		fmt.Printf("metrics: %s/metrics   ⚠  usage ledger FAILED to open (%s) — in-memory metrics only\n", cfg.Addr, ledgerPath)
+	default:
 		fmt.Printf("metrics: %s/metrics   usage ledger: disabled\n", cfg.Addr)
 	}
 	if authn.Open() {
@@ -653,7 +689,7 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string) error {
 	defer signal.Stop(hup)
 	go func() {
 		for range hup {
-			if err := reloadConfig(cfgPath, cfg, sched, authn); err != nil {
+			if err := reloadConfig(cfgPath, cfg, reloadSrc, sched, authn, srv); err != nil {
 				fmt.Fprintln(os.Stderr, "SIGHUP:", err)
 			}
 		}
@@ -735,7 +771,7 @@ func runHealthProber(ctx context.Context, interval time.Duration, sched *schedul
 // is logged so the difference is never a silent surprise. A missing config file
 // is a no-op (so a flag-only launch is never wiped). Shared by SIGHUP and the
 // admin reload endpoint; it returns an error the caller can surface or log.
-func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler, authn *auth.Authenticator) error {
+func reloadConfig(path string, startup config.Config, src reloadSources, sched *scheduler.Scheduler, authn *auth.Authenticator, srv *server.Server) error {
 	resolved := path
 	if resolved == "" {
 		resolved = config.DefaultPath()
@@ -747,15 +783,72 @@ func reloadConfig(path string, startup config.Config, sched *scheduler.Scheduler
 	if err != nil {
 		return fmt.Errorf("reload failed, keeping current config: %w", err)
 	}
+
+	// Credentials given with --api-key live nowhere in the file, so a file-only
+	// reload would drop them. Carry them across unless the file now defines its own.
+	if len(newCfg.Tenants) == 0 && len(newCfg.APIKeys) == 0 {
+		newCfg.APIKeys = src.flags.apiKeys
+	}
+	tenants := authTenants(newCfg)
+
+	// Validate before mutating anything: a refused reload must leave the running
+	// server exactly as it was, so this check has to precede sched.Reload.
+	//
+	// A reload may never reduce the server's security posture. Dropping to an empty
+	// tenant set means open mode — no authentication on any endpoint, /admin
+	// included — and reload is a routine operation that must not be able to do that
+	// silently. Opening a server is a deliberate act: restart it without keys.
+	if len(tenants) == 0 && !authn.Open() {
+		return fmt.Errorf("reload refused: %s supplies no api_keys or tenants, which would switch the running server to OPEN mode — unauthenticated access to every endpoint including /admin. Keeping the current credentials; restart without keys if opening the server is really intended", resolved)
+	}
+
 	warnUnappliedChanges(startup, newCfg)
 
-	if err := sched.Reload(modelSpecs(newCfg), newCfg.Aliases); err != nil {
+	specs := modelSpecs(newCfg)
+	specs = append(specs, carriedFlagSpecs(startup, newCfg, src.flags.models)...)
+	if src.discover {
+		dctx, cancel := context.WithTimeout(context.Background(), reloadDiscoverTimeout)
+		specs = append(specs, discoverModels(dctx, src.backends, specs)...)
+		cancel()
+	}
+	if err := sched.Reload(specs, newCfg.Aliases); err != nil {
 		return fmt.Errorf("model/alias reload rejected, keeping current: %w", err)
 	}
-	authn.Reload(authTenants(newCfg))
+	authn.Reload(tenants)
+	srv.SetLintWarnings(lintStrings(newCfg.Lint()))
 	fmt.Printf("reload: %d model(s), %d alias(es), %d tenant(s)\n",
-		len(newCfg.Models), len(newCfg.Aliases), len(authTenants(newCfg)))
+		len(specs), len(newCfg.Aliases), len(tenants))
 	return nil
+}
+
+// carriedFlagSpecs returns specs for the --model entries the reloaded file does
+// not define. A flag-supplied model has no representation in the file, so a
+// reload that read only the file would drop it from a running server. The file
+// wins on an id clash, matching how configured models beat discovered ones.
+func carriedFlagSpecs(startup, newCfg config.Config, flagModels []config.Model) []backend.ModelSpec {
+	if len(flagModels) == 0 {
+		return nil
+	}
+	inFile := make(map[string]bool, len(newCfg.Models))
+	for _, m := range newCfg.Models {
+		inFile[m.ID] = true
+	}
+	carried := make([]config.Model, 0, len(flagModels))
+	for _, m := range flagModels {
+		if !inFile[m.ID] {
+			carried = append(carried, m)
+		}
+	}
+	if len(carried) == 0 {
+		return nil
+	}
+	// Resolve through modelSpecs so backend defaulting stays in one place, against
+	// the backend these models were parsed for at startup (`backend` is a
+	// restart-required setting, so it is the startup value that is running).
+	cp := newCfg
+	cp.Backend = startup.Backend
+	cp.Models = carried
+	return modelSpecs(cp)
 }
 
 // warnUnappliedChanges logs every top-level and per-model setting that reload
@@ -810,6 +903,16 @@ func warnUnappliedChanges(startup, newCfg config.Config) {
 	}
 }
 
+// lintStrings renders config lint warnings for GET /admin/config, keeping
+// internal/server independent of internal/config's LintWarning type.
+func lintStrings(warnings []config.LintWarning) []string {
+	out := make([]string, len(warnings))
+	for i, w := range warnings {
+		out[i] = w.String()
+	}
+	return out
+}
+
 // warnRestartRequired logs a restart-required line when oldV != newV. Values
 // are compared via their default fmt formatting, which is exact for the
 // plain scalar config fields this is used for (string/int/bool).
@@ -826,12 +929,29 @@ func modelExtrasChanged(a, b config.Model) bool {
 	if a.TimeoutS != b.TimeoutS || a.InputUSDPerMTok != b.InputUSDPerMTok || a.OutputUSDPerMTok != b.OutputUSDPerMTok {
 		return true
 	}
+	// ctx and preload are wired into the guardrail/clamp/preload at startup, so a
+	// change to either leaves stale limits in place until a restart — exactly the
+	// kind of silent divergence this warning exists to surface.
+	if a.Ctx != b.Ctx || a.Preload != b.Preload {
+		return true
+	}
 	if boolPtrDiffers(a.EnforceContext, b.EnforceContext) ||
 		boolPtrDiffers(a.ClampMaxTokens, b.ClampMaxTokens) ||
 		boolPtrDiffers(a.PreciseContext, b.PreciseContext) {
 		return true
 	}
 	return !slices.Equal(a.ModelFallbacks, b.ModelFallbacks)
+}
+
+// resolveBool applies a per-model *bool override to a server-wide default: set
+// wins over global, nil inherits. An explicit false therefore turns a feature off
+// for one model even when it is on globally — which is the whole point of an
+// override, and what `global || *override` silently failed to do.
+func resolveBool(global bool, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	return global
 }
 
 func boolPtrDiffers(a, b *bool) bool {
@@ -841,9 +961,12 @@ func boolPtrDiffers(a, b *bool) bool {
 	return a != nil && *a != *b
 }
 
-// adoptBackendNames are the detect-and-adopt backends that can enumerate their
-// own models for auto-discovery.
-var adoptBackendNames = []string{"ollama", "lmstudio", "llamafile", "gpt4all"}
+// The adopt-backend set lives in internal/backend, which is where the backends
+// that make it true are: a second list here is how the two drift.
+var adoptBackendNames = backend.AdoptNames
+
+// isAdoptBackend reports whether name is an adopt-only backend.
+func isAdoptBackend(name string) bool { return backend.IsAdopt(name) }
 
 // discoverModels queries each present backend that implements backend.ModelLister
 // and returns specs for models not already configured (configured wins on an id
@@ -984,12 +1107,18 @@ func buildAuth(cfg config.Config) *auth.Authenticator {
 	return auth.NewTenants(authTenants(cfg))
 }
 
-// parseModelFlag parses "id=/path/to/weights.gguf".
-func parseModelFlag(s string) (config.Model, error) {
+// parseModelFlag parses "id=/path/to/weights.gguf" for the backend that will
+// serve it. The path may be empty ("id=") on an adopt-only backend: that daemon
+// already holds the weights, so there is no path to give.
+func parseModelFlag(s, backendName string) (config.Model, error) {
 	id, path, ok := strings.Cut(s, "=")
 	id, path = strings.TrimSpace(id), strings.TrimSpace(path)
-	if !ok || id == "" || path == "" {
+	if !ok || id == "" {
 		return config.Model{}, fmt.Errorf("invalid --model %q: want id=/path/to/weights.gguf", s)
+	}
+	if path == "" && !isAdoptBackend(backendName) {
+		return config.Model{}, fmt.Errorf("invalid --model %q: backend %s loads the weights itself, so it needs a path (want id=/path/to/weights.gguf); an empty path is only valid on the adopt-only backends: %s",
+			s, backendName, strings.Join(adoptBackendNames, ", "))
 	}
 	return config.Model{ID: id, Path: path}, nil
 }

@@ -119,3 +119,66 @@ func TestNoCoalesceWhenDisabled(t *testing.T) {
 		t.Fatalf("backend hits = %d, want %d (no coalescing)", hits.Load(), n)
 	}
 }
+
+// TestCoalesceMessagesIdenticalRequests — a burst of identical deterministic
+// /v1/messages requests used to cost one generation each, because that path
+// never joined the single-flight group at all.
+func TestCoalesceMessagesIdenticalRequests(t *testing.T) {
+	var hits atomic.Int64
+	eng := slowEngine(t, &hits)
+	sched := scheduler.New(
+		map[string]backend.Backend{"fake": &engineBackend{baseURL: eng.URL}},
+		[]backend.ModelSpec{{ID: "m1", Backend: "fake"}},
+		scheduler.Options{MaxLoaded: 2},
+	)
+	rec, _ := metrics.New("")
+	srv := server.New(sched, auth.New(nil), rec)
+	srv.SetCoalescing(true)
+	h := srv.Handler()
+
+	const n = 10
+	const body = `{"model":"m1","max_tokens":16,"temperature":0,"messages":[{"role":"user","content":"same"}]}`
+	var (
+		wg        sync.WaitGroup
+		coalesced atomic.Int64
+		okCount   atomic.Int64
+		bodies    sync.Map
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := postMessages(h, body)
+			if w.Code == 200 {
+				okCount.Add(1)
+			}
+			if w.Header().Get("X-Mainspring-Coalesced") == "true" {
+				coalesced.Add(1)
+			}
+			bodies.Store(w.Body.String(), true)
+		}()
+	}
+	wg.Wait()
+
+	if okCount.Load() != n {
+		t.Fatalf("only %d/%d requests succeeded", okCount.Load(), n)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("backend hits = %d, want 1 (all identical requests coalesced)", hits.Load())
+	}
+	if coalesced.Load() != n-1 {
+		t.Fatalf("coalesced followers = %d, want %d", coalesced.Load(), n-1)
+	}
+	// Every caller must have received the same Anthropic-shaped message.
+	count := 0
+	bodies.Range(func(k, _ any) bool {
+		count++
+		if !strings.Contains(k.(string), `"type":"message"`) {
+			t.Errorf("a follower got a non-Anthropic body:\n%s", k)
+		}
+		return true
+	})
+	if count != 1 {
+		t.Fatalf("callers saw %d distinct bodies, want 1", count)
+	}
+}

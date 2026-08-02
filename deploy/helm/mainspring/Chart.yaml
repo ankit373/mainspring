@@ -2,8 +2,12 @@ apiVersion: v2
 name: mainspring
 description: Backend-agnostic local inference server — one OpenAI-compatible API, pluggable engines.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+# Both are bumped by release-please via `extra-files` in release-please-config.json.
+# They track the app release: the chart exists only to deploy this server, and a
+# default install resolves image.tag from appVersion, so a stale value here means
+# `helm install` silently pulls an old image.
+version: 0.2.0
+appVersion: "0.2.0"
 home: https://github.com/ankit373/mainspring
 sources:
   - https://github.com/ankit373/mainspring

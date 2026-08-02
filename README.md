@@ -21,7 +21,10 @@ with Ollama and friends are not kernel problems, they are control-plane problems
 - **Silent CPU fallback** — you think you're on the GPU; you aren't, and nothing tells you.
 - **Zero authentication** — tens of thousands of instances sit exposed on the public internet.
 - **Model thrashing / VRAM mismanagement** — evict-and-reload every call; VRAM not reclaimed on switch.
-- **OpenAI-compat gaps** — tool-call `arguments` type flips, streaming-with-tools breaks, `logprobs`/`n` ignored.
+- **OpenAI-compat gaps** — tool-call `arguments` type flips, streaming-with-tools breaks, and `n` is
+  accepted and then ignored: ask for three candidates to rank, get one, and nothing tells you.
+  (`logprobs` used to be on this list. Verified against Ollama + Qwen2.5-Coder 7B it works, and
+  Mainspring passes `logprobs`/`top_logprobs` through intact, so it no longer belongs here.)
 
 Mainspring's thesis: **don't build inference kernels — build the local-inference control plane.**
 Wrap the permissively-licensed engines behind one **versioned, conformance-tested** API and make the
@@ -30,20 +33,37 @@ layer around them **fail loud, VRAM-aware, and governed**.
 ## What it does
 
 - **One stable, versioned OpenAI *and* Anthropic API** — `/v1/chat/completions`, `/completions`,
-  `/embeddings`, `/models`, and Anthropic `/v1/messages` (text **and** tool use, streaming translated) —
-  validated against the real OpenAI Python/JS SDKs in CI.
+  `/embeddings`, `/models`, and Anthropic `/v1/messages` (text **and** tool use, streaming translated)
+  plus `/v1/messages/count_tokens` for pre-flighting a context budget —
+  **both dialects validated against their real Python and JS SDKs in CI**, failure paths included (an
+  upstream 5xx, a stream cut mid-flight). Both dialects also run the **same** pipeline — auth,
+  per-tenant budgets, context guardrail, clamp, concurrency gate, timeouts, circuit breaker, cost
+  accounting, response cache, coalescing, retry and model fallback. They differ in what they put on
+  the wire, not in how a request is governed. Anthropic `stop_sequences` are matched by Mainspring
+  rather than forwarded to the engine, because an engine that stops also erases the match — so
+  `stop_reason: "stop_sequence"` actually names the sequence that hit.
 - **Pluggable backends** behind a `Backend`/`Runner` interface: `llamacpp` and `mlx` (managed
   subprocess) · `ollama` / `lmstudio` / `llamafile` / `gpt4all` (detect-and-adopt-only, never installed).
-  **Per-model routing, aliases, and ordered fallback chains** — one server can serve several models on
-  different engines and fail over when one is down.
+  For an adopted daemon a model's **`id` is the name that daemon knows it by** and `path` is unused —
+  there is no file to open — and setting `path` anyway is flagged at startup rather than surfacing later
+  as a failed request. **Per-model routing, aliases, and ordered fallback chains** — one server can serve
+  several models on different engines and fail over when one is down.
 - **Fail loud, never silently degrade** — `/capabilities` and `X-Mainspring-{Backend,Device,Warning}`
   headers state the *actual* backend, whether it fell back to CPU, and the *effective* context window.
+- **`n` is checked against the answer** — ask for `n: 3` candidates from an engine that never
+  implemented `n` and you get one choice and, everywhere else, no signal. Mainspring counts what came
+  back and reports the shortfall on `X-Mainspring-Warning` (in-band as an inert SSE comment on a
+  stream, whose headers left long before the last frame). It is *observed*, never read off a
+  per-backend support table that would go stale on the next engine release — an engine that does
+  honour `n` is not warned about. The engine's body is forwarded byte-for-byte, and a request without
+  `n`, or with `n: 1`, takes exactly the path it always did.
 - **VRAM-residency-aware scheduling** — single-flight load, byte-budget + LRU eviction, KeepAlive idle
   unload, optional preload.
 - **Reliability** — per-model concurrency limit + bounded queue (503 backpressure), a **circuit breaker**
   with a background health probe, **retry-with-backoff** on transient upstream failures (safe for streams),
   **model-level fallback chains** (a different model answers when the primary is down), and a structured
-  error taxonomy (stable `code` per failure class).
+  error taxonomy (stable `code` per failure class) that **every** response goes through — an unrouted
+  path answers `route_not_found` and a wrong method `method_not_allowed`, not Go's plain text.
 - **Opt-in response cache** — identical deterministic (temperature 0) non-streaming requests return from a
   bounded TTL+LRU cache without re-running the model; hits carry `X-Mainspring-Cache: hit`.
 - **Request coalescing** — a burst of identical in-flight deterministic requests shares one backend
@@ -55,10 +75,19 @@ layer around them **fail loud, VRAM-aware, and governed**.
 - **Cost accounting** — optional per-model USD pricing turns real usage into spend, surfaced in the
   usage ledger, a `mainspring_cost_usd_total` metric, and `/v1/quality` (a real cost signal for routing).
 - **Operability** — Prometheus `/metrics`, JSONL usage ledger, `X-Request-ID` + W3C `traceparent`
-  propagation, optional access log, **SIGHUP hot-reload**, an **admin API** (drain / reload / model
-  load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a router (Hydra) can consume.
+  propagation, optional access log, **a config file read strictly** (a misspelled key is a startup
+  error naming the nearest real field, never a silently dropped line that leaves a guardrail off),
+  **SIGHUP hot-reload** (carries flag-supplied models and keys
+  across, and refuses any reload that would leave a running server unauthenticated), an **admin API**
+  (drain / reload / model load-unload), **TLS**, graceful drain, and a `/v1/quality` routing signal a
+  trust control plane like Hydra can consume.
 - **Detect-first, opt-in managed install** — use whatever engine is present; install a missing one only
-  when you enable it (SHA-256-pinned, optionally ed25519-signed manifest) — never silently.
+  when you explicitly run `mainspring install`, never silently. Every download is staged to a temp file
+  and SHA-256-verified *before* it is put in place, so a mismatch never reaches the install path and
+  never disturbs an engine already installed there. Mainspring does **not** bundle a catalogue of
+  engine builds: you point it at
+  the artifact you want with `--url` + `--sha256`, or at your own manifest (optionally ed25519-signed
+  via `--pubkey`). Shipping a curated, pinned manifest is tracked separately.
 - **Deploy anywhere** — a single static binary, a distroless container image, and a Helm chart
   (HPA / ServiceMonitor / GPU node scheduling).
 
@@ -70,10 +99,25 @@ layer around them **fail loud, VRAM-aware, and governed**.
 
 ## Status
 
-**v0.1.0 — released.** The full control plane is shipped: OpenAI + Anthropic APIs, six backends with
-per-model routing / aliases / fallback, VRAM-aware scheduling, governance, circuit breaker, TLS, admin
-API, request-ID + trace-context, and `/v1/quality`. `go test -race` clean across the tree. See
+**v0.2.0 — released.** The full control plane is shipped: OpenAI + Anthropic APIs, six backends with
+per-model routing / aliases / fallback, VRAM-aware scheduling that never evicts a runner out from under
+an in-flight request, governance with quota-headroom headers, circuit breaker (open vs half-open
+distinguished in `/metrics`), response cache + request coalescing, cost accounting, latency and
+queue-wait percentiles, TLS, admin API, request-ID + trace-context, and `/v1/quality`.
+`go test -race` clean across the tree. See
 [CHANGELOG.md](CHANGELOG.md) and the [releases page](https://github.com/ankit373/mainspring/releases).
+
+**Since v0.2.0 (on `develop`, unreleased)** a full correctness audit of the tree closed 18 issues.
+Anthropic `/v1/messages` reached parity with the OpenAI path — it had been skipping the clamp, the
+context guardrail, cost accounting and the circuit breaker while recording a hardcoded `200` for every
+request. The response cache stopped replaying one tenant's request id and quota headroom to another,
+and stopped treating an *omitted* `temperature` as deterministic. A config reload can no longer wipe
+flag-supplied models or silently drop the server into open mode. Truncated responses are no longer
+served as successes or cached, and a client's own disconnect is no longer charged to the circuit
+breaker at any point — while a real timeout still is. Rejections, admin principals and ledger failures
+all now appear in the telemetry that claimed to cover them. And the last unaddressed item in the *Why*
+list above closed: an `n: 3` that an engine answers with one choice is now reported instead of passing
+for a complete answer.
 
 ## Quick start
 
@@ -106,10 +150,14 @@ curl localhost:11500/v1/quality
 
 ## Relationship to Hydra
 
-Mainspring is an **inference head**; [Hydra](https://github.com/ankit373/hydra) is the **router/trust
-control plane above it**. They meet over the standard OpenAI-compatible HTTP boundary, so either can
-evolve independently. Mainspring governs *its own* served endpoint (admission control); Hydra governs
-*routing across many heads*.
+These are **two control planes at different scopes**, not a router and a server.
+[Hydra](https://github.com/ankit373/hydra) is the **Trust Control Plane**: it routes *across* heads to
+a target **confidence of correctness**. Mainspring is the **inference control plane** for *one* head:
+admission control, VRAM residency, and fail-loud truth about what actually ran.
+
+Hydra asks *which head should answer this, and how confident are we that it's right*. Mainspring
+answers *what is true about this head right now*. They meet over the standard OpenAI-compatible HTTP
+boundary, so either can evolve independently.
 
 **Hydra stays provider-neutral — it works with everything** (Ollama, OpenAI, Anthropic/Claude, any
 OpenAI-compatible endpoint). Mainspring is not a replacement for that and Hydra never depends on it;
@@ -117,6 +165,12 @@ because Mainspring speaks the same standard API, Hydra treats it like any other 
 Mainspring special is that it's the head Hydra works with *best* — it's the only one that emits
 fail-loud capability signals, VRAM-residency hints, and verified OpenAI-compat correctness that
 Hydra's trust layer can consume directly. Best-integrated, never exclusive.
+
+## Contributing
+
+Issue first, always — see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, the commit
+convention, and the `go test -race` bar. Security issues go through
+[SECURITY.md](SECURITY.md), never a public issue.
 
 ## License
 

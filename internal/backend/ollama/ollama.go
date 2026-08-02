@@ -72,21 +72,22 @@ func (b *Backend) version(ctx context.Context) string {
 // Start verifies the model exists in the daemon and returns a runner pointing at
 // Ollama's OpenAI-compatible endpoint. It does NOT pull models (adopt-only).
 func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Runner, error) {
-	ok, err := b.hasModel(ctx, spec.ID)
+	ok, have, err := b.hasModel(ctx, spec.ID)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: %w", err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("ollama: model %q not present — pull it first with `ollama pull %s` (Mainspring will not pull automatically)", spec.ID, spec.ID)
+		return nil, backend.MissingModelError("ollama", b.Host, spec, have,
+			fmt.Sprintf("Pull it with `ollama pull %s` (Mainspring will not pull automatically).", spec.ID))
 	}
 	return &runner{host: b.Host, spec: spec}, nil
 }
 
-func (b *Backend) hasModel(ctx context.Context, id string) (bool, error) {
+func (b *Backend) hasModel(ctx context.Context, id string) (found bool, have []string, err error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, b.Host+"/api/tags", nil)
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer resp.Body.Close()
 	var payload struct {
@@ -95,15 +96,17 @@ func (b *Backend) hasModel(ctx context.Context, id string) (bool, error) {
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
-		return false, err
+		return false, nil, err
 	}
+	have = make([]string, 0, len(payload.Models))
 	for _, m := range payload.Models {
+		have = append(have, m.Name)
 		// Ollama tags include the ":latest" suffix; match with or without it.
 		if m.Name == id || strings.TrimSuffix(m.Name, ":latest") == id {
-			return true, nil
+			found = true
 		}
 	}
-	return false, nil
+	return found, have, nil
 }
 
 // ListModels enumerates the models the daemon has pulled (adopt-only discovery).

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/util"
 )
 
 // State is a breaker's lifecycle state.
@@ -99,6 +101,30 @@ func (g *Group) Allow(key string) bool {
 	return false
 }
 
+// OnAbandoned releases a request that produced no verdict about the backend —
+// a caller that cancelled before the answer arrived. Such a request says nothing
+// about backend health, so the failure count must not move in either direction:
+// recording a failure would let client disconnects open the circuit for every
+// tenant, and recording a success would clear the count, letting a client with a
+// flaky connection hold a genuinely broken backend's circuit closed indefinitely.
+//
+// The one thing that must not leak is a consumed probe. Allow() moves
+// Open -> HalfOpen and then refuses every later caller until OnResult resolves it,
+// so an abandoned probe would wedge the breaker half-open forever. Put it back to
+// Open, leaving openedAt alone: the cooldown has already elapsed, so the next
+// caller takes the probe immediately rather than serving another full cooldown for
+// someone else's cancellation.
+func (g *Group) OnAbandoned(key string) {
+	if !g.Enabled() {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if b := g.breakers[key]; b != nil && b.state == HalfOpen {
+		b.state = Open
+	}
+}
+
 // OnResult records the outcome of a request (or health probe) for key.
 func (g *Group) OnResult(key string, success bool) {
 	if !g.Enabled() {
@@ -160,7 +186,11 @@ func (g *Group) State(key string) State {
 	return Closed
 }
 
-// WritePrometheus emits a per-key open-state gauge (1 when open or half-open).
+// WritePrometheus emits a per-key open-state gauge (1 when open or half-open,
+// preserving existing dashboard semantics), plus a separate half-open gauge so
+// "still failing, cooldown running" is distinguishable from "cooldown elapsed,
+// actively probing recovery" without switching to /v1/quality, which already
+// reports the granular state string per model.
 func (g *Group) WritePrometheus(w io.Writer) {
 	if !g.Enabled() {
 		return
@@ -182,33 +212,28 @@ func (g *Group) WritePrometheus(w io.Writer) {
 		if states[k] != Closed {
 			v = 1
 		}
-		writeGauge(w, k, v)
+		writeGauge(w, "mainspring_breaker_open", k, v)
+	}
+
+	io.WriteString(w, "# HELP mainspring_breaker_half_open Circuit breaker actively probing recovery (1=half-open) by model.\n")
+	io.WriteString(w, "# TYPE mainspring_breaker_half_open gauge\n")
+	for _, k := range keys {
+		v := 0
+		if states[k] == HalfOpen {
+			v = 1
+		}
+		writeGauge(w, "mainspring_breaker_half_open", k, v)
 	}
 }
 
-func writeGauge(w io.Writer, model string, v int) {
-	io.WriteString(w, "mainspring_breaker_open{model=\"")
-	io.WriteString(w, esc(model))
+func writeGauge(w io.Writer, name, model string, v int) {
+	io.WriteString(w, name)
+	io.WriteString(w, "{model=\"")
+	io.WriteString(w, util.PromLabelValue(model))
 	io.WriteString(w, "\"} ")
 	if v == 1 {
 		io.WriteString(w, "1\n")
 	} else {
 		io.WriteString(w, "0\n")
 	}
-}
-
-// esc escapes a Prometheus label value.
-func esc(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		switch r {
-		case '\\', '"':
-			out = append(out, '\\', r)
-		case '\n':
-			out = append(out, '\\', 'n')
-		default:
-			out = append(out, r)
-		}
-	}
-	return string(out)
 }

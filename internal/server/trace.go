@@ -38,47 +38,55 @@ func outgoingTraceparent(ctx context.Context) string {
 	return ""
 }
 
+// sampledFlags is the trace-flags byte for a trace Mainspring mints itself:
+// there is no upstream decision to respect, so record it.
+const sampledFlags = "01"
+
 // withTrace derives the trace state for a request: it reuses the incoming
-// traceparent's trace id when valid (continuing the distributed trace), else
-// starts a new trace. Either way it mints a fresh span id for this hop and
-// builds the child traceparent to send upstream.
+// traceparent's trace id and trace flags when valid (continuing the distributed
+// trace, and honouring the caller's sampling decision — forcing 01 would sample
+// downstream a trace the caller explicitly opted out of), else starts a new
+// sampled trace. Either way it mints a fresh span id for this hop and builds the
+// child traceparent to send upstream.
 func withTrace(r *http.Request) *http.Request {
-	traceID, ok := parseTraceparent(r.Header.Get("traceparent"))
+	traceID, flags, ok := parseTraceparent(r.Header.Get("traceparent"))
 	if !ok {
-		traceID = randomHex(16)
+		traceID, flags = randomHex(16), sampledFlags
 	}
 	spanID := randomHex(8)
 	ts := traceState{
 		traceID:    traceID,
-		outgoingTP: "00-" + traceID + "-" + spanID + "-01",
+		outgoingTP: "00-" + traceID + "-" + spanID + "-" + flags,
 	}
 	return r.WithContext(context.WithValue(r.Context(), traceKey, ts))
 }
 
-// parseTraceparent validates a W3C traceparent header and returns its trace id.
-// Format: version(2) "-" trace-id(32) "-" parent-id(16) "-" flags(2), all hex.
-// An all-zero trace id is invalid per the spec.
-func parseTraceparent(h string) (traceID string, ok bool) {
-	parts := strings.Split(strings.TrimSpace(h), "-")
+// parseTraceparent validates a W3C traceparent header and returns its trace id
+// and trace flags. Format: version(2) "-" trace-id(32) "-" parent-id(16) "-"
+// flags(2), all hex. An all-zero trace id is invalid per the spec.
+func parseTraceparent(h string) (traceID, flags string, ok bool) {
+	// The spec defines the field as lowercase hex; normalising here keeps the
+	// forwarded child traceparent canonical whatever case the caller sent.
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(h)), "-")
 	if len(parts) != 4 {
-		return "", false
+		return "", "", false
 	}
-	version, tid, pid, flags := parts[0], parts[1], parts[2], parts[3]
-	if len(version) != 2 || len(tid) != 32 || len(pid) != 16 || len(flags) != 2 {
-		return "", false
+	version, tid, pid, fl := parts[0], parts[1], parts[2], parts[3]
+	if len(version) != 2 || len(tid) != 32 || len(pid) != 16 || len(fl) != 2 {
+		return "", "", false
 	}
 	if version == "ff" { // invalid/forbidden version
-		return "", false
+		return "", "", false
 	}
-	for _, p := range []string{version, tid, pid, flags} {
+	for _, p := range []string{version, tid, pid, fl} {
 		if !isHex(p) {
-			return "", false
+			return "", "", false
 		}
 	}
 	if tid == "00000000000000000000000000000000" || pid == "0000000000000000" {
-		return "", false
+		return "", "", false
 	}
-	return tid, true
+	return tid, fl, true
 }
 
 func isHex(s string) bool {

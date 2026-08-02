@@ -1,0 +1,30 @@
+# Example config for the containerised quick start in deploy/README.md.
+#
+#   docker run --rm -p 11500:11500 \
+#     -v "$PWD/deploy/example-config:/config:ro" \
+#     mainspring:dev
+#
+# The image is distroless and ships no inference engine, so this adopts an
+# Ollama daemon running on the host rather than loading weights itself.
+
+addr: ":11500"
+
+# `host.docker.internal` is how a container reaches a daemon on the host. On
+# Linux this needs `--add-host=host.docker.internal:host-gateway`; on Docker
+# Desktop it resolves already. Pointing at 127.0.0.1 would resolve to the
+# container itself and every request would fail to connect.
+backend: ollama
+ollama_host: "http://host.docker.internal:11434"
+
+# Adopt whatever the daemon already holds instead of naming models here. For an
+# adopt backend a model's id is the name Ollama knows it by, and `path` is
+# unused — there is no file for Mainspring to open.
+discover_models: true
+models: []
+
+# Unload an idle model after five minutes.
+keep_alive_seconds: 300
+max_loaded: 1
+
+# No tenants block, so the server runs in open mode: no API key is required.
+# Add one before exposing this beyond localhost.

@@ -63,11 +63,3 @@ func TestAdminUsagePerTenant(t *testing.T) {
 		t.Fatalf("user not in usage rollup: %+v", out.Tenants)
 	}
 }
-
-func TestAdminUsageForbiddenForNonAdmin(t *testing.T) {
-	a := auth.NewTenants([]auth.Tenant{{Name: "user", Key: "userkey", Role: auth.RoleInference}})
-	h := configTestServer(t, a).Handler()
-	if w := getJSON(h, "/admin/usage", "userkey"); w.Code != http.StatusForbidden {
-		t.Fatalf("non-admin status = %d, want 403", w.Code)
-	}
-}

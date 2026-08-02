@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ankit373/mainspring/internal/apierr"
 	"github.com/ankit373/mainspring/internal/auth"
 	"github.com/ankit373/mainspring/internal/backend"
 	"github.com/ankit373/mainspring/internal/breaker"
@@ -36,6 +37,8 @@ type Server struct {
 	draining       atomic.Bool
 	accessMu       sync.RWMutex
 	access         *accessLogger
+	lintMu         sync.RWMutex
+	lint           []string                 // current config-lint warnings (rendered strings), for GET /admin/config
 	reloadFn       func() error             // wired by main for POST /admin/reload
 	cache          *cache.LRU               // opt-in response cache (nil = disabled)
 	costRates      map[string]CostRate      // per-model USD pricing (nil = all free)
@@ -98,6 +101,28 @@ func (s *Server) accessLog() *accessLogger {
 	return s.access
 }
 
+// SetLintWarnings records the current config-lint warnings (rendered as
+// strings, so this package stays independent of internal/config), surfaced via
+// GET /admin/config. Safe to call at startup and again after every successful
+// reload, so the report reflects the config as of the last load, not just the
+// one the process booted with.
+func (s *Server) SetLintWarnings(warnings []string) {
+	s.lintMu.Lock()
+	defer s.lintMu.Unlock()
+	s.lint = warnings
+}
+
+// lintWarnings never returns nil (json.Marshal renders a nil slice as `null`,
+// not `[]`) — a clean config reports an explicit empty array.
+func (s *Server) lintWarnings() []string {
+	s.lintMu.RLock()
+	defer s.lintMu.RUnlock()
+	if s.lint == nil {
+		return []string{}
+	}
+	return s.lint
+}
+
 // SetDraining marks the server as draining: readiness (/readyz) starts failing so
 // load balancers stop routing new traffic while in-flight requests finish.
 func (s *Server) SetDraining(v bool) { s.draining.Store(v) }
@@ -136,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/embeddings", s.inference)
 	mux.HandleFunc("/v1/tokenize", s.tokenize) // token-counting utility
 	mux.HandleFunc("/v1/messages", s.messages) // Anthropic Messages API
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.messagesCountTokens)
 	// Admin API (management actions; admin-gated, audited via the access log).
 	mux.HandleFunc("GET /admin/config", s.adminConfig)
 	mux.HandleFunc("GET /admin/usage", s.adminUsage)
@@ -146,8 +172,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/breaker/{id}/reset", s.adminBreakerReset)
 	mux.HandleFunc("POST /admin/cache/clear", s.adminCacheClear)
 	// requestID is outermost so every request — including auth rejections and
-	// health checks — gets a correlation id and an access-log line.
-	return s.requestID(s.auth.Wrap(mux))
+	// health checks — gets a correlation id and an access-log line. routeErrors is
+	// innermost: an unauthenticated request is still rejected with 401 before
+	// anything learns which paths exist.
+	return s.requestID(s.auth.Wrap(routeErrors(mux)))
 }
 
 // metricsHandler renders the Prometheus exposition, merging live residency.
@@ -263,9 +291,7 @@ func (s *Server) modelDetail(w http.ResponseWriter, r *http.Request) {
 // the real backend/device/effective-ctx for every loaded model and whether any
 // is running degraded (CPU fallback or shrunk context).
 func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
-	// Management endpoint: admin role required (open mode has no tenant → allow).
-	if t, ok := auth.FromContext(r.Context()); ok && t.Role != auth.RoleAdmin {
-		writeError(w, http.StatusForbidden, "admin role required")
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -308,14 +334,23 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// Handler entry. Every outcome that never reaches the backend — a rejection, a
+	// cache hit, a coalesced replay — is timed from here, because for those there
+	// is no generation phase to time and reporting 0ms is not the same as
+	// reporting how long the client actually waited.
+	recvd := time.Now()
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read request body: "+err.Error())
 		return
 	}
 
+	// N rides along on the peek that already parses this body: reading it here is
+	// free, and it is the only thing that decides whether the response side does
+	// any work at all (see newChoiceCheck / choiceCheck).
 	var peek struct {
 		Model string `json:"model"`
+		N     *int   `json:"n"`
 	}
 	if err := json.Unmarshal(body, &peek); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -336,146 +371,32 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		body = rewriteModelField(body, model)
 	}
 
-	// Graceful clamp: shrink an over-budget max_tokens to fit the window before
-	// the guardrail gets a chance to reject the request.
-	body = s.applyClamp(w, model, body)
-
-	// Context guardrail: reject (or warn) an over-context request before doing any
-	// work, rather than letting the engine silently truncate it. Prompt tokens are
-	// counted exactly when precise_context is on and the model is resident on a
-	// tokenizing engine, otherwise estimated; the method is reported on a header.
-	if pol, ok := s.ctxPolicies[model]; ok && pol.Limit > 0 {
-		promptTok, exact := s.guardPromptTokens(r.Context(), model, body)
-		method := "estimated"
-		if exact {
-			method = "exact"
-		}
-		w.Header().Set("X-Mainspring-Context-Method", method)
-		if over, reason := contextOverageDetail(body, pol.Limit, promptTok, exact); over {
-			if pol.Enforce {
-				writeErr(w, codeContextLength, reason)
-				return
-			}
-			w.Header().Set("X-Mainspring-Context-Warning", reason)
-		}
+	// Clamp + context guardrail (shared with the Anthropic /v1/messages path).
+	body, ok = s.admit(w, r.Context(), model, body)
+	if !ok {
+		return
 	}
 
 	// Per-tenant token budget (enforced pre-request; accrued after).
 	tenant, _ := auth.FromContext(r.Context())
 	if !s.auth.AllowTokens(tenant) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
+		s.recordRejected(r.Context(), model, codeTokenBudget, recvd)
 		return
 	}
 
-	// Response cache: serve identical deterministic non-stream requests without
-	// touching the gate, breaker, loader, or backend. A hit still meters the
-	// tenant's token budget so accounting is consistent whether or not the model
-	// actually ran.
-	cacheKey, cached, hit := s.cacheLookup(model, r.URL.Path, body)
-	if hit {
-		serveCached(w, cached)
-		charge := cached.Completion
-		if cached.Exact {
-			charge = cached.Prompt + cached.Completion
-		}
-		s.auth.AddTokens(tenant, charge)
-		if s.metrics != nil {
-			s.metrics.Record(metrics.Event{
-				Time:         time.Now(),
-				RequestID:    RequestID(r.Context()),
-				TraceID:      TraceID(r.Context()),
-				Model:        model,
-				Tenant:       auth.TenantOf(r.Context()),
-				Status:       cached.Status,
-				Cached:       true,
-				Bytes:        int64(len(cached.Body)),
-				PromptTokens: cached.Prompt,
-				TokensEst:    cached.Completion,
-				Exact:        cached.Exact,
-				CostUSD:      s.costFor(model, cached.Prompt, cached.Completion, cached.Exact),
-			})
-		}
+	// Response cache + request coalescing. A hit, or a concurrent leader's result,
+	// answers the caller here without touching the gate, breaker, loader or backend.
+	// Otherwise this request becomes the leader that later callers wait on, and
+	// doneSharing must run on every exit or those followers wait forever.
+	sh, doneSharing, answered := s.beginShare(w, r, model, tenant, body, recvd)
+	if answered {
 		return
 	}
+	defer doneSharing()
 
-	// Request coalescing: identical deterministic requests already in flight share
-	// one backend computation. Followers wait for the leader and replay its result.
-	var (
-		coKey    string
-		coLeader bool
-		coVal    cache.Value
-		coOK     bool
-	)
-	if s.coalesce != nil && cacheable(body) {
-		coKey = cacheKey
-		if coKey == "" {
-			coKey = cache.Key(model, r.URL.Path, body)
-		}
-		leader, f := s.coalesce.join(coKey)
-		if !leader {
-			select {
-			case <-f.done:
-				if f.ok {
-					serveCoalesced(w, f.val)
-					charge := f.val.Completion
-					if f.val.Exact {
-						charge = f.val.Prompt + f.val.Completion
-					}
-					s.auth.AddTokens(tenant, charge)
-					if s.metrics != nil {
-						s.metrics.Record(metrics.Event{
-							Time:         time.Now(),
-							RequestID:    RequestID(r.Context()),
-							TraceID:      TraceID(r.Context()),
-							Model:        model,
-							Tenant:       auth.TenantOf(r.Context()),
-							Status:       f.val.Status,
-							Coalesced:    true,
-							Bytes:        int64(len(f.val.Body)),
-							PromptTokens: f.val.Prompt,
-							TokensEst:    f.val.Completion,
-							Exact:        f.val.Exact,
-							CostUSD:      s.costFor(model, f.val.Prompt, f.val.Completion, f.val.Exact),
-						})
-					}
-					return
-				}
-				// Leader produced no shareable result → fall through and run normally.
-			case <-r.Context().Done():
-				writeErr(w, codeTimeout, "request cancelled while waiting for coalesced result")
-				return
-			}
-		} else {
-			coLeader = true
-			defer func() { s.coalesce.publish(coKey, coVal, coOK) }()
-		}
-	}
-
-	// Select a servable model: try the requested one, then its fallback chain.
-	// A candidate is skipped only for a pre-serve failure (circuit open or load
-	// error); gate saturation is backpressure, not a fallback trigger.
-	var (
-		runner    backend.Runner
-		release   func()
-		served    string
-		queueWait time.Duration
-	)
-	for _, cand := range s.candidatesFor(model) {
-		rr, rel, wait, busy, okc := s.acquireRunner(r, cand)
-		queueWait += wait
-		if busy {
-			w.Header().Set("Retry-After", "1")
-			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+cand)
-			return
-		}
-		if okc {
-			runner, release, served = rr, rel, cand
-			break
-		}
-	}
-	if runner == nil {
-		w.Header().Set("Retry-After", "5")
-		writeErr(w, codeCircuitOpen, "no available backend for "+model+" or its fallbacks")
+	runner, release, served, queueWait, servable := s.selectRunner(w, r, model, recvd)
+	if !servable {
 		return
 	}
 	defer release()
@@ -503,23 +424,37 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// Record the full body when the response may be shared — cached and/or
 	// coalesced — and only when the primary model served (a fallback's output is
 	// never stored under the primary key).
-	if ((cacheKey != "") || coLeader) && served == model {
+	if sh.wanted() && served == model {
 		cap.recordFor(cacheBodyCap)
 	}
 	// Mark the runner busy for the actual generation call so the scheduler's
 	// idle timer and LRU eviction never pull it out from under a long-running
 	// request (e.g. one that streams longer than KeepAlive).
 	s.sched.MarkBusy(served)
-	retries := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
+	pr := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra, newChoiceCheck(peek.N, r.URL.Path))
 	s.sched.MarkIdle(served)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
-	// (4xx is a client error, not the backend's fault).
-	s.breaker.OnResult(served, cap.status < 500)
+	// (4xx is a client error, not the backend's fault). backendFailed covers what
+	// the status cannot: once a response is committed — 200 for a stream — a body
+	// that stops early would otherwise be recorded as a success.
+	//
+	// A caller that abandoned its own request is neither: it never learned whether
+	// the backend was healthy. Recording a failure would let client disconnects open
+	// the circuit for every tenant; recording a success would clear the failure
+	// count, letting a flaky client hold a broken backend's circuit closed.
+	if pr.abandoned {
+		s.breaker.OnAbandoned(served)
+	} else {
+		s.breaker.OnResult(served, !pr.backendFailed && cap.status < 500)
+	}
 
 	prompt, completion, exact := cap.usage()
-	// Build the shareable value once for a successful, non-streaming, within-cap
-	// primary-model response, then feed it to the cache and/or coalesce followers.
-	if served == model && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
+	// Build the shareable value once for a successful, non-streaming, within-cap,
+	// *completely delivered* primary-model response, then feed it to the cache
+	// and/or coalesce followers. A truncated body is never shareable: storing it
+	// would replay one severed answer to every later caller for the life of the
+	// entry, and publish it to the followers already waiting on this request.
+	if served == model && !pr.incomplete && !cap.stream && !cap.bodyOver && cap.status >= 200 && cap.status < 300 && cap.body != nil {
 		shared := cache.Value{
 			Status:     cap.status,
 			Header:     cap.snapHeader,
@@ -528,12 +463,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			Completion: completion,
 			Exact:      exact,
 		}
-		if cacheKey != "" {
-			s.cache.Put(cacheKey, shared)
-		}
-		if coLeader {
-			coVal, coOK = shared, true
-		}
+		sh.store(shared)
 	}
 	// Token budgets charge total consumption when we have exact usage; otherwise
 	// only the (estimated) output count is known.
@@ -551,18 +481,45 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 			Tenant:       auth.TenantOf(r.Context()),
 			Status:       cap.status,
 			Stream:       cap.stream,
-			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
+			DurationMs:   ms(time.Since(start)),
 			TTFTMs:       cap.ttftMs(),
 			Bytes:        cap.bytes,
 			PromptTokens: prompt,
 			TokensEst:    completion,
 			Exact:        exact,
 			CostUSD:      s.costFor(served, prompt, completion, exact),
-			Retries:      retries,
+			Retries:      pr.retries,
 			Fallback:     served != model,
-			QueueWaitMs:  float64(queueWait.Microseconds()) / 1000.0,
+			QueueWaitMs:  ms(queueWait),
 		})
 	}
+}
+
+// ms renders a duration as fractional milliseconds for the metrics event.
+func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
+
+// recordRejected records a request refused before it reached a backend — the
+// gate was saturated, a circuit was open, the tenant's token budget was spent,
+// or the context guardrail rejected it. The model is already resolved at every
+// one of those sites, so leaving them unrecorded is what makes /metrics and the
+// usage ledger describe a server that never refuses anything, which is precisely
+// the signal an operator needs most. `since` is when the handler received the
+// request; the event carries the real time spent deciding to refuse.
+func (s *Server) recordRejected(ctx context.Context, model string, code errorCode, since time.Time) {
+	if s.metrics == nil {
+		return
+	}
+	status, _ := apierr.Meta(code)
+	s.metrics.Record(metrics.Event{
+		Time:       since,
+		RequestID:  RequestID(ctx),
+		TraceID:    TraceID(ctx),
+		Model:      model,
+		Tenant:     auth.TenantOf(ctx),
+		Status:     status,
+		ErrorCode:  string(code),
+		DurationMs: ms(time.Since(since)),
+	})
 }
 
 // failLoudHeaders builds the X-Mainspring-* signal headers and logs loudly when
@@ -581,7 +538,7 @@ func (s *Server) failLoudHeaders(ctx context.Context, runner backend.Runner) map
 	}
 	if c.Degraded() {
 		msg := joinWarnings(c.Warnings)
-		h["X-Mainspring-Warning"] = msg
+		h[warningHeader] = msg
 		log.Printf("DEGRADED model=%s device=%s: %s", c.Model, c.Device, msg)
 	}
 	return h

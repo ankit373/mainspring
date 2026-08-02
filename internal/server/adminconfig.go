@@ -11,10 +11,6 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if r.Method != http.MethodGet {
-		writeErr(w, codeMethodNotAllowed, "method not allowed")
-		return
-	}
 
 	// Timeouts.
 	timeouts := map[string]any{"default_seconds": s.defaultTimeout.Seconds()}
@@ -48,6 +44,9 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		cacheInfo["hits"] = hits
 		cacheInfo["misses"] = misses
 	}
+
+	// Usage ledger: whether it is really open, not whether a path was configured.
+	usageLedger := map[string]any{"active": s.metrics != nil && s.metrics.LedgerActive()}
 
 	// Concurrency gate.
 	concurrency := map[string]any{
@@ -95,6 +94,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"retry":           retry,
 		"breaker":         breaker,
 		"cache":           cacheInfo,
+		"usage_ledger":    usageLedger,
 		"coalesce":        map[string]any{"enabled": s.coalesce != nil},
 		"concurrency":     concurrency,
 		"context_guard":   guard,
@@ -102,5 +102,6 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"precise_models":  preciseModels,
 		"model_fallbacks": s.modelFallbacks,
 		"cost_rates_set":  priced,
+		"lint_warnings":   s.lintWarnings(),
 	})
 }

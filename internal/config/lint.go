@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+
+	"github.com/ankit373/mainspring/internal/backend"
 )
 
 // LintWarning is one config combination that is valid YAML but has no effect
@@ -39,6 +41,28 @@ func (c Config) Lint() []LintWarning {
 	}
 
 	for _, m := range c.Models {
+		// An adopt-only backend runs its own process and holds its own weights, so
+		// there is no file for Mainspring to open: the model id must be the name the
+		// daemon knows it by, and path is read by nothing. Setting it is usually a
+		// sign the id is wrong — the real name was put in path — which otherwise
+		// surfaces much later as a request-time failure naming a model that does not
+		// exist.
+		if b := c.modelBackend(m); backend.IsAdopt(b) && m.Path != "" {
+			warnings = append(warnings, LintWarning{m.ID, fmt.Sprintf(
+				"path is ignored for the adopt-only backend %q — the model id must be the name %s "+
+					"knows it by, so you likely want `id: %s`", b, b, m.Path)})
+		}
+		// mlx_lm.server exposes no context-window setting (checked against 0.31.3:
+		// its only related flag is --max-tokens, the generation cap). So ctx cannot
+		// be handed to the engine. It still drives Mainspring's own guardrail, which
+		// is why this is a caveat and not "ignored" — but the engine is unaware of
+		// the limit and reports no effective window to check it against.
+		if c.modelBackend(m) == "mlx" && m.Ctx > 0 {
+			warnings = append(warnings, LintWarning{m.ID,
+				"ctx cannot be applied to the mlx backend — mlx_lm.server has no context-window flag, " +
+					"so Mainspring's own guardrail enforces it but the engine is not told and the " +
+					"effective window cannot be verified"})
+		}
 		if m.Ctx <= 0 {
 			if c.EnforceContext || boolOverride(m.EnforceContext) {
 				warnings = append(warnings, LintWarning{m.ID,
@@ -52,6 +76,11 @@ func (c Config) Lint() []LintWarning {
 				warnings = append(warnings, LintWarning{m.ID,
 					"clamp_max_tokens is on but ctx is not set — has no effect for this model"})
 			}
+		} else if effective(c.PreciseContext, m.PreciseContext) && !effective(c.EnforceContext, m.EnforceContext) {
+			// precise_context only refines the guardrail's prompt count. With no
+			// guardrail to refine, exact tokenization is computed for nothing.
+			warnings = append(warnings, LintWarning{m.ID,
+				"precise_context has no effect without enforce_context — the guardrail never runs for this model"})
 		}
 		for _, fb := range m.ModelFallbacks {
 			if !known[fb] {
@@ -61,6 +90,25 @@ func (c Config) Lint() []LintWarning {
 		}
 		if m.InputUSDPerMTok < 0 || m.OutputUSDPerMTok < 0 {
 			warnings = append(warnings, LintWarning{m.ID, "a cost rate (input/output USD per Mtok) is negative"})
+		}
+	}
+
+	// Auth block. authTenants prefers tenants and ignores api_keys entirely when
+	// any tenant exists, and an unrecognised role silently becomes "inference" —
+	// so a typo'd "admin" quietly strips a tenant's privileges.
+	if len(c.Tenants) > 0 && len(c.APIKeys) > 0 {
+		warnings = append(warnings, LintWarning{Message: fmt.Sprintf(
+			"api_keys is ignored because tenants is set (%d key(s) will not authenticate anything)", len(c.APIKeys))})
+	}
+	for _, t := range c.Tenants {
+		switch t.Role {
+		case "", "admin", "inference":
+		default:
+			warnings = append(warnings, LintWarning{Message: fmt.Sprintf(
+				"tenant %q has unknown role %q — it will be treated as \"inference\"; valid roles are \"admin\" and \"inference\"", t.Name, t.Role)})
+		}
+		if t.Key == "" {
+			warnings = append(warnings, LintWarning{Message: fmt.Sprintf("tenant %q has an empty key and can never authenticate", t.Name)})
 		}
 	}
 
@@ -78,7 +126,25 @@ func (c Config) Lint() []LintWarning {
 // nil (inherit global) or false are both "not on" for this check.
 func boolOverride(b *bool) bool { return b != nil && *b }
 
+// effective resolves a per-model override against the server-wide default the
+// same way the server wires it: set wins, nil inherits.
+func effective(global bool, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	return global
+}
+
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// modelBackend is the backend a model will actually run on: its own if set, else
+// the server-wide default.
+func (c Config) modelBackend(m Model) string {
+	if m.Backend != "" {
+		return m.Backend
+	}
+	return c.Backend
 }

@@ -13,7 +13,10 @@ MIT and already win; Mainspring wraps them).
 ## What it does
 
 - One versioned API: OpenAI (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-  `/v1/models`) and Anthropic (`/v1/messages`, tool use + images + streaming translated).
+  `/v1/models`) and Anthropic (`/v1/messages`, tool use + images + streaming translated, plus
+  `/v1/messages/count_tokens` for pre-flighting a context budget). Both dialects
+  are SDK-verified in CI: the real `openai` and `anthropic` Python and JS clients drive a running
+  server on every push, over the happy path *and* the failure paths (upstream 5xx, truncated stream).
 - Per-model backend routing: one server can serve a GGUF via llama.cpp, an MLX model, and an adopted
   Ollama/LM Studio/llamafile/GPT4All model simultaneously.
 - Per-model fallback chains: a model can declare ordered `fallbacks`; if the primary backend can't
@@ -21,6 +24,14 @@ MIT and already win; Mainspring wraps them).
   `X-Mainspring-Backend`. An absent fallback backend is skipped at startup, not fatal.
 - Model aliases: map a friendly name (e.g. `gpt-4o`) to a real model id (chainable, cycle-checked at
   startup); aliases appear in `/v1/models` and resolve on every inference path.
+- Adopt-only backends (`ollama`, `lmstudio`, `llamafile`, `gpt4all`) run their own process and hold
+  their own weights, so a model's `id` is the name the daemon itself uses and `path` is read by nothing.
+  Setting `path` on one is warned about at startup — it is usually a sign the real name was put there
+  and the id is wrong. When a daemon does not have the requested model, the failure names the daemon,
+  lists what it actually holds, and says which id to use, instead of advising a pull of a model that
+  does not exist. A load failure's reason is logged (`LOAD-FAILED model=… : …`) rather than collapsing
+  into a bare `no available backend`; it stays out of the response, because the caller cannot act on
+  another host's inventory and the operator can.
 - Model auto-discovery (opt-in `discover_models: true`): enumerate models from present adopt backends
   (Ollama `/api/tags`, LM Studio / llamafile / GPT4All `/v1/models`) and expose them automatically;
   configured models win on an id clash. Adopted Ollama models also get a pre-admission size estimate
@@ -30,7 +41,49 @@ MIT and already win; Mainspring wraps them).
   and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
   headers on every response. "Degraded" means something actually differs from what was asked for (a
   silent CPU fallback, a shrunk context) — a model deliberately configured CPU-only (`gpu_layers: -1`)
-  is never flagged degraded just for not using the GPU.
+  is never flagged degraded just for not using the GPU. The same rule governs failures: an upstream
+  non-2xx is reported as an error (5xx becomes 502 `upstream_error`) and never decoded into an empty
+  success, and a generation cut mid-stream ends with a terminal error event rather than a fabricated
+  stop reason — an `error` SSE event carrying Mainspring's error code on both dialects (Anthropic
+  `/v1/messages` and the OpenAI `/v1/chat/completions` proxy path). A truncated stream is also reported
+  to the circuit breaker as the backend failure it is, which the HTTP status cannot express once the
+  stream is already open at 200. A truncated *non-streaming* body is never treated as a result: it is
+  not stored in the response cache and not published to coalescing followers, so one severed read can
+  never be replayed as a success.
+- `n` verified against the answer, not assumed. OpenAI's `n` asks for several independent candidates in
+  one call; an engine that never implemented it accepts the field, answers 200 with exactly one choice
+  and says nothing, so a caller that wanted three candidates to rank gets one and cannot tell it was
+  denied. Mainspring counts the `choices` that actually came back (distinct `choices[].index` values
+  across the frames, on a stream) and reports a shortfall on `X-Mainspring-Warning` — composed onto any
+  other warning that response already carries, never replacing it. On a stream the status line left long
+  before the last frame, so the same text arrives in-band as an SSE comment
+  (`: X-Mainspring-Warning: n=3 requested but the engine returned 1 choice`), which the event-stream
+  grammar defines as inert: no SDK parses it as an event. There is deliberately **no per-backend support
+  table** — `n` support moves between engine versions, so a table would start lying immediately, and an
+  engine that *does* honour `n` is therefore not warned about. The engine's body is forwarded
+  byte-for-byte either way, `n` is still passed upstream, and a request without `n`, or with `n: 1`,
+  takes exactly the path it took before: nothing on that path parses or buffers the response. Applies to
+  `/v1/chat/completions` and `/v1/completions` (`n` is not part of the Anthropic API or of embeddings).
+- Stop sequences that are answered truthfully. Anthropic reports *which* sequence ended a generation
+  (`stop_reason: "stop_sequence"` plus the sequence itself); OpenAI's `finish_reason` says only "stop",
+  which it also uses for a natural end, and every engine erases the matched sequence from the text before
+  returning it — so once the stop set is forwarded, the hit is unrecoverable. Mainspring therefore keeps
+  the stop set away from the engine and matches the sequences itself, incrementally, so one split across
+  two stream deltas is still found. A non-streaming request is streamed from the engine internally so the
+  generation can be cut off at the match instead of running on to `max_tokens`; that also cuts off the
+  upstream usage chunk, so a stopped reply's token counts are estimates and are labelled as such.
+- Correct failure attribution: a caller that cancels its own request (Ctrl-C, closed tab, aborted SDK
+  call) learned nothing about the backend, so it votes neither way. It is not charged to the circuit
+  breaker as a failure — client disconnects cannot open the circuit for every tenant — and equally it
+  is not recorded as a success, which would clear the banked failure count and let a flaky client hold
+  a genuinely broken backend's circuit closed. If the abandoned request was holding the half-open
+  probe, the probe is released so the next caller takes it immediately rather than waiting out another
+  cooldown. Nothing is written back to the abandoned connection either (a caller cancelled while queued
+  for a concurrency slot gets no misleading `503 server_busy`). This holds at every point a request can
+  be abandoned and on both dialects: while queued, while the model is *loading* (a caller who gives up
+  waiting for a large model to load has not shown that the model cannot load), and mid-generation on the
+  OpenAI and Anthropic paths alike. A per-request *timeout* is deliberately the other way: it is the
+  backend's fault and still counts as a failure, as does a model that genuinely fails to load.
 - VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
   unload, optional preload at startup. Eviction (idle-timeout and capacity/LRU alike) never pulls a
   runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or
@@ -52,17 +105,30 @@ MIT and already win; Mainspring wraps them).
   too; `X-Mainspring-Retries: N` reports how many retries a request took. Disabled by default (`retry_max`).
 - Circuit breaker + health probe: after N consecutive backend failures a model's requests fast-fail with
   503 (no timeout paid) until a cooldown elapses and a half-open probe succeeds; an optional background
-  health probe trips/recovers the breaker without waiting for live traffic. State in /metrics and /v1/quality.
+  health probe trips/recovers the breaker without waiting for live traffic. State in /metrics
+  (`mainspring_breaker_open{model}` — tripped, open or half-open; `mainspring_breaker_half_open{model}` —
+  specifically probing recovery) and /v1/quality.
 - Token counting: `POST /v1/tokenize {model, input}` returns `{tokens, exact}` — the model's real token
   count (exact) when the model is resident on an engine that exposes a tokenizer (llama.cpp `/tokenize`),
-  otherwise the character-based estimate (exact:false). No forced load; no extra dependency.
+  otherwise the character-based estimate (exact:false). No forced load; no extra dependency. `input` is a
+  bare string or an array of strings (the embeddings shape); an array is reported as the sum of its
+  elements and is `exact` only if every element was counted exactly. Any other shape is a 400 naming the
+  field rather than a silently miscounted request.
+- Anthropic pre-flight counting: `POST /v1/messages/count_tokens {model, messages, system?, tools?}` —
+  the endpoint the Anthropic SDK's `client.messages.count_tokens(...)` calls — returns exactly
+  `{"input_tokens": N}`, counted through the same path as `/v1/tokenize` (no second tokenizer). Because
+  the count is exact or estimated on the same terms, which one it was is reported on
+  `X-Mainspring-Tokens-Method: exact|estimated` rather than left to be assumed; the body stays the
+  Anthropic contract. Tool *definitions* are not counted, only messages and the system prompt.
 - Graceful clamp (opt-in): `clamp_max_tokens` shrinks an over-budget `max_tokens`/`max_completion_tokens`
   to the room left in the context window and proceeds (header `X-Mainspring-Clamped: <from>-><to>`),
   instead of rejecting — runs before the guardrail; a request with no room left falls through to it.
 - Embeddings-aware token counting: the guardrail, `clamp_max_tokens`, `precise_context`, and
   `/v1/tokenize` all count an embeddings request's `input` field (bare string or array of strings), not
   just `messages`/`prompt` — a large `/v1/embeddings` input now correctly trips the guardrail instead of
-  estimating as 0.
+  estimating as 0. A `system` field is likewise counted in either shape — a bare string or an Anthropic
+  block array. It used to be parsed as a string only, so a block array failed the *whole* estimate and
+  scored the request at 0 tokens: the guardrail failed open on exactly the requests it exists for.
 - Precise guardrail (opt-in): `precise_context` refines the guardrail — when the target model is resident
   on a tokenizing engine, prompt tokens are counted *exactly* (via `/tokenize`) instead of estimated (no
   forced load; falls back to the estimate otherwise). The method is reported on `X-Mainspring-Context-Method:
@@ -72,18 +138,33 @@ MIT and already win; Mainspring wraps them).
   truncate it. The requested-output check (`max_tokens` > context) is exact; the prompt-size check is a
   conservative tokenizer-free estimate. A per-model override can downgrade enforcement to a warning
   header (`X-Mainspring-Context-Warning`). Turns the fail-loud context *warning* into an enforceable limit.
-- Request coalescing (opt-in): a burst of identical deterministic (temperature 0) non-streaming requests
-  in flight at once share ONE backend computation — the first is the leader, concurrent identical ones
-  wait and replay its result (`X-Mainspring-Coalesced: true`). Keyed by the same canonical hash the cache
-  uses; streaming and non-deterministic requests are never coalesced. Enable with `coalesce: true`.
-- Response cache (opt-in): identical deterministic (temperature 0) non-streaming requests are served
-  from a bounded TTL+LRU cache without touching the backend; hits carry `X-Mainspring-Cache: hit` and
-  are counted in /metrics (`mainspring_cache_hits_total`). Streaming and non-zero-temperature requests
-  bypass it. Enable with `cache_max_entries` (+ optional `cache_ttl_seconds`, default 300s).
+- Request coalescing (opt-in): a burst of identical deterministic (explicit `"temperature": 0`)
+  non-streaming requests in flight at once share ONE backend computation — the first is the leader,
+  concurrent identical ones wait and replay its result (`X-Mainspring-Coalesced: true`). Keyed by the
+  same canonical hash the cache uses; streaming and non-deterministic requests are never coalesced.
+  Enable with `coalesce: true`.
+- Response cache (opt-in): identical deterministic (explicit `"temperature": 0`) non-streaming requests
+  are served from a bounded TTL+LRU cache without touching the backend; hits carry
+  `X-Mainspring-Cache: hit` and are counted in /metrics (`mainspring_cache_hits_total`). Streaming and
+  any request that does not pin `temperature` to 0 — including one that omits it, since the default is
+  1, i.e. sample normally — bypass it. Enable with `cache_max_entries` (+ optional
+  `cache_ttl_seconds`, default 300s).
+  A replay only carries headers that describe the stored payload (`content-type`,
+  `X-Mainspring-Backend`/`-Device`/`-Warning`). The caller's own `X-Request-ID` and quota headroom come
+  from this request, never from the leader's — no cross-tenant header ever replays.
+- Path scope: there is no longer one. The whole pipeline — API-key auth, per-tenant rate + token budgets,
+  the context guardrail, `clamp_max_tokens`, `precise_context`, the concurrency gate + queue, the circuit
+  breaker, per-request timeouts, cost accounting, the response cache, request coalescing,
+  retry-with-backoff and model fallback chains — applies to **both** the OpenAI endpoints and Anthropic
+  `/v1/messages`. The two dialects differ in what they put on the wire, not in how a request is governed.
+  Each caches its own wire shape (an Anthropic caller is replayed an Anthropic message), keyed by request
+  path, so they can never serve one another's bodies. Retry on the Anthropic path carries the same safety
+  property as the OpenAI one: it is decided after the upstream status is known and before a single SSE
+  frame is emitted, never once a stream has started.
 - Cost accounting: optional per-model USD pricing (`input_usd_per_mtok` / `output_usd_per_mtok`, 0 =
   local/free) turns real token usage into spend. Cost lands in the usage ledger (`cost_usd`), a
   `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
-  cost signal a router (Hydra) can route away from. Priced only from exact usage; never guessed.
+  cost signal a trust control plane (Hydra) can route away from. Priced only from exact usage; never guessed.
 - Observability: Prometheus `/metrics` (TTFT, prompt/output tokens, cost, requests, residency, inflight/queued,
   cache hits, resilience counters `mainspring_{retries,coalesced,fallback}_total`, and latency percentiles
   `mainspring_{duration,ttft,queue_wait}_ms_{p50,p90,p99}` — a bounded recent-sample reservoir estimate, not
@@ -91,13 +172,31 @@ MIT and already win; Mainspring wraps them).
   wait is the time a request actually spent queued for a concurrency-gate slot, measured separately from
   total duration so backpressure latency is distinguishable from real generation time. The same percentiles
   are in `/v1/quality` per model. Token counts are real when the upstream reports a usage object (non-stream
-  body, or the streaming `include_usage` final chunk), else estimated.
+  body, or the streaming `include_usage` final chunk), else estimated — including an `/v1/embeddings`
+  response, whose usage object carries `prompt_tokens` and no `completion_tokens`.
+  Refusals are counted too, on **both** dialects: 503 backpressure, 503 circuit-open/backend-unavailable,
+  429 token budget and 400 context-guardrail rejections all record an event with their real status — from
+  the OpenAI endpoints and from Anthropic `/v1/messages`, which does its own budget/gate/breaker checks —
+  and the ledger's `error_code` disambiguates causes that share one status. Cache hits and coalesced followers carry the latency the caller
+  actually saw, not 0ms. In-flight and queue-depth counters are maintained whether or not the concurrency
+  gate is enabled (it is off by default) — only the admission decision depends on `max_inflight`.
+  The ledger reports whether it really opened: the startup banner warns loudly on a failed open instead of
+  claiming an active ledger, `GET /admin/config` exposes `usage_ledger.active`, and the first write failure
+  is logged rather than discarded.
 - Config lint: catches config combinations that are valid YAML but silently do nothing — enforce_context/
   clamp_max_tokens/precise_context set but a model has no ctx (guardrail is a no-op for it), model_fallbacks
   targeting an unresolvable model/alias, a negative cost rate, or a missing tls_cert/tls_key file. Surfaced
-  as `mainspring doctor` diagnostics and as non-fatal stderr warnings at `mainspring serve` startup.
-- Opt-in, verified managed install: SHA-256-pinned artifacts, optional ed25519 signed manifests.
-  Never installs anything unless you run `mainspring install`.
+  as `mainspring doctor` diagnostics, as non-fatal stderr warnings at `mainspring serve` startup, and live
+  via `GET /admin/config`'s `lint_warnings` field — reflecting the config as of the last successful
+  load/reload, not just startup, so an operator can check for silently-inert settings on a running server
+  without digging through logs.
+- Opt-in, verified managed install: never installs anything unless you run `mainspring install`. Each
+  download is staged to a temp file and SHA-256-verified against the expected hash before being moved
+  into place, so unverified bytes never reach the install path and a failed install leaves an already
+  installed engine untouched. Transfers are size-capped and time-bounded. Mainspring ships
+  no curated artifact catalogue — the embedded manifest is empty by design, so you supply the artifact
+  with `--url` + `--sha256`, or your own manifest file (optionally ed25519-signed via `--pubkey`).
+  Running `mainspring install <backend>` with nothing supplied says so plainly rather than guessing.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
   ServiceMonitor, GPU node scheduling). Optional TLS (tls_cert/tls_key => HTTPS, TLS 1.2 minimum).
 - Graceful drain: `/readyz` flips to 503 on shutdown so load balancers stop routing while in-flight
@@ -107,9 +206,18 @@ MIT and already win; Mainspring wraps them).
   A single healthy or half-open (recovering) model keeps readyz at 200.
 - Request correlation: every request carries an `X-Request-ID` (accepted from the client or generated,
   echoed on the response and recorded in the usage ledger); an optional JSONL access log records every
-  request (method, path, status, duration). W3C `traceparent` is accepted/continued (or generated), the
+  request (tenant, method, path, status, duration) — the `tenant` field names the authenticated
+  principal, so the log attributes an admin action to whoever performed it (omitted in open mode, where
+  there is no principal, and for a rejected key). W3C `traceparent` is accepted/continued (or generated), the
   `trace_id` is recorded alongside `request_id`, and a child traceparent is forwarded to the engine so
-  distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK.
+  distributed traces stitch end to end — dependency-free, no OpenTelemetry SDK. The caller's trace flags
+  are propagated unchanged, so a request that opted out of sampling is not sampled downstream; only a
+  trace Mainspring mints itself is marked sampled.
+- The config file is read strictly: a key the schema does not know is a startup error naming the key,
+  its line, and the nearest real field, not a silently dropped line. It has to be — a config is decoded
+  into a struct, so `enfore_context: true` would otherwise start a server with the guardrail *off* and
+  say nothing, which is the silent degradation this server exists to prevent, arriving through the
+  config file. A `SIGHUP` reload refuses the same way and keeps the running config.
 - Hot reload: `SIGHUP` re-reads the config file and swaps models, aliases, and tenants without dropping
   in-flight requests or the listener; unsafe changes (listen address, backend set) require a restart and
   are logged. Unchanged models stay resident; changed/removed models are evicted and reload on demand —
@@ -118,10 +226,20 @@ MIT and already win; Mainspring wraps them).
   re-apply — timeouts, cache, guardrail, clamp, retry, coalesce, breaker, per-model cost/fallback
   overrides, and more — is logged as requiring a restart when it changes, rather than silently keeping
   the old value with no explanation.
+- Reload never weakens the running server: settings the config file cannot express are carried across
+  it rather than dropped. Models given with `--model` and models found by auto-discovery survive a
+  reload (the file wins on an id clash), and credentials given with `--api-key` are preserved. A reload
+  whose config would leave the server with no tenants at all — i.e. would switch a running,
+  authenticated server into open mode — is **refused** with an error and changes nothing, because the
+  check runs before anything is applied. Open mode is only ever entered at startup, deliberately.
 
 ## Backends
 
 - Managed (subprocess, opt-in install): `llamacpp` (llama-server), `mlx` (mlx_lm.server, Apple Silicon).
+  Backend caveat: mlx_lm.server has no context-window flag, so `ctx` cannot be handed to it. Mainspring's
+  own guardrail still enforces `ctx`, but the engine is not told and reports no effective window, so
+  `effective_ctx` is 0 (unknown) for mlx models rather than an unverified echo of the request. Startup
+  and `mainspring doctor` warn when an mlx model sets `ctx`.
 - Adopt-only (detect a running server; never installed): `ollama` (:11434), `lmstudio` (:1234),
   `llamafile` (:8080), `gpt4all` (:4891).
 
@@ -140,13 +258,19 @@ MIT and already win; Mainspring wraps them).
 ## Endpoints
 
 - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`
-- `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta)
+- `POST /v1/messages` (Anthropic: text + tool use + images; streaming translated, incl. input_json_delta;
+  `temperature`, `top_p` and `top_k` are forwarded to the engine — `top_k` is not in the OpenAI schema but
+  every engine Mainspring drives accepts it, so it is passed on rather than dropped. `stop_sequences` are
+  deliberately *not* forwarded; Mainspring matches them itself — see "Stop sequences" above)
+- `POST /v1/messages/count_tokens` (Anthropic token pre-flight; body is exactly `{"input_tokens": N}`,
+  with `X-Mainspring-Tokens-Method: exact|estimated` saying how it was counted)
 - `GET /v1/models`, `GET /v1/models/{id}` (OpenAI "retrieve a model"; resolves aliases; adds
   resident/backend/device/effective_ctx/degraded when the model is loaded), `GET /capabilities`,
   `GET /metrics`, `GET /healthz`, `GET /readyz`
 - `GET /v1/quality` (optional Hydra routing signal: per-model resident/device/degraded/effective_ctx/
   inflight/queue_depth/ttft_ms_p50; admin-gated)
-- Admin API (admin-gated, audited via the access log): `GET /admin/config` (effective runtime settings —
+- Admin API (admin-gated; audited via the access log, whose `tenant` field names the admin who performed
+  the action — in open mode there is no principal to record): `GET /admin/config` (effective runtime settings —
   timeouts, retry, breaker, cache, coalesce, guardrail, concurrency, fallbacks; secret-free by construction),
   `GET /admin/usage` (per-tenant consumption actuals — requests, prompt/output tokens, USD cost; open-mode
   traffic bucketed as "(anonymous)"), `POST /admin/drain[?on=false]`, `POST /admin/reload`,
@@ -160,10 +284,14 @@ MIT and already win; Mainspring wraps them).
 ## Errors
 
 All errors are OpenAI-shaped `{"error":{"message","type","code"}}` with a stable machine-branchable
-`code`: `invalid_request`, `method_not_allowed`, `model_not_found`, `unauthorized`, `forbidden`,
-`rate_limited`, `token_budget_exceeded`, `server_busy`, `circuit_open`, `backend_unavailable`,
-`upstream_error`, `timeout`, `internal_error`. Same-status/different-cause conditions (503) are
-distinguished by `code` (server_busy vs circuit_open vs backend_unavailable).
+`code`: `invalid_request`, `context_length_exceeded`, `method_not_allowed`, `model_not_found`,
+`route_not_found`, `unauthorized`, `forbidden`, `rate_limited`, `token_budget_exceeded`, `server_busy`,
+`circuit_open`, `backend_unavailable`, `upstream_error`, `timeout`, `internal_error`.
+Same-status/different-cause conditions are distinguished by `code` (503: server_busy vs circuit_open vs
+backend_unavailable; 400: invalid_request vs context_length_exceeded; 404: model_not_found — the model
+— vs route_not_found — the endpoint). Paths the server does not route are inside the taxonomy too: an
+unknown path is a `route_not_found` 404 and a wrong method a `method_not_allowed` 405 carrying `Allow`,
+never Go's plain-text default.
 
 ## Non-goals
 
@@ -172,12 +300,16 @@ distinguished by `code` (server_busy vs circuit_open vs backend_unavailable).
 
 ## Relationship to Hydra
 
-Mainspring is an inference *head*; Hydra (https://github.com/ankit373/hydra) is a provider-neutral
-router/trust control plane above it. They meet over the standard OpenAI-compatible boundary. Hydra
-works with everything (Ollama, OpenAI, Anthropic, any OpenAI-compatible endpoint) and never depends on
-Mainspring — Mainspring is simply the head Hydra integrates with best. The optional `GET /v1/quality`
+Two control planes at different scopes, not a router and a server. Hydra
+(https://github.com/ankit373/hydra) is a provider-neutral *Trust* Control Plane: it routes across many
+heads to a target confidence of correctness. Mainspring is the *inference* control plane for one head:
+admission control, VRAM residency, and fail-loud truth about what actually ran. Hydra asks which head
+should answer and how confident we are it is right; Mainspring answers what is true about this head
+right now. They meet over the standard OpenAI-compatible boundary. Hydra works with everything
+(Ollama, OpenAI, Anthropic, any OpenAI-compatible endpoint) and never depends on Mainspring —
+Mainspring is simply the head it integrates with best. The optional `GET /v1/quality`
 endpoint is that integration contract: a machine-readable per-model routing signal (residency, real
-device, degraded state, effective context, in-flight/queue depth, TTFT p50) a router can consume to
+device, degraded state, effective context, in-flight/queue depth, TTFT p50) a trust control plane or router can consume to
 route to Mainspring best. It is never required — Mainspring runs fine standalone with no router.
 
 ## Links

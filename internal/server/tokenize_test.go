@@ -106,6 +106,68 @@ func TestTokenizeUnknownModel(t *testing.T) {
 	}
 }
 
+// TestTokenizeArrayInput covers the documented embeddings-style array `input`,
+// which the endpoint used to reject outright as a JSON type error.
+func TestTokenizeArrayInput(t *testing.T) {
+	h := tokenizeServer(t)
+	if w := post(t, h, "/admin/models/m1/load"); w.Code != 200 {
+		t.Fatalf("load status=%d body=%s", w.Code, w.Body.String())
+	}
+	w := postBody2(h, "/v1/tokenize", `{"model":"m1","input":["one two","three four five"]}`)
+	if w.Code != 200 {
+		t.Fatalf("array input status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	tokens, exact := decodeTokenize(t, w)
+	if !exact {
+		t.Fatal("resident TokenCounter should count an array exactly")
+	}
+	if tokens != 5 {
+		t.Fatalf("array tokens = %d, want 5 (sum of the elements)", tokens)
+	}
+}
+
+// TestTokenizeRejectsUncountableInput: shapes that genuinely cannot be counted
+// get a precise 400 rather than a silent 0.
+func TestTokenizeRejectsUncountableInput(t *testing.T) {
+	h := tokenizeServer(t)
+	for _, body := range []string{
+		`{"model":"m1","input":42}`,
+		`{"model":"m1","input":[1,2,3]}`, // pre-tokenized ids
+		`{"model":"m1","input":{"text":"x"}}`,
+	} {
+		w := postBody2(h, "/v1/tokenize", body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s → status %d, want 400 (%s)", body, w.Code, w.Body.String())
+		}
+		// A precise message, not a leaked Go unmarshal error.
+		if !strings.Contains(w.Body.String(), "field input must be a string or an array of strings") {
+			t.Fatalf("%s → 400 should say what shape is expected: %s", body, w.Body.String())
+		}
+	}
+}
+
+// TestPreciseGuardrailCountsBlockArraySystem: an Anthropic-shaped block-array
+// system must still be counted by the exact tokenizer path, not abandoned.
+func TestPreciseGuardrailCountsBlockArraySystem(t *testing.T) {
+	h := preciseServer(t, 8, true) // window 8 tokens, word-counting tokenizer
+	if w := post(t, h, "/admin/models/m1/load"); w.Code != 200 {
+		t.Fatalf("load status=%d", w.Code)
+	}
+	// system "one two three four five six" = 6 words, + 4 message overhead + 1
+	// word of content = 11 exact tokens > 8.
+	w := postBody(h, `{"model":"m1","system":[{"type":"text","text":"one two three four five six"}],`+
+		`"messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (over-context): %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-Mainspring-Context-Method"); got != "exact" {
+		t.Fatalf("method header = %q, want exact — the block-array system aborted the exact count", got)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "prompt (11 tokens)") {
+		t.Fatalf("expected an exact 11-token reason, got: %s", body)
+	}
+}
+
 // postBody2 posts a JSON body to an arbitrary path.
 func postBody2(h http.Handler, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))

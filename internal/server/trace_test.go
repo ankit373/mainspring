@@ -9,9 +9,9 @@ import (
 
 func TestParseTraceparent(t *testing.T) {
 	valid := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-	tid, ok := parseTraceparent(valid)
-	if !ok || tid != "4bf92f3577b34da6a3ce929d0e0e4736" {
-		t.Fatalf("valid traceparent => %q,%v", tid, ok)
+	tid, flags, ok := parseTraceparent(valid)
+	if !ok || tid != "4bf92f3577b34da6a3ce929d0e0e4736" || flags != "01" {
+		t.Fatalf("valid traceparent => %q,%q,%v", tid, flags, ok)
 	}
 	bad := []string{
 		"",
@@ -24,9 +24,27 @@ func TestParseTraceparent(t *testing.T) {
 		"00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01", // non-hex
 	}
 	for _, h := range bad {
-		if _, ok := parseTraceparent(h); ok {
+		if _, _, ok := parseTraceparent(h); ok {
 			t.Fatalf("should have rejected %q", h)
 		}
+	}
+}
+
+// TestWithTraceHonoursIncomingSampledFlag proves the fix for the hardcoded
+// `-01`: a caller that explicitly opted out of sampling must not have that
+// decision overridden on the hop to the engine.
+func TestWithTraceHonoursIncomingSampledFlag(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+	out := outgoingTraceparent(withTrace(r).Context())
+	if !strings.HasSuffix(out, "-00") {
+		t.Fatalf("outgoing tp = %q, want the caller's not-sampled flags (-00)", out)
+	}
+
+	// A trace we mint ourselves has no upstream decision to respect → sampled.
+	fresh := outgoingTraceparent(withTrace(httptest.NewRequest(http.MethodGet, "/healthz", nil)).Context())
+	if !strings.HasSuffix(fresh, "-01") {
+		t.Fatalf("minted tp = %q, want sampled flags (-01)", fresh)
 	}
 }
 

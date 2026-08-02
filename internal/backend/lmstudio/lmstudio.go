@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -53,15 +54,9 @@ func (b *Backend) Start(ctx context.Context, spec backend.ModelSpec) (backend.Ru
 	if err != nil {
 		return nil, fmt.Errorf("lmstudio: %w", err)
 	}
-	found := false
-	for _, m := range models {
-		if m == spec.ID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, fmt.Errorf("lmstudio: model %q not loaded — load it in LM Studio first (Mainspring will not load it)", spec.ID)
+	if !slices.Contains(models, spec.ID) {
+		return nil, backend.MissingModelError("lmstudio", b.Host, spec, models,
+			"Load it in LM Studio first (Mainspring will not load it).")
 	}
 	return &runner{host: b.Host, spec: spec}, nil
 }

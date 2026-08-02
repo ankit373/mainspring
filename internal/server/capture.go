@@ -55,9 +55,12 @@ func (c *captureWriter) WriteHeader(code int) {
 	}
 	c.status = code
 	c.wroteHeader = true
-	c.stream = bytes.Contains([]byte(c.Header().Get("Content-Type")), []byte("event-stream"))
+	c.stream = isEventStream(c.Header().Get("Content-Type"))
 	if c.recordBody {
-		c.snapHeader = c.Header().Clone()
+		// Only the payload-describing subset: this snapshot is replayed to other
+		// callers, and by now the middleware has written this caller's request id
+		// and quota headroom into the same map. See replayHeaderAllow.
+		c.snapHeader = replayHeader(c.Header())
 	}
 	c.ResponseWriter.WriteHeader(code)
 }
@@ -118,6 +121,10 @@ var (
 // stream_options.include_usage — the real prompt/completion counts are returned
 // with exact=true. Otherwise completion falls back to the SSE frame estimate and
 // prompt is unknown (0), exact=false.
+//
+// The two counts are matched independently: an embeddings response carries only
+// prompt_tokens, and keying exactness off completion_tokens alone would bill
+// every embeddings request as zero.
 func (c *captureWriter) usage() (prompt, completion int64, exact bool) {
 	if m := completionTokensRe.FindSubmatch(c.tail); m != nil {
 		if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
@@ -126,7 +133,7 @@ func (c *captureWriter) usage() (prompt, completion int64, exact bool) {
 	}
 	if m := promptTokensRe.FindSubmatch(c.tail); m != nil {
 		if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
-			prompt = n
+			prompt, exact = n, true
 		}
 	}
 	if exact {

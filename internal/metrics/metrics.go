@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/util"
 )
 
 // Event is one completed inference request.
@@ -24,6 +26,7 @@ type Event struct {
 	Model        string    `json:"model"`
 	Tenant       string    `json:"tenant,omitempty"`
 	Status       int       `json:"status"`
+	ErrorCode    string    `json:"error_code,omitempty"` // taxonomy code when the request was refused (503 busy vs circuit-open, …)
 	Stream       bool      `json:"stream"`
 	Cached       bool      `json:"cached,omitempty"`    // served from the response cache (no backend hit)
 	Coalesced    bool      `json:"coalesced,omitempty"` // served by sharing an in-flight leader's result
@@ -123,8 +126,9 @@ type Recorder struct {
 	stats   map[string]*modelStat
 	tenants map[string]*tenantStat
 
-	ledgerMu sync.Mutex
-	ledger   io.WriteCloser
+	ledgerMu  sync.Mutex
+	ledger    io.WriteCloser
+	writeErrd bool // a ledger write has already failed and been logged
 }
 
 // anonymousTenant is the rollup bucket for unauthenticated (open-mode) requests.
@@ -147,6 +151,16 @@ func New(ledgerPath string) (*Recorder, error) {
 	}
 	r.ledger = f
 	return r, nil
+}
+
+// LedgerActive reports whether the JSONL usage ledger is really open. A
+// configured path that failed to open leaves the recorder in-memory only, and an
+// operator must be able to see that instead of being told the ledger is on
+// because a path was set.
+func (r *Recorder) LedgerActive() bool {
+	r.ledgerMu.Lock()
+	defer r.ledgerMu.Unlock()
+	return r.ledger != nil
 }
 
 // Close flushes and closes the ledger.
@@ -206,14 +220,23 @@ func (r *Recorder) Record(ev Event) {
 	r.appendLedger(ev)
 }
 
+// appendLedger writes one event to the JSONL ledger. A write failure — a full
+// disk, a rotated-away file — silently stops the accounting record, so the first
+// one is logged; the rest are suppressed so a failing disk cannot flood the log
+// at request rate.
 func (r *Recorder) appendLedger(ev Event) {
 	r.ledgerMu.Lock()
 	defer r.ledgerMu.Unlock()
 	if r.ledger == nil {
 		return
 	}
-	if b, err := json.Marshal(ev); err == nil {
-		_, _ = r.ledger.Write(append(b, '\n'))
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	if _, err := r.ledger.Write(append(b, '\n')); err != nil && !r.writeErrd {
+		r.writeErrd = true
+		log.Printf("usage ledger write failed, accounting records are being lost (further errors suppressed): %v", err)
 	}
 }
 
@@ -248,13 +271,6 @@ func (r *Recorder) LatencyPercentiles(model string) Percentiles {
 		QueueWaitP90: percentile(queue, 0.9),
 		QueueWaitP99: percentile(queue, 0.99),
 	}
-}
-
-// TTFTp50 returns the median time-to-first-token (ms) for a model over its
-// recent samples, or 0 when there are none. Kept for existing callers;
-// equivalent to LatencyPercentiles(model).TTFTP50.
-func (r *Recorder) TTFTp50(model string) float64 {
-	return r.LatencyPercentiles(model).TTFTP50
 }
 
 // Costs returns accumulated USD spend per model and the grand total. Models with
@@ -350,7 +366,7 @@ func (r *Recorder) WritePrometheus(w io.Writer, g Gauges) {
 		}
 		sort.Ints(statuses)
 		for _, s := range statuses {
-			fmt.Fprintf(w, "mainspring_requests_total{model=%q,status=\"%d\"} %d\n", esc(rw.model), s, rw.statuses[s])
+			fmt.Fprintf(w, "mainspring_requests_total{model=\"%s\",status=\"%d\"} %d\n", util.PromLabelValue(rw.model), s, rw.statuses[s])
 		}
 	}
 
@@ -397,7 +413,7 @@ type rowT = struct {
 func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
 	for _, rw := range rows {
-		fmt.Fprintf(w, "%s{model=%q} %g\n", name, esc(rw.model), val(rw))
+		fmt.Fprintf(w, "%s{model=\"%s\"} %g\n", name, util.PromLabelValue(rw.model), val(rw))
 	}
 }
 
@@ -406,21 +422,13 @@ func writeCounter(w io.Writer, name, help string, rows []rowT, val func(rowT) fl
 func writeGauge(w io.Writer, name, help string, rows []rowT, val func(rowT) float64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
 	for _, rw := range rows {
-		fmt.Fprintf(w, "%s{model=%q} %g\n", name, esc(rw.model), val(rw))
+		fmt.Fprintf(w, "%s{model=\"%s\"} %g\n", name, util.PromLabelValue(rw.model), val(rw))
 	}
 }
 
 func writeCounterI(w io.Writer, name, help string, rows []rowT, val func(rowT) int64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
 	for _, rw := range rows {
-		fmt.Fprintf(w, "%s{model=%q} %d\n", name, esc(rw.model), val(rw))
+		fmt.Fprintf(w, "%s{model=\"%s\"} %d\n", name, util.PromLabelValue(rw.model), val(rw))
 	}
-}
-
-// esc escapes a Prometheus label value.
-func esc(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	return s
 }

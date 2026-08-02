@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/auth"
 )
 
 // This file implements request correlation: every request carries an
 // X-Request-ID (accepted from the client or generated), which is echoed on the
 // response, stored in the context (so handlers can attach it to the usage
-// ledger), and — when an access log is configured — written as one JSONL line.
+// ledger), and — when an access log is configured — written as one JSONL line
+// naming the authenticated tenant, so an admin action can be attributed.
 
 type ctxKey int
 
@@ -70,6 +73,11 @@ func (s *Server) requestID(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// An audit trail needs a principal. This middleware wraps authentication
+		// (so rejections and health checks are logged too) and therefore cannot
+		// see the resolved tenant on the way in — it installs an empty slot that
+		// auth.Wrap fills as the request passes through, and reads it back below.
+		r = r.WithContext(auth.NewPrincipalSlot(r.Context()))
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
@@ -77,6 +85,7 @@ func (s *Server) requestID(next http.Handler) http.Handler {
 			Time:       start,
 			RequestID:  id,
 			TraceID:    TraceID(r.Context()),
+			Tenant:     auth.Principal(r.Context()),
 			Method:     r.Method,
 			Path:       r.URL.Path,
 			Status:     rec.status,
@@ -119,11 +128,14 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-// accessEntry is one structured access-log record.
+// accessEntry is one structured access-log record. Tenant names the
+// authenticated principal (omitted for open mode, exempt paths, and rejected
+// keys), which is what makes the log an audit trail rather than a traffic log.
 type accessEntry struct {
 	Time       time.Time `json:"time"`
 	RequestID  string    `json:"request_id"`
 	TraceID    string    `json:"trace_id,omitempty"`
+	Tenant     string    `json:"tenant,omitempty"`
 	Method     string    `json:"method"`
 	Path       string    `json:"path"`
 	Status     int       `json:"status"`

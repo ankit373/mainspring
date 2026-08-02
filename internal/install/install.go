@@ -9,8 +9,8 @@ package install
 
 import (
 	"context"
-	_ "embed"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -185,15 +185,25 @@ func Install(ctx context.Context, backend string, spec Spec, manifestPath string
 	}
 	dest := filepath.Join(destDir, binaryName(backend))
 
-	gotSHA, err := download(ctx, url, dest)
+	// Stage, verify, then publish. The digest is computed over the staged file and
+	// only a match earns the rename, so nothing unverified is ever reachable at
+	// dest — not even transiently, and not if the process dies mid-install.
+	staged, gotSHA, err := stage(ctx, url, destDir)
 	if err != nil {
 		return Receipt{}, err
 	}
+	// Harmless once the rename below has consumed it.
+	defer func() { _ = os.Remove(staged) }()
+
 	if !equalHex(gotSHA, wantSHA) {
-		_ = os.Remove(dest)
 		return Receipt{}, fmt.Errorf("checksum mismatch: got %s, want %s (refusing to install)", gotSHA, wantSHA)
 	}
-	if err := os.Chmod(dest, 0o755); err != nil {
+	// Chmod before the rename so the binary is executable the instant it appears,
+	// rather than existing briefly in a state a concurrent exec would fail on.
+	if err := os.Chmod(staged, 0o755); err != nil {
+		return Receipt{}, err
+	}
+	if err := os.Rename(staged, dest); err != nil {
 		return Receipt{}, err
 	}
 
@@ -206,39 +216,85 @@ func Install(ctx context.Context, backend string, spec Spec, manifestPath string
 	return rec, nil
 }
 
-// download streams url to dest, returning the content's hex SHA-256.
-func download(ctx context.Context, url, dest string) (string, error) {
+// maxDownloadBytes caps an install. Engine builds are large — a CUDA-enabled
+// llama-server with its shared libraries runs to hundreds of megabytes — so the
+// ceiling is generous. It exists so a hostile or compromised URL cannot fill the
+// disk, which is the same reason util.Accumulator bounds subprocess output.
+//
+// A var rather than a const only so the test can shrink it; pushing 2 GiB
+// through a loopback socket to prove a limit works is a cost with no benefit.
+var maxDownloadBytes int64 = 2 << 30 // 2 GiB
+
+const (
+	// Time to first response byte. Catches a server that accepts the connection
+	// and then says nothing.
+	downloadHeaderTimeout = 30 * time.Second
+	// Absolute ceiling on the whole transfer. Slack enough for a large binary on
+	// a slow link, but an install can never hang forever.
+	downloadTotalTimeout = 30 * time.Minute
+)
+
+// newDownloadClient returns the client installs use. http.DefaultClient has no
+// timeout at all, and `mainspring install` runs on a context with no deadline
+// (signal.NotifyContext is only wired into serve), so the bound has to live here.
+func newDownloadClient() *http.Client {
+	return &http.Client{
+		Timeout: downloadTotalTimeout,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: downloadHeaderTimeout,
+		},
+	}
+}
+
+// stage streams url to a temp file inside destDir and returns that path with the
+// content's hex SHA-256. It deliberately does NOT publish the file: the caller
+// verifies the digest first and renames only on a match, so unverified bytes are
+// never reachable at the install path.
+func stage(ctx context.Context, url, destDir string) (string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newDownloadClient().Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %s: status %d", url, resp.StatusCode)
+		return "", "", fmt.Errorf("download %s: status %d", url, resp.StatusCode)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(dest), ".dl-*")
+
+	tmp, err := os.CreateTemp(destDir, ".dl-*")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
+	// Every path out of here except a clean return removes the staging file; a
+	// failed install must not leave the payload lying around under another name.
+	clean := func(err error) (string, string, error) {
 		tmp.Close()
-		return "", err
+		_ = os.Remove(tmpName)
+		return "", "", err
+	}
+
+	// One byte past the cap, so a file landing exactly on the limit is accepted
+	// and anything beyond it is detectable rather than silently truncated —
+	// truncation would surface as a checksum mismatch and send the operator
+	// hunting for a corrupt artifact that is really an oversized one.
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, maxDownloadBytes+1))
+	if err != nil {
+		return clean(err)
+	}
+	if n > maxDownloadBytes {
+		return clean(fmt.Errorf("download %s: too large (exceeds %d bytes)", url, maxDownloadBytes))
 	}
 	if err := tmp.Close(); err != nil {
-		return "", err
+		_ = os.Remove(tmpName)
+		return "", "", err
 	}
-	if err := os.Rename(tmpName, dest); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return tmpName, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func equalHex(a, b string) bool {

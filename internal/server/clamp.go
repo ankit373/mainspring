@@ -24,11 +24,16 @@ const minClampRoom = 16
 func (s *Server) SetClampLimits(limits map[string]int) { s.clampLimits = limits }
 
 // clampMaxTokens shrinks the request's max_tokens (or max_completion_tokens) so
-// prompt + output fits limit. It returns the rewritten body and the from/to
-// values when a clamp occurred. It no-ops (clamped=false) when no output field
-// is set, when the request already fits, or when there is no meaningful room
-// left (the guardrail then handles it).
-func clampMaxTokens(body []byte, limit int) (out []byte, from, to int, clamped bool) {
+// promptTokens + output fits limit. It returns the rewritten body and the
+// from/to values when a clamp occurred. It no-ops (clamped=false) when no output
+// field is set, when the request already fits, or when there is no meaningful
+// room left (the guardrail then handles it).
+//
+// promptTokens is supplied by the caller rather than counted here so the clamp
+// and the guardrail always work from the same number: a clamp sized by the char
+// heuristic against a guardrail that re-counts with the tokenizer can shrink a
+// request to fit and still have it rejected as over-context.
+func clampMaxTokens(body []byte, limit, promptTokens int) (out []byte, from, to int, clamped bool) {
 	var req struct {
 		MaxTokens           *int `json:"max_tokens"`
 		MaxCompletionTokens *int `json:"max_completion_tokens"`
@@ -47,7 +52,7 @@ func clampMaxTokens(body []byte, limit int) (out []byte, from, to int, clamped b
 		return body, 0, 0, false // no explicit output budget to clamp
 	}
 
-	room := limit - estimatePromptTokens(body)
+	room := limit - promptTokens
 	if room < minClampRoom {
 		return body, 0, 0, false // no room to clamp to; let the guardrail decide
 	}
@@ -77,15 +82,10 @@ func rewriteIntField(body []byte, key string, val int) []byte {
 	return out
 }
 
-// applyClamp clamps max_tokens for model when clamping is configured, mutating
-// body and setting the X-Mainspring-Clamped header. Returns the (possibly
-// rewritten) body.
-func (s *Server) applyClamp(w http.ResponseWriter, model string, body []byte) []byte {
-	lim, ok := s.clampLimits[model]
-	if !ok || lim <= 0 {
-		return body
-	}
-	if newBody, from, to, clamped := clampMaxTokens(body, lim); clamped {
+// applyClamp clamps max_tokens against limit, mutating body and setting the
+// X-Mainspring-Clamped header. Returns the (possibly rewritten) body.
+func applyClamp(w http.ResponseWriter, body []byte, limit, promptTokens int) []byte {
+	if newBody, from, to, clamped := clampMaxTokens(body, limit, promptTokens); clamped {
 		w.Header().Set("X-Mainspring-Clamped", fmt.Sprintf("%d->%d", from, to))
 		return newBody
 	}

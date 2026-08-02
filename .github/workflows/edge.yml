@@ -8,6 +8,13 @@ permissions:
   contents: read
   packages: write
 
+# The arm64 leg is a QEMU-emulated cross-build and dominates this workflow's wall
+# clock, so a run superseded by a newer push is worth cancelling rather than
+# finishing an image nothing will pull.
+concurrency:
+  group: edge-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   edge-image:
     runs-on: ubuntu-latest

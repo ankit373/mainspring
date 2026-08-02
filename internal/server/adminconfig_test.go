@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,36 @@ func TestAdminConfigReportsEffectiveSettings(t *testing.T) {
 	}
 }
 
+// TestAdminConfigReportsLedgerReality proves /admin/config answers "is the usage
+// ledger actually recording?" rather than "was a path configured?".
+func TestAdminConfigReportsLedgerReality(t *testing.T) {
+	// configTestServer wires a recorder with no ledger path at all.
+	w := getJSON(configTestServer(t, auth.New(nil)).Handler(), "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if l := cfg["usage_ledger"].(map[string]any); l["active"] != false {
+		t.Fatalf("usage_ledger = %v, want active:false when no ledger is open", l)
+	}
+
+	// A server whose ledger really opened reports active.
+	eng := fakeEngine(t)
+	rec, err := metrics.New(filepath.Join(t.TempDir(), "usage.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	h := server.New(fakeSched(eng.URL), auth.New(nil), rec).Handler()
+	w = getJSON(h, "/admin/config", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if l := cfg["usage_ledger"].(map[string]any); l["active"] != true {
+		t.Fatalf("usage_ledger = %v, want active:true for an open ledger", l)
+	}
+}
+
 // The config endpoint must never leak secret material: not the API key, and not
 // the raw cost-rate dollar values (only presence booleans).
 func TestAdminConfigIsSecretFree(t *testing.T) {
@@ -91,11 +122,88 @@ func TestAdminConfigIsSecretFree(t *testing.T) {
 	}
 }
 
-func TestAdminConfigForbiddenForNonAdmin(t *testing.T) {
-	a := auth.NewTenants([]auth.Tenant{{Name: "user", Key: "userkey", Role: auth.RoleInference}})
-	h := configTestServer(t, a).Handler()
+// TestAdminConfigExposesLintWarnings proves the fix: config lint results are
+// now queryable live over HTTP, not just visible in startup stderr.
+func TestAdminConfigExposesLintWarnings(t *testing.T) {
+	srv := configTestServer(t, auth.New(nil))
+	srv.SetLintWarnings([]string{`model "m1": enforce_context is on but ctx is not set — the context guardrail has no effect for this model`})
+	h := srv.Handler()
 
-	if w := getJSON(h, "/admin/config", "userkey"); w.Code != http.StatusForbidden {
-		t.Fatalf("non-admin status = %d, want 403", w.Code)
+	w := getJSON(h, "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	warnings, ok := cfg["lint_warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected 1 lint warning, got %v", cfg["lint_warnings"])
+	}
+	if !strings.Contains(warnings[0].(string), "enforce_context") {
+		t.Fatalf("unexpected warning content: %v", warnings[0])
+	}
+}
+
+// A clean config (or one where SetLintWarnings was never called) reports an
+// empty array, not null — friendlier for API consumers.
+func TestAdminConfigLintWarningsEmptyWhenClean(t *testing.T) {
+	srv := configTestServer(t, auth.New(nil))
+	h := srv.Handler()
+
+	w := getJSON(h, "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	warnings, ok := cfg["lint_warnings"].([]any)
+	if !ok {
+		t.Fatalf("lint_warnings should be an array (even if empty), got %v (%T)", cfg["lint_warnings"], cfg["lint_warnings"])
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+}
+
+// SetLintWarnings can be called again (e.g. after a reload) and the response
+// must reflect the latest call, not accumulate or ignore updates.
+func TestAdminConfigLintWarningsUpdateAfterReload(t *testing.T) {
+	srv := configTestServer(t, auth.New(nil))
+	srv.SetLintWarnings([]string{"first warning"})
+	h := srv.Handler()
+
+	srv.SetLintWarnings([]string{"second warning", "third warning"})
+	w := getJSON(h, "/admin/config", "")
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	warnings, _ := cfg["lint_warnings"].([]any)
+	if len(warnings) != 2 {
+		t.Fatalf("expected the latest 2 warnings (not accumulated), got %v", warnings)
+	}
+}
+
+// The route is registered as `GET /admin/config`, and in net/http a GET pattern
+// also serves HEAD. The handler's own r.Method != GET check therefore only ever
+// fired for HEAD — answering 405 for a method the route does serve — while
+// /admin/usage, registered identically, had no such check. The mux is now the
+// only method gate, and the two agree.
+func TestAdminEndpointsLeaveMethodGatingToTheMux(t *testing.T) {
+	h := configTestServer(t, auth.New(nil)).Handler()
+	for _, path := range []string{"/admin/config", "/admin/usage"} {
+		req := httptest.NewRequest(http.MethodHead, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("HEAD %s = %d, want 200", path, w.Code)
+		}
+	}
+	// A method the route genuinely does not serve is still rejected — by the mux.
+	for _, path := range []string{"/admin/config", "/admin/usage"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s = %d, want 405", path, w.Code)
+		}
 	}
 }

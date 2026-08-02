@@ -57,17 +57,13 @@ const tokensPerCharDenom = 4
 // adds around each message.
 const perMessageOverhead = 4
 
-// contextOverage reports whether a request cannot fit the model's context and a
-// human-readable reason. maxTokens alone exceeding the limit is exact; the
-// combined prompt-estimate + maxTokens check is approximate (see estimate note).
-func contextOverage(body []byte, limit int) (bool, string) {
-	return contextOverageDetail(body, limit, estimatePromptTokens(body), false)
-}
-
-// contextOverageDetail is the core check with the prompt-token count supplied by
-// the caller: exact when counted with the model's real tokenizer, else an
-// estimate. The reason text labels which was used so the client can tell an
-// exact rejection from a heuristic one.
+// contextOverageDetail reports whether a request cannot fit the model's context
+// and a human-readable reason. The prompt-token count is supplied by the caller
+// — exact when counted with the model's real tokenizer, else the estimate from
+// estimatePromptTokens — and `exact` says which. maxTokens alone exceeding the
+// limit is always exact; the combined check inherits the caller's accuracy, and
+// the reason text labels it so a client can tell an exact rejection from a
+// heuristic one.
 func contextOverageDetail(body []byte, limit, promptTokens int, exact bool) (bool, string) {
 	maxTok := maxTokensRequested(body)
 
@@ -106,22 +102,27 @@ func maxTokensRequested(body []byte) int {
 
 // estimatePromptTokens is a tokenizer-free, conservative estimate of the input
 // token count. It handles the chat (messages[].content, string or multimodal
-// array), legacy completion (prompt), and embeddings (input) shapes. Non-text
-// parts (e.g. images) contribute only their fixed per-message overhead.
+// array), legacy completion (prompt), system (string or Anthropic block array),
+// and embeddings (input) shapes. Non-text parts (e.g. images) contribute only
+// their fixed per-message overhead. Fields whose shape differs between dialects
+// are decoded raw and interpreted afterwards: typing one concretely (as `system`
+// once was) makes an unfamiliar shape fail the *whole* unmarshal, estimating the
+// entire request at 0 tokens — the guardrail failing open on the requests most
+// likely to need it.
 func estimatePromptTokens(body []byte) int {
 	var req struct {
 		Messages []struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 		Prompt json.RawMessage `json:"prompt"`
-		System string          `json:"system"`
+		System json.RawMessage `json:"system"`
 		Input  json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &req) != nil {
 		return 0
 	}
 
-	total := charTokens(len(req.System))
+	total := contentTokens(req.System)
 	for _, m := range req.Messages {
 		total += perMessageOverhead + contentTokens(m.Content)
 	}

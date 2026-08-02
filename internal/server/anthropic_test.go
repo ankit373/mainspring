@@ -303,6 +303,45 @@ func TestNonStreamingOmitsStreamOptions(t *testing.T) {
 	}
 }
 
+// TestMessagesForwardsSamplingParams: every sampling parameter the caller sent
+// reaches the engine. top_k had no field on anthropicRequest at all, so it was
+// dropped on the floor with no error — the one thing a fail-loud server must
+// not do with a parameter it was given.
+func TestMessagesForwardsSamplingParams(t *testing.T) {
+	h, captured := capturingEngineServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"m1","max_tokens":64,"temperature":0.3,"top_p":0.9,"top_k":40,`+
+			`"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var upstream map[string]any
+	if err := json.Unmarshal(captured(), &upstream); err != nil {
+		t.Fatalf("decode captured upstream body: %v", err)
+	}
+	if upstream["temperature"] != 0.3 || upstream["top_p"] != 0.9 {
+		t.Fatalf("temperature/top_p not forwarded: %v", upstream)
+	}
+	if upstream["top_k"] != float64(40) {
+		t.Fatalf("top_k = %v, want 40 (silently discarded)", upstream["top_k"])
+	}
+
+	// Unset sampling params stay absent so the engine's own default applies.
+	h2, captured2 := capturingEngineServer(t)
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"m1","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`))
+	h2.ServeHTTP(httptest.NewRecorder(), req2)
+	var plain map[string]any
+	if err := json.Unmarshal(captured2(), &plain); err != nil {
+		t.Fatalf("decode captured upstream body: %v", err)
+	}
+	if _, ok := plain["top_k"]; ok {
+		t.Fatalf("unset top_k must not be sent: %v", plain)
+	}
+}
+
 func TestMessagesUnknownModel(t *testing.T) {
 	h := anthropicServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",

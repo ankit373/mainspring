@@ -155,7 +155,100 @@ func TestWritePrometheus(t *testing.T) {
 	g.OnResult("m", false)
 	var sb strings.Builder
 	g.WritePrometheus(&sb)
-	if !strings.Contains(sb.String(), `mainspring_breaker_open{model="m"} 1`) {
-		t.Fatalf("expected open gauge, got:\n%s", sb.String())
+	out := sb.String()
+	if !strings.Contains(out, `mainspring_breaker_open{model="m"} 1`) {
+		t.Fatalf("expected open gauge, got:\n%s", out)
+	}
+	// Open (not yet half-open): the half-open gauge must read 0.
+	if !strings.Contains(out, `mainspring_breaker_half_open{model="m"} 0`) {
+		t.Fatalf("expected half_open=0 while merely open, got:\n%s", out)
+	}
+}
+
+// TestWritePrometheusDistinguishesHalfOpen proves the fix: half-open (actively
+// probing recovery) must be distinguishable from a plain open breaker, not
+// just collapsed into the same "tripped" gauge.
+func TestWritePrometheusDistinguishesHalfOpen(t *testing.T) {
+	g, clk := newTestGroup(1, time.Minute)
+	g.OnResult("m", false) // opens
+	clk.add(time.Minute)
+	g.Allow("m") // cooldown elapsed -> transitions to HalfOpen
+	if g.State("m") != HalfOpen {
+		t.Fatal("setup: expected half-open state")
+	}
+
+	var sb strings.Builder
+	g.WritePrometheus(&sb)
+	out := sb.String()
+	// Existing dashboards keep working: still "tripped" (1) while half-open.
+	if !strings.Contains(out, `mainspring_breaker_open{model="m"} 1`) {
+		t.Fatalf("expected open=1 during half-open (back-compat), got:\n%s", out)
+	}
+	// New signal: specifically half-open.
+	if !strings.Contains(out, `mainspring_breaker_half_open{model="m"} 1`) {
+		t.Fatalf("expected half_open=1, got:\n%s", out)
+	}
+}
+
+// TestOnAbandonedDoesNotClearFailures is the regression test for treating a
+// client's own cancellation as evidence. A cancelled request learned nothing
+// about the backend, but OnResult(key, true) zeroes the failure count — so
+// routing cancellations through it would let a client with a flaky connection
+// hold a genuinely broken backend's circuit closed indefinitely.
+func TestOnAbandonedDoesNotClearFailures(t *testing.T) {
+	g := NewGroup(3, time.Minute)
+
+	g.OnResult("m", false)
+	g.OnResult("m", false) // 2 of 3 failures banked
+
+	g.OnAbandoned("m") // a caller gave up; this is not evidence either way
+
+	g.OnResult("m", false) // the third real failure must still open the circuit
+	if got := g.State("m"); got != Open {
+		t.Fatalf("state = %v, want open: an abandoned request must not clear the failure count", got)
+	}
+}
+
+// TestOnAbandonedReleasesAHalfOpenProbe — Allow() moves Open->HalfOpen and then
+// refuses everyone until OnResult resolves it, so a caller that takes the probe
+// and then disconnects would wedge the breaker half-open forever.
+func TestOnAbandonedReleasesAHalfOpenProbe(t *testing.T) {
+	clock := int64(0)
+	g := NewGroup(1, time.Minute)
+	g.now = func() time.Time { return time.Unix(0, clock) }
+
+	g.OnResult("m", false)
+	if got := g.State("m"); got != Open {
+		t.Fatalf("state = %v, want open", got)
+	}
+	clock = int64(2 * time.Minute)
+	if !g.Allow("m") {
+		t.Fatal("cooldown elapsed: this caller should get the probe")
+	}
+	if got := g.State("m"); got != HalfOpen {
+		t.Fatalf("state = %v, want half-open (probe in flight)", got)
+	}
+
+	g.OnAbandoned("m") // that caller disconnected without ever reaching the backend
+
+	if got := g.State("m"); got != Open {
+		t.Fatalf("state = %v, want open again — an unresolved probe must not be left in flight", got)
+	}
+	// The cooldown already elapsed, so the *next* caller takes the probe straight
+	// away rather than serving another full cooldown for someone else's abort.
+	if !g.Allow("m") {
+		t.Fatal("next caller should immediately get the released probe")
+	}
+}
+
+// A model id containing a quote and a backslash must be escaped exactly once —
+// the three escapes the Prometheus text format defines, and no more.
+func TestWritePrometheusEscapesLabelValueOnce(t *testing.T) {
+	g, _ := newTestGroup(1, time.Minute)
+	g.OnResult(`we"ird\model`, false)
+	var sb strings.Builder
+	g.WritePrometheus(&sb)
+	if out := sb.String(); !strings.Contains(out, `mainspring_breaker_open{model="we\"ird\\model"} 1`) {
+		t.Fatalf("label value not escaped exactly once, got:\n%s", out)
 	}
 }

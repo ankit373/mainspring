@@ -12,10 +12,16 @@ The durable value is the layer *around* inference — **fail-loud correctness, V
 scheduling, and standalone governance** — not the compute kernels (those are MIT and already win).
 **Never write an inference kernel.** Wrap `llama-server` / `mlx_lm.server` as subprocesses.
 
-> **Relationship to Hydra:** Mainspring is *an* inference head; Hydra is the *router/trust control
-> plane above it*. They meet over the standard OpenAI-compatible HTTP boundary. Mainspring governs its
-> own served endpoint (admission control, keys, quotas); Hydra governs routing across many heads. Keep
-> the boundary clean so either evolves independently. **Mainspring must be useful deployed alone.**
+> **Relationship to Hydra:** these are **two control planes at different scopes** — do not describe
+> Hydra as "a router". Hydra is the **Trust Control Plane**: it routes *across* heads to a target
+> **confidence of correctness** (calibration, optimal-stopping ensembles, accountability ledger).
+> Mainspring is the **inference control plane** for *one* head: admission control, keys and quotas,
+> VRAM residency, and fail-loud truth about what actually ran. Hydra asks *which head should answer
+> and how confident are we it's right*; Mainspring answers *what is true about this head right now*.
+> Plain proxies (LiteLLM, OpenRouter) sit at Hydra's tier but only forward traffic — that is the tier
+> comparison to draw, not one that flattens Hydra into them. They meet over the standard
+> OpenAI-compatible HTTP boundary. Keep it clean so either evolves independently.
+> **Mainspring must be useful deployed alone.**
 >
 > **Hydra stays provider-neutral and works with everything** (Ollama, OpenAI, Anthropic/Claude, any
 > OpenAI-compatible endpoint) — Hydra never depends on Mainspring. Mainspring is the head Hydra

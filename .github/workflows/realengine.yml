@@ -1,0 +1,58 @@
+# The real-engine suite: Mainspring in front of an actual local engine, driven by
+# the real OpenAI and Anthropic SDKs.
+#
+# Deliberately NOT on the pull-request path. It pulls model weights and runs a
+# daemon, which is minutes and hundreds of megabytes that no PR should wait on.
+# Run it before a release, or after touching anything that assumes how an engine
+# behaves — stop handling, usage accounting, the adopt backends.
+name: real-engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Ollama model to run against (any small chat model will do)"
+        default: "qwen2.5:0.5b"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  real-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and pull the model
+        env:
+          MODEL: ${{ inputs.model }}
+        run: |
+          ollama serve > /tmp/ollama.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -sf --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:11434/api/tags >/dev/null || { cat /tmp/ollama.log; exit 1; }
+          ollama pull "$MODEL"
+
+      - name: Install the SDKs
+        run: python3 -m pip install --quiet "openai>=1.40,<2" anthropic
+
+      - name: Real-engine suite
+        env:
+          REAL_MODEL: ${{ inputs.model }}
+        run: ./test/realengine/run.sh
+
+      - name: Dump the Ollama log on failure
+        if: failure()
+        run: cat /tmp/ollama.log || true
