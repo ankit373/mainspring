@@ -786,7 +786,9 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
   <h2>Detect first. Install nothing you didn't ask for.</h2>
   <p class="sub">Mainspring looks at what your machine already has before it proposes anything. Managed
     engines can be installed on demand — opt-in and checksum-verified. Adopted engines are never
-    installed at all.</p>
+    installed at all. <span class="hint">No artifact catalogue ships with the binary: you point
+    <code>mainspring install</code> at the build you want with <code>--url</code> and
+    <code>--sha256</code>, or at your own manifest.</span></p>
 <pre><span class="c"># build</span>
 go build -o mainspring ./cmd/mainspring
 
@@ -824,7 +826,7 @@ curl localhost:11500/capabilities
       <tr>
         <td><code>llamacpp</code></td>
         <td><span class="tag mng">managed</span> <span class="dim">llama-server</span></td>
-        <td><span class="yes">✓</span> <span class="tag">checksum-pinned</span></td>
+        <td><span class="yes">✓</span> <span class="tag">checksum-verified</span></td>
         <td><span class="yes">✓ exact</span></td><td><span class="yes">✓</span></td>
         <td class="dim">subprocess</td>
       </tr>
