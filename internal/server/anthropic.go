@@ -15,6 +15,7 @@ import (
 
 	"github.com/ankit373/mainspring/internal/apierr"
 	"github.com/ankit373/mainspring/internal/auth"
+	"github.com/ankit373/mainspring/internal/cache"
 	"github.com/ankit373/mainspring/internal/metrics"
 )
 
@@ -149,6 +150,16 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		s.recordRejected(r.Context(), model, codeTokenBudget, recvd)
 		return
 	}
+	// Response cache + coalescing, on the translated body so two Anthropic requests
+	// that mean the same thing share an entry. cache.Key includes the request path,
+	// so what is stored here is the Anthropic-shaped response and can never be
+	// confused with an OpenAI one.
+	sh, doneSharing, answered := s.beginShare(w, r, model, tenant, oaiBody, recvd)
+	if answered {
+		return
+	}
+	defer doneSharing()
+
 	release, queueWait, res := s.gate.acquire(r.Context(), model)
 	if res != gateAcquired {
 		// gateCancelled means the caller is already gone: writing a 503 there would
@@ -190,6 +201,9 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	// Wrap the writer once so the recorded event reports what was actually written
 	// (status, bytes, TTFT) instead of an assumed 200.
 	cap := newCapture(w, start)
+	if sh.wanted() {
+		cap.recordFor(cacheBodyCap)
+	}
 	var prompt, completion int64
 	var exact, backendFailed bool
 	// Mark the runner busy for the actual generation call so the scheduler's
@@ -215,6 +229,21 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		s.breaker.OnAbandoned(model)
 	} else {
 		s.breaker.OnResult(model, !backendFailed && cap.status < 500)
+	}
+
+	// Share a successful, complete, non-streaming response with later callers. The
+	// same bar as the OpenAI path: a truncated or failed body is never stored, or
+	// one severed answer is replayed for the life of the entry.
+	if !backendFailed && sh.wanted() && !cap.stream && !cap.bodyOver &&
+		cap.status >= 200 && cap.status < 300 && cap.body != nil {
+		sh.store(cache.Value{
+			Status:     cap.status,
+			Header:     cap.snapHeader,
+			Body:       cap.body,
+			Prompt:     prompt,
+			Completion: completion,
+			Exact:      exact,
+		})
 	}
 
 	charge := completion

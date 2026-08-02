@@ -115,9 +115,10 @@ MIT and already win; Mainspring wraps them).
   from this request, never from the leader's — no cross-tenant header ever replays.
 - Path scope (what applies where): the admission pipeline — API-key auth, per-tenant rate + token budgets,
   the context guardrail, `clamp_max_tokens`, `precise_context`, the concurrency gate + queue, the circuit
-  breaker, per-request timeouts, and cost accounting — applies to **both** the OpenAI endpoints and
-  Anthropic `/v1/messages`. The response cache, request coalescing, retry-with-backoff and model fallback
-  chains run on the OpenAI path only: a `/v1/messages` request is always served by its own backend call.
+  breaker, per-request timeouts, cost accounting, and now the response cache and request coalescing —
+  applies to **both** the OpenAI endpoints and Anthropic `/v1/messages`. Each dialect caches its own wire
+  shape (an Anthropic caller is replayed an Anthropic message), keyed by request path, so the two can
+  never serve one another's bodies. Still OpenAI-path only: retry-with-backoff and model fallback chains.
 - Cost accounting: optional per-model USD pricing (`input_usd_per_mtok` / `output_usd_per_mtok`, 0 =
   local/free) turns real token usage into spend. Cost lands in the usage ledger (`cost_usd`), a
   `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
