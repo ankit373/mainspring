@@ -190,8 +190,10 @@ MIT and already win; Mainspring wraps them).
   via `GET /admin/config`'s `lint_warnings` field — reflecting the config as of the last successful
   load/reload, not just startup, so an operator can check for silently-inert settings on a running server
   without digging through logs.
-- Opt-in, verified managed install: never installs anything unless you run `mainspring install`, and
-  every install is SHA-256-verified against an expected hash, refusing on a mismatch. Mainspring ships
+- Opt-in, verified managed install: never installs anything unless you run `mainspring install`. Each
+  download is staged to a temp file and SHA-256-verified against the expected hash before being moved
+  into place, so unverified bytes never reach the install path and a failed install leaves an already
+  installed engine untouched. Transfers are size-capped and time-bounded. Mainspring ships
   no curated artifact catalogue — the embedded manifest is empty by design, so you supply the artifact
   with `--url` + `--sha256`, or your own manifest file (optionally ed25519-signed via `--pubkey`).
   Running `mainspring install <backend>` with nothing supplied says so plainly rather than guessing.
