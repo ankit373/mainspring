@@ -107,6 +107,30 @@ func TestGateAcquireMeasuresQueueWait(t *testing.T) {
 	}
 }
 
+// TestGateDisabledStillCountsOccupancy pins the fix: gating is off by default,
+// and an occupancy counter that only runs when gating is on reports a permanent
+// zero on /v1/quality and /metrics for the default configuration. Only the
+// admission decision depends on maxInflight.
+func TestGateDisabledStillCountsOccupancy(t *testing.T) {
+	g := newGate(0, 0)
+	rel, _, res := g.acquire(context.Background(), "m")
+	if res != gateAcquired {
+		t.Fatal("disabled gate must always allow")
+	}
+	if in, q := g.stat("m"); in != 1 || q != 0 {
+		t.Fatalf("stat = (%d,%d), want (1,0) — in-flight is real, there is no queue", in, q)
+	}
+	var sb strings.Builder
+	g.writePrometheus(&sb)
+	if !strings.Contains(sb.String(), `mainspring_inflight_requests{model="m"} 1`) {
+		t.Fatalf("disabled gate must still export occupancy:\n%s", sb.String())
+	}
+	rel()
+	if in, _ := g.stat("m"); in != 0 {
+		t.Fatalf("in-flight = %d after release, want 0", in)
+	}
+}
+
 func TestGatePrometheus(t *testing.T) {
 	g := newGate(2, 4)
 	rel, _, _ := g.acquire(context.Background(), "m")

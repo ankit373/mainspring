@@ -51,9 +51,21 @@ const (
 // free. It returns a release func, the time spent waiting for a slot (0 when
 // gating is disabled or a slot was immediately free), and which of the three
 // outcomes occurred. release is nil unless the result is gateAcquired.
+//
+// Occupancy is counted whether or not gating is enabled — only the admission
+// *decision* depends on maxInflight. Gating is off by default, and an
+// unconditional counter is the difference between /v1/quality and /metrics
+// reporting real load and reporting a permanent zero.
 func (g *gate) acquire(ctx context.Context, model string) (release func(), waitTime time.Duration, res gateResult) {
 	if !g.enabled() {
-		return func() {}, 0, gateAcquired
+		g.mu.Lock()
+		g.inflight[model]++
+		g.mu.Unlock()
+		return func() {
+			g.mu.Lock()
+			g.inflight[model]--
+			g.mu.Unlock()
+		}, 0, gateAcquired
 	}
 	start := time.Now()
 	g.mu.Lock()
@@ -90,26 +102,25 @@ func (g *gate) acquire(ctx context.Context, model string) (release func(), waitT
 	}
 }
 
-// stat returns the current in-flight and queued counts for one model. Both are 0
-// when gating is disabled (the counters are only maintained when enabled).
+// stat returns the current in-flight and queued counts for one model. Queued is
+// always 0 when gating is disabled — there is no queue — but in-flight is real.
 func (g *gate) stat(model string) (inflight, queued int) {
-	if !g.enabled() {
-		return 0, 0
-	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.inflight[model], g.queued[model]
 }
 
-// writePrometheus appends inflight/queued gauges (no-op when disabled).
+// writePrometheus appends inflight/queued gauges for every model seen so far.
 func (g *gate) writePrometheus(w io.Writer) {
-	if !g.enabled() {
-		return
-	}
 	g.mu.Lock()
-	models := make([]string, 0, len(g.sems))
-	for m := range g.sems {
+	models := make([]string, 0, len(g.inflight))
+	for m := range g.inflight {
 		models = append(models, m)
+	}
+	for m := range g.queued {
+		if _, ok := g.inflight[m]; !ok {
+			models = append(models, m)
+		}
 	}
 	sort.Strings(models)
 	inflight := make(map[string]int, len(models))

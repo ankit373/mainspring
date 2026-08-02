@@ -98,6 +98,9 @@ func imageSourceToURL(s *imageSource) string {
 
 // messages handles POST /v1/messages (Anthropic Messages API).
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
+	// Taken at entry so a rejection reports the time the caller actually waited.
+	// The generation path keeps its own later `start`, so TTFT stays comparable.
+	recvd := time.Now()
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -142,6 +145,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := auth.FromContext(r.Context())
 	if !s.auth.AllowTokens(tenant) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
+		s.recordRejected(r.Context(), model, codeTokenBudget, recvd)
 		return
 	}
 	release, queueWait, res := s.gate.acquire(r.Context(), model)
@@ -151,6 +155,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		if res == gateFull {
 			w.Header().Set("Retry-After", "1")
 			writeErr(w, codeServerBusy, "server busy: too many concurrent requests for "+model)
+			s.recordRejected(r.Context(), model, codeServerBusy, recvd)
 		}
 		return
 	}
@@ -159,6 +164,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	if !s.breaker.Allow(model) {
 		w.Header().Set("Retry-After", "5")
 		writeErr(w, codeCircuitOpen, "circuit open: backend for "+model+" is unavailable")
+		s.recordRejected(r.Context(), model, codeCircuitOpen, recvd)
 		return
 	}
 

@@ -49,6 +49,9 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		cacheInfo["misses"] = misses
 	}
 
+	// Usage ledger: whether it is really open, not whether a path was configured.
+	usageLedger := map[string]any{"active": s.metrics != nil && s.metrics.LedgerActive()}
+
 	// Concurrency gate.
 	concurrency := map[string]any{
 		"enabled":      s.gate.enabled(),
@@ -95,6 +98,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"retry":           retry,
 		"breaker":         breaker,
 		"cache":           cacheInfo,
+		"usage_ledger":    usageLedger,
 		"coalesce":        map[string]any{"enabled": s.coalesce != nil},
 		"concurrency":     concurrency,
 		"context_guard":   guard,

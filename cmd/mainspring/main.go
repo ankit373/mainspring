@@ -527,6 +527,7 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string, flagSrc fl
 		fmt.Fprintln(os.Stderr, "warning:", err) // metrics still work in-memory
 	}
 	defer func() { _ = rec.Close() }()
+	ledgerActive := rec.LedgerActive()
 
 	srv := server.New(sched, authn, rec)
 	srv.SetConcurrency(cfg.MaxInflight, cfg.MaxQueue)
@@ -648,9 +649,15 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string, flagSrc fl
 	}
 	fmt.Println(build.String())
 	fmt.Printf("serving %d model(s) on %s (%s)\n", len(specs), cfg.Addr, scheme)
-	if ledgerPath != "" {
+	// Report whether the ledger actually opened, not merely whether one was
+	// configured: a failed open leaves the server accounting in memory only, and
+	// claiming an active ledger is how that goes unnoticed until the audit.
+	switch {
+	case ledgerActive:
 		fmt.Printf("metrics: %s/metrics   usage ledger: %s\n", cfg.Addr, ledgerPath)
-	} else {
+	case ledgerPath != "":
+		fmt.Printf("metrics: %s/metrics   ⚠  usage ledger FAILED to open (%s) — in-memory metrics only\n", cfg.Addr, ledgerPath)
+	default:
 		fmt.Printf("metrics: %s/metrics   usage ledger: disabled\n", cfg.Addr)
 	}
 	if authn.Open() {
