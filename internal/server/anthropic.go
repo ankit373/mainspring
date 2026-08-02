@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -122,6 +123,19 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Model = model
 
+	// Translate up front: the admission checks (clamp, context guardrail) and the
+	// upstream call all work on the OpenAI-shaped body, and an untranslatable
+	// request must be rejected before it consumes a gate slot or loads a model.
+	oaiBody, err := toOpenAIRequest(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	oaiBody, ok = s.admit(w, r.Context(), model, oaiBody)
+	if !ok {
+		return
+	}
+
 	tenant, _ := auth.FromContext(r.Context())
 	if !s.auth.AllowTokens(tenant) {
 		writeErr(w, codeTokenBudget, "token budget exceeded")
@@ -158,25 +172,29 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(k, v)
 	}
 
-	oaiBody, err := toOpenAIRequest(req)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
 	start := time.Now()
+	// Wrap the writer once so the recorded event reports what was actually written
+	// (status, bytes, TTFT) instead of an assumed 200.
+	cap := newCapture(w, start)
 	var prompt, completion int64
-	var exact bool
+	var exact, backendFailed bool
 	// Mark the runner busy for the actual generation call so the scheduler's
 	// idle timer and LRU eviction never pull it out from under a long-running
 	// request (e.g. one that streams longer than KeepAlive).
 	s.sched.MarkBusy(model)
 	if req.Stream {
-		prompt, completion, exact = s.messagesStream(w, r.Context(), runner.BaseURL(), oaiBody, requested)
+		prompt, completion, exact, backendFailed = s.messagesStream(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
 	} else {
-		prompt, completion, exact = s.messagesJSON(w, r.Context(), runner.BaseURL(), oaiBody, requested)
+		prompt, completion, exact, backendFailed = s.messagesJSON(cap, r.Context(), runner.BaseURL(), oaiBody, requested)
 	}
 	s.sched.MarkIdle(model)
+	// A 5xx counts as a backend failure; 2xx/4xx are healthy (4xx is a client error,
+	// not the backend's fault). backendFailed covers what the status cannot: once an
+	// SSE stream is open the status is pinned at 200, so a stream that died mid-flight
+	// would otherwise be recorded as a success. Without any of this the breaker never
+	// learns that a /v1/messages request succeeded — and a half-open probe consumed by
+	// this path would never resolve.
+	s.breaker.OnResult(model, !backendFailed && cap.status < 500)
 
 	charge := completion
 	if exact {
@@ -187,9 +205,12 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		s.metrics.Record(metrics.Event{
 			Time: start, RequestID: RequestID(r.Context()), TraceID: TraceID(r.Context()),
 			Model: model, Tenant: auth.TenantOf(r.Context()),
-			Status: http.StatusOK, Stream: req.Stream,
+			Status: cap.status, Stream: cap.stream,
 			DurationMs:   float64(time.Since(start).Microseconds()) / 1000.0,
+			TTFTMs:       cap.ttftMs(),
+			Bytes:        cap.bytes,
 			PromptTokens: prompt, TokensEst: completion, Exact: exact,
+			CostUSD:     s.costFor(model, prompt, completion, exact),
 			QueueWaitMs: float64(queueWait.Microseconds()) / 1000.0,
 		})
 	}
@@ -426,17 +447,23 @@ type oaiToolCall struct {
 // messagesJSON does a non-streaming upstream call and writes the Anthropic body.
 // It returns the real prompt/completion token counts and whether the upstream
 // supplied a usage object.
-func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
+func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact, backendFailed bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			writeErr(w, codeTimeout, "request timed out")
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		// Fail loud: an upstream error body decodes into zero choices, which would
+		// otherwise be served as a well-formed empty 200 Anthropic message.
+		writeUpstreamFailure(w, resp)
+		return 0, 0, false, false
+	}
 	var oai struct {
 		Choices []struct {
 			Message struct {
@@ -452,7 +479,7 @@ func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseUR
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBody)).Decode(&oai); err != nil {
 		writeError(w, http.StatusBadGateway, "decode backend response: "+err.Error())
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	content, finish := "", ""
 	var toolCalls []oaiToolCall
@@ -495,7 +522,7 @@ func (s *Server) messagesJSON(w http.ResponseWriter, ctx context.Context, baseUR
 		w.Header().Set("X-Mainspring-Tokens-Output", strconv.FormatInt(oai.Usage.CompletionTokens, 10))
 	}
 	writeJSON(w, http.StatusOK, out)
-	return oai.Usage.PromptTokens, oai.Usage.CompletionTokens, exact
+	return oai.Usage.PromptTokens, oai.Usage.CompletionTokens, exact, false
 }
 
 // argsToInput turns an OpenAI tool-call arguments JSON string into a JSON value
@@ -516,17 +543,23 @@ func argsToInput(args string) json.RawMessage {
 // events. It returns the prompt/completion token counts and whether they came
 // from an upstream usage object (stream_options.include_usage); when absent,
 // completion falls back to the number of streamed fragments.
-func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact bool) {
+func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, baseURL string, oaiBody []byte, model string) (prompt, completion int64, exact, backendFailed bool) {
 	resp, err := postJSON(ctx, baseURL+"/v1/chat/completions", oaiBody)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			writeErr(w, codeTimeout, "request timed out")
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		writeError(w, http.StatusBadGateway, "backend request failed: "+err.Error())
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		// Fail loud before any SSE byte goes out: once the stream is open the status
+		// can no longer be corrected.
+		writeUpstreamFailure(w, resp)
+		return 0, 0, false, false
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -600,21 +633,76 @@ func (s *Server) messagesStream(w http.ResponseWriter, ctx context.Context, base
 		}
 	}
 
-	if !st.started {
-		// No content at all: emit an empty text block so the message is well-formed.
-		st.textDelta("")
-	}
-	st.closeOpen()
 	// Prefer real usage from the upstream include_usage chunk; else the fragment
 	// count is the best available output estimate.
 	if !exact {
 		completion = deltas
 	}
+
+	// Fail loud on a truncated stream: a cut connection or an expired deadline must
+	// not be closed with a fabricated end_turn, which a client cannot tell apart
+	// from a complete answer. Close any open block, then emit an Anthropic `error`
+	// event instead of message_delta/message_stop. The status is already 200 on the
+	// wire by now, so this error event is the only signal the client will get — and
+	// the returned flag is the only signal the breaker will get.
+	if err := sc.Err(); err != nil || ctx.Err() != nil {
+		st.closeOpen()
+		switch {
+		case err != nil:
+			streamError(send, codeUpstreamError, "upstream stream ended prematurely: "+err.Error())
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			streamError(send, codeTimeout, "stream exceeded the per-request timeout")
+		default:
+			streamError(send, codeInternal, "stream cancelled before completion")
+		}
+		// A broken upstream or an exceeded deadline is the backend's fault. A caller
+		// that cancelled its own request is not — charging that to the breaker would
+		// let clients trip the circuit for every tenant by disconnecting.
+		return prompt, completion, exact, !errors.Is(ctx.Err(), context.Canceled)
+	}
+
+	if !st.started {
+		// No content at all: emit an empty text block so the message is well-formed.
+		st.textDelta("")
+	}
+	st.closeOpen()
 	send("message_delta", map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": mapStopReason(finish), "stop_sequence": nil},
-		"usage": map[string]int64{"output_tokens": completion}})
+		"usage": map[string]int64{"input_tokens": prompt, "output_tokens": completion}})
 	send("message_stop", map[string]any{"type": "message_stop"})
-	return prompt, completion, exact
+	return prompt, completion, exact, false
+}
+
+// upstreamErrorDetail bounds how much of an upstream error body is echoed back.
+const upstreamErrorDetail = 512
+
+// writeUpstreamFailure reports a non-2xx upstream response as an error instead of
+// letting it decode into an empty success. A 5xx becomes a 502 upstream_error (the
+// backend broke); a 4xx keeps its own status (the request was bad). Both carry a
+// bounded prefix of the upstream message.
+func writeUpstreamFailure(w http.ResponseWriter, resp *http.Response) {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorDetail))
+	msg := fmt.Sprintf("backend returned %d", resp.StatusCode)
+	if detail := strings.TrimSpace(string(b)); detail != "" {
+		msg += ": " + detail
+	}
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		writeError(w, resp.StatusCode, msg)
+		return
+	}
+	writeErr(w, codeUpstreamError, msg)
+}
+
+// streamError emits an Anthropic `error` SSE event carrying Mainspring's error
+// taxonomy, so a stream that ends abnormally says so on the wire.
+func streamError(send func(event string, data any), code errorCode, msg string) {
+	m, ok := codeMeta[code]
+	if !ok {
+		m = codeMeta[codeInternal]
+	}
+	send("error", map[string]any{"type": "error", "error": map[string]string{
+		"type": m.typ, "code": string(code), "message": msg,
+	}})
 }
 
 // anthropicStreamState tracks which content block is currently open so text and

@@ -693,6 +693,7 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
     <span class="plate">One API, many engines</span>
     <div class="grid">
       <div class="card"><h3>Two dialects, one server</h3><p>OpenAI (<code>/v1/chat/completions</code>, <code>/v1/completions</code>, <code>/v1/embeddings</code>, <code>/v1/models</code>) and Anthropic <code>/v1/messages</code> — tool use, images and streaming all translated.</p></div>
+      <div class="card"><h3>Same rules on both dialects</h3><p>Auth, per-tenant budgets, the context guardrail, clamp, the concurrency gate, timeouts, the breaker and cost accounting govern <code>/v1/messages</code> exactly as they govern the OpenAI paths. <span class="hint">The response cache, coalescing, retry and model fallback are OpenAI-path only today.</span></p></div>
       <div class="card"><h3>Per-model backend routing</h3><p>One server can serve a GGUF on llama.cpp, an MLX model, and an adopted Ollama model at the same time. Friendly aliases resolve on every path.</p></div>
       <div class="card"><h3>Two kinds of fallback</h3><p>Backend-level (same model, another engine) and model-level (<code>model_fallbacks</code> — a <em>different</em> model answers). Only ever before the first byte reaches the client.</p></div>
       <div class="card"><h3>Model auto-discovery</h3><p>Opt-in: enumerate what your adopted engines already hold and expose it automatically. Configured models win an id clash.</p></div>
@@ -708,6 +709,7 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
       <div class="card"><h3>Exact token counting</h3><p><code>/v1/tokenize</code> returns <code>{tokens, exact}</code> — the model's real count when it's resident on a tokenizing engine, honestly flagged as an estimate when not.</p></div>
       <div class="card"><h3>Graceful clamp</h3><p>Rather than rejecting an over-budget <code>max_tokens</code>, opt in to shrink it to the room actually left and report the change on <code>X-Mainspring-Clamped</code>.</p></div>
       <div class="card"><h3>Embeddings counted too</h3><p>The guardrail, clamp and precise counting all read an embeddings <code>input</code> field — not just <code>messages</code>. A large embeddings call trips the guardrail instead of measuring as zero.</p></div>
+      <div class="card"><h3>No fabricated endings</h3><p>An upstream error is an error — a backend 500 becomes <code>502 upstream_error</code>, never an empty success. A generation cut mid-stream ends with a terminal error event, not a stop reason it didn't earn, and the breaker is told it failed even though the stream already went out at 200.</p></div>
     </div>
   </div>
 

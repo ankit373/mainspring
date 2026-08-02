@@ -47,7 +47,7 @@ func TestMetricsDistinguishesHalfOpenBreaker(t *testing.T) {
 		t.Fatalf("expected half_open=0 while merely open (not yet probing), got:\n%s", out)
 	}
 
-	time.Sleep(30 * time.Millisecond) // past the cooldown
+	time.Sleep(30 * time.Millisecond)           // past the cooldown
 	postBody(h, `{"model":"m1","messages":[]}`) // this request is the half-open probe (and fails, re-opening after)
 
 	// We can't reliably catch the exact half-open instant via a second request

@@ -30,7 +30,12 @@ MIT and already win; Mainspring wraps them).
   and effective context (never silently smaller than requested); `X-Mainspring-{Backend,Device,Warning}`
   headers on every response. "Degraded" means something actually differs from what was asked for (a
   silent CPU fallback, a shrunk context) — a model deliberately configured CPU-only (`gpu_layers: -1`)
-  is never flagged degraded just for not using the GPU.
+  is never flagged degraded just for not using the GPU. The same rule governs failures: an upstream
+  non-2xx is reported as an error (5xx becomes 502 `upstream_error`) and never decoded into an empty
+  success, and a generation cut mid-stream ends with a terminal error event rather than a fabricated
+  stop reason — on Anthropic `/v1/messages` that is an `error` SSE event carrying Mainspring's error
+  code. A truncated stream is also reported to the circuit breaker as the backend failure it is, which
+  the HTTP status cannot express once the stream is already open at 200.
 - VRAM-residency-aware scheduler: single-flight load, LRU + byte-budget eviction, KeepAlive idle
   unload, optional preload at startup. Eviction (idle-timeout and capacity/LRU alike) never pulls a
   runner out from under an in-flight request — a long-running generation that outlasts KeepAlive, or
@@ -82,6 +87,11 @@ MIT and already win; Mainspring wraps them).
   from a bounded TTL+LRU cache without touching the backend; hits carry `X-Mainspring-Cache: hit` and
   are counted in /metrics (`mainspring_cache_hits_total`). Streaming and non-zero-temperature requests
   bypass it. Enable with `cache_max_entries` (+ optional `cache_ttl_seconds`, default 300s).
+- Path scope (what applies where): the admission pipeline — API-key auth, per-tenant rate + token budgets,
+  the context guardrail, `clamp_max_tokens`, `precise_context`, the concurrency gate + queue, the circuit
+  breaker, per-request timeouts, and cost accounting — applies to **both** the OpenAI endpoints and
+  Anthropic `/v1/messages`. The response cache, request coalescing, retry-with-backoff and model fallback
+  chains run on the OpenAI path only: a `/v1/messages` request is always served by its own backend call.
 - Cost accounting: optional per-model USD pricing (`input_usd_per_mtok` / `output_usd_per_mtok`, 0 =
   local/free) turns real token usage into spend. Cost lands in the usage ledger (`cost_usd`), a
   `mainspring_cost_usd_total{model}` /metrics counter, and per-model + total in /v1/quality — a real
