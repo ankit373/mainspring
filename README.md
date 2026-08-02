@@ -21,7 +21,10 @@ with Ollama and friends are not kernel problems, they are control-plane problems
 - **Silent CPU fallback** — you think you're on the GPU; you aren't, and nothing tells you.
 - **Zero authentication** — tens of thousands of instances sit exposed on the public internet.
 - **Model thrashing / VRAM mismanagement** — evict-and-reload every call; VRAM not reclaimed on switch.
-- **OpenAI-compat gaps** — tool-call `arguments` type flips, streaming-with-tools breaks, `logprobs`/`n` ignored.
+- **OpenAI-compat gaps** — tool-call `arguments` type flips, streaming-with-tools breaks, and `n` is
+  accepted and then ignored: ask for three candidates to rank, get one, and nothing tells you.
+  (`logprobs` used to be on this list. Verified against Ollama + Qwen2.5-Coder 7B it works, and
+  Mainspring passes `logprobs`/`top_logprobs` through intact, so it no longer belongs here.)
 
 Mainspring's thesis: **don't build inference kernels — build the local-inference control plane.**
 Wrap the permissively-licensed engines behind one **versioned, conformance-tested** API and make the
@@ -45,6 +48,13 @@ layer around them **fail loud, VRAM-aware, and governed**.
   different engines and fail over when one is down.
 - **Fail loud, never silently degrade** — `/capabilities` and `X-Mainspring-{Backend,Device,Warning}`
   headers state the *actual* backend, whether it fell back to CPU, and the *effective* context window.
+- **`n` is checked against the answer** — ask for `n: 3` candidates from an engine that never
+  implemented `n` and you get one choice and, everywhere else, no signal. Mainspring counts what came
+  back and reports the shortfall on `X-Mainspring-Warning` (in-band as an inert SSE comment on a
+  stream, whose headers left long before the last frame). It is *observed*, never read off a
+  per-backend support table that would go stale on the next engine release — an engine that does
+  honour `n` is not warned about. The engine's body is forwarded byte-for-byte, and a request without
+  `n`, or with `n: 1`, takes exactly the path it always did.
 - **VRAM-residency-aware scheduling** — single-flight load, byte-budget + LRU eviction, KeepAlive idle
   unload, optional preload.
 - **Reliability** — per-model concurrency limit + bounded queue (503 backpressure), a **circuit breaker**
@@ -93,7 +103,7 @@ queue-wait percentiles, TLS, admin API, request-ID + trace-context, and `/v1/qua
 `go test -race` clean across the tree. See
 [CHANGELOG.md](CHANGELOG.md) and the [releases page](https://github.com/ankit373/mainspring/releases).
 
-**Since v0.2.0 (on `develop`, unreleased)** a full correctness audit of the tree closed 17 issues.
+**Since v0.2.0 (on `develop`, unreleased)** a full correctness audit of the tree closed 18 issues.
 Anthropic `/v1/messages` reached parity with the OpenAI path — it had been skipping the clamp, the
 context guardrail, cost accounting and the circuit breaker while recording a hardcoded `200` for every
 request. The response cache stopped replaying one tenant's request id and quota headroom to another,
@@ -101,7 +111,9 @@ and stopped treating an *omitted* `temperature` as deterministic. A config reloa
 flag-supplied models or silently drop the server into open mode. Truncated responses are no longer
 served as successes or cached, and a client's own disconnect is no longer charged to the circuit
 breaker at any point — while a real timeout still is. Rejections, admin principals and ledger failures
-all now appear in the telemetry that claimed to cover them.
+all now appear in the telemetry that claimed to cover them. And the last unaddressed item in the *Why*
+list above closed: an `n: 3` that an engine answers with one choice is now reported instead of passing
+for a complete answer.
 
 ## Quick start
 

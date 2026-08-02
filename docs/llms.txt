@@ -42,6 +42,20 @@ MIT and already win; Mainspring wraps them).
   stream is already open at 200. A truncated *non-streaming* body is never treated as a result: it is
   not stored in the response cache and not published to coalescing followers, so one severed read can
   never be replayed as a success.
+- `n` verified against the answer, not assumed. OpenAI's `n` asks for several independent candidates in
+  one call; an engine that never implemented it accepts the field, answers 200 with exactly one choice
+  and says nothing, so a caller that wanted three candidates to rank gets one and cannot tell it was
+  denied. Mainspring counts the `choices` that actually came back (distinct `choices[].index` values
+  across the frames, on a stream) and reports a shortfall on `X-Mainspring-Warning` — composed onto any
+  other warning that response already carries, never replacing it. On a stream the status line left long
+  before the last frame, so the same text arrives in-band as an SSE comment
+  (`: X-Mainspring-Warning: n=3 requested but the engine returned 1 choice`), which the event-stream
+  grammar defines as inert: no SDK parses it as an event. There is deliberately **no per-backend support
+  table** — `n` support moves between engine versions, so a table would start lying immediately, and an
+  engine that *does* honour `n` is therefore not warned about. The engine's body is forwarded
+  byte-for-byte either way, `n` is still passed upstream, and a request without `n`, or with `n: 1`,
+  takes exactly the path it took before: nothing on that path parses or buffers the response. Applies to
+  `/v1/chat/completions` and `/v1/completions` (`n` is not part of the Anthropic API or of embeddings).
 - Stop sequences that are answered truthfully. Anthropic reports *which* sequence ended a generation
   (`stop_reason: "stop_sequence"` plus the sequence itself); OpenAI's `finish_reason` says only "stop",
   which it also uses for a natural end, and every engine erases the matched sequence from the text before

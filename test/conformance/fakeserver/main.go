@@ -23,6 +23,12 @@
 //	[[status:NNN]]  reply with HTTP NNN and an error body, before any SSE byte.
 //	[[truncate]]    streaming only: emit a few deltas, then abort the connection
 //	                mid-body with no terminating chunk and no [DONE].
+//	[[honour-n]]    honour the request's `n`: answer with that many independent
+//	                choices (distinct `index` values, one per candidate). Without
+//	                it this server *ignores* `n` and answers with one choice — what
+//	                a real engine that never implemented `n` does, and what
+//	                Mainspring has to detect by counting rather than by consulting
+//	                a per-backend table.
 //
 // No marker means the default scripted behaviour, so the OpenAI scripts are
 // unaffected.
@@ -47,6 +53,7 @@ const (
 	dirEcho     = "[[echo]]"
 	dirTruncate = "[[truncate]]"
 	dirStatus   = "[[status:" // [[status:503]]
+	dirHonourN  = "[[honour-n]]"
 )
 
 func main() {
@@ -93,6 +100,7 @@ func main() {
 // oaiRequest is the slice of the incoming OpenAI body this server steers on.
 type oaiRequest struct {
 	Stream        bool `json:"stream"`
+	N             int  `json:"n"`
 	StreamOptions *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options"`
@@ -128,7 +136,17 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 			echo:     echo,
 			truncate: strings.Contains(prompt, dirTruncate),
 			usage:    req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
+			choices:  choicesFor(req, prompt),
 			raw:      raw,
+		})
+		return
+	}
+
+	if n := choicesFor(req, prompt); n > 1 {
+		writeJSON(w, map[string]any{
+			"id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": "mock-model",
+			"choices": candidates(n),
+			"usage":   map[string]int{"prompt_tokens": 5, "completion_tokens": 4 * n, "total_tokens": 5 + 4*n},
 		})
 		return
 	}
@@ -186,6 +204,30 @@ func promptText(req oaiRequest) string {
 	return b.String()
 }
 
+// choicesFor returns how many choices this request is answered with: the
+// requested `n` when [[honour-n]] asked us to implement it, and 1 otherwise —
+// including when the caller sent n>1, which is exactly the silent denial
+// Mainspring has to notice.
+func choicesFor(req oaiRequest, prompt string) int {
+	if req.N > 1 && strings.Contains(prompt, dirHonourN) {
+		return req.N
+	}
+	return 1
+}
+
+// candidates builds n independent non-streaming choices, each with its own index.
+func candidates(n int) []map[string]any {
+	out := make([]map[string]any, n)
+	for i := range out {
+		out[i] = map[string]any{
+			"index":         i,
+			"message":       map[string]any{"role": "assistant", "content": fmt.Sprintf("Candidate %d from fakeserver.", i)},
+			"finish_reason": "stop",
+		}
+	}
+	return out
+}
+
 // statusDirective returns the HTTP status a [[status:NNN]] marker asks for.
 func statusDirective(prompt string) (int, bool) {
 	_, rest, ok := strings.Cut(prompt, dirStatus)
@@ -209,6 +251,7 @@ type script struct {
 	echo     bool // reply with the body we received
 	truncate bool // abort the connection mid-stream
 	usage    bool // append a stream_options.include_usage chunk
+	choices  int  // distinct choice indices to emit (1 unless [[honour-n]])
 	raw      []byte
 }
 
@@ -226,12 +269,15 @@ func streamChat(w http.ResponseWriter, sc script) {
 		fl.Flush()
 		time.Sleep(2 * time.Millisecond)
 	}
-	base := func(delta map[string]any, finish any) map[string]any {
+	// at emits a chunk for choice index idx; base is the index-0 shorthand every
+	// script but the multi-candidate one needs.
+	at := func(idx int, delta map[string]any, finish any) map[string]any {
 		return map[string]any{
 			"id": "chatcmpl-fake", "object": "chat.completion.chunk", "model": "mock-model",
-			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
+			"choices": []map[string]any{{"index": idx, "delta": delta, "finish_reason": finish}},
 		}
 	}
+	base := func(delta map[string]any, finish any) map[string]any { return at(0, delta, finish) }
 	send(base(map[string]any{"role": "assistant"}, nil))
 
 	if sc.truncate {
@@ -263,10 +309,15 @@ func streamChat(w http.ResponseWriter, sc script) {
 		}}}, nil))
 		send(base(map[string]any{}, "tool_calls"))
 	default:
-		for _, tok := range strings.Fields("Hello from fakeserver .") {
-			send(base(map[string]any{"content": tok + " "}, nil))
+		// One candidate per requested choice index. sc.choices is 1 unless
+		// [[honour-n]] asked for `n`, so an engine that ignores `n` emits index 0
+		// only — which is what the caller must be told about.
+		for idx := 0; idx < sc.choices; idx++ {
+			for _, tok := range strings.Fields("Hello from fakeserver .") {
+				send(at(idx, map[string]any{"content": tok + " "}, nil))
+			}
+			send(at(idx, map[string]any{}, "stop"))
 		}
-		send(base(map[string]any{}, "stop"))
 	}
 
 	// stream_options.include_usage: a final choices-less chunk carrying real token

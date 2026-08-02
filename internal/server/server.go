@@ -345,8 +345,12 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// N rides along on the peek that already parses this body: reading it here is
+	// free, and it is the only thing that decides whether the response side does
+	// any work at all (see newChoiceCheck / choiceCheck).
 	var peek struct {
 		Model string `json:"model"`
+		N     *int   `json:"n"`
 	}
 	if err := json.Unmarshal(body, &peek); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -427,7 +431,7 @@ func (s *Server) inference(w http.ResponseWriter, r *http.Request) {
 	// idle timer and LRU eviction never pull it out from under a long-running
 	// request (e.g. one that streams longer than KeepAlive).
 	s.sched.MarkBusy(served)
-	pr := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra)
+	pr := s.proxyTo(cap, r, runner.BaseURL(), upBody, extra, newChoiceCheck(peek.N, r.URL.Path))
 	s.sched.MarkIdle(served)
 	// A 5xx from the upstream counts as a backend failure; 2xx/4xx are healthy
 	// (4xx is a client error, not the backend's fault). backendFailed covers what
@@ -534,7 +538,7 @@ func (s *Server) failLoudHeaders(ctx context.Context, runner backend.Runner) map
 	}
 	if c.Degraded() {
 		msg := joinWarnings(c.Warnings)
-		h["X-Mainspring-Warning"] = msg
+		h[warningHeader] = msg
 		log.Printf("DEGRADED model=%s device=%s: %s", c.Model, c.Device, msg)
 	}
 	return h

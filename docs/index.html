@@ -636,7 +636,7 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
     </ul>
     <ul class="faults">
       <li><strong>VRAM thrashing</strong>Evict-and-reload on every call; a long generation gets its own runner killed out from under it mid-stream.</li>
-      <li><strong>OpenAI-compat gaps</strong>Tool-call and streaming edge cases break real SDKs — the ones your code is already written against.</li>
+      <li><strong>OpenAI-compat gaps</strong>Tool-call and streaming edge cases break real SDKs — the ones your code is already written against. Ask for three candidates with n and you get one, with a 200 and no signal.</li>
       <li><strong>No spend signal</strong>Local is "free" until you're choosing between a local head and a paid one and have no number to compare.</li>
     </ul>
   </div>
@@ -717,6 +717,7 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
       <div class="card"><h3>Graceful clamp</h3><p>Rather than rejecting an over-budget <code>max_tokens</code>, opt in to shrink it to the room actually left and report the change on <code>X-Mainspring-Clamped</code>.</p></div>
       <div class="card"><h3>Embeddings counted too</h3><p>The guardrail, clamp and precise counting all read an embeddings <code>input</code> field — not just <code>messages</code>. A large embeddings call trips the guardrail instead of measuring as zero.</p></div>
       <div class="card"><h3>No fabricated endings</h3><p>An upstream error is an error — a backend 500 becomes <code>502 upstream_error</code>, never an empty success. A generation cut mid-stream ends with a terminal error event on both dialects, not a stop reason it didn't earn, and the breaker is told it failed even though the stream already went out at 200. A truncated non-streaming body is never cached and never handed to coalescing followers.</p></div>
+      <div class="card"><h3><code>n</code> is counted, not assumed</h3><p>Ask an engine that never implemented <code>n</code> for <code>n: 3</code> candidates and it returns one choice, a 200, and nothing else. Mainspring counts the <code>choices</code> that actually came back and reports the shortfall on <code>X-Mainspring-Warning</code> — in-band as an inert SSE comment on a stream, whose status line left long before the last frame. <span class="hint">Observed, never read off a per-backend table that would go stale on the next engine release: an engine that <em>does</em> honour <code>n</code> is not warned about, the body is forwarded byte-for-byte, and a request without <code>n</code> takes exactly the path it always did.</span></p></div>
       <div class="card"><h3>Your Ctrl-C is not an outage</h3><p>A caller that cancels its own request is not a backend failure, so client disconnects can't open the circuit for every tenant — and a caller cancelled while queued gets no misleading <code>503</code> written to a connection that's already gone. A real timeout still counts.</p></div>
     </div>
   </div>
