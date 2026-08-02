@@ -656,11 +656,13 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
 <span class="dim">content-type: application/json</span>
 
 {"choices":[{"message":{"role":"assistant",
-  "content":"..."}}]}</pre>
+  "content":"..."}}],
+ "usage":{"prompt_tokens":9014,
+          "completion_tokens":218}}</pre>
       <div class="pane-f"><ul>
         <li>Did that run on the GPU, or fall back to CPU</li>
         <li>Did my 9,000-token prompt fit, or get truncated</li>
-        <li>What did it actually cost me</li>
+        <li>And if it degraded — would I ever find out</li>
       </ul></div>
     </div>
 
@@ -672,14 +674,18 @@ footer .meta{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
 <span class="hdr">X-Mainspring-Device</span>: <span class="warn">cpu</span>
 <span class="hdr">X-Mainspring-Warning</span>: <span class="warn">GPU offload requested but
   engine loaded on CPU (silent fallback)</span>
-<span class="hdr">X-Mainspring-Context-Method</span>: <span class="ok">exact</span>
-<span class="hdr">X-Mainspring-Tokens-Input</span>: 9014
-<span class="hdr">X-Mainspring-Tokens-Output</span>: 218
+<span class="hdr">X-Mainspring-Context-Warning</span>: <span class="warn">prompt (9014 tokens)
+  + max_tokens 512 exceeds model context
+  window of 8192 tokens</span>
 
 {"choices":[{"message":{"role":"assistant",
-  "content":"..."}}]}</pre>
-      <div class="pane-f">The body is byte-for-byte identical. <em>The difference is that the failure
-        is now impossible to miss</em> — and it's on every response, not behind a debug flag.</div>
+  "content":"..."}}],
+ "usage":{"prompt_tokens":9014,
+          "completion_tokens":218}}</pre>
+      <div class="pane-f">The body is byte-for-byte what the engine returned — token counts included.
+        <em>The difference is that the two failures are now impossible to miss.</em> Backend, Device and
+        Warning ride on every response, not behind a debug flag. <span class="hint">The context header
+        appears once you've told Mainspring the model's window (<code>ctx</code>).</span></div>
     </div>
   </div>
 </div></section>

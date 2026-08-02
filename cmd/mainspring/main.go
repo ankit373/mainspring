@@ -178,7 +178,7 @@ func checkModels(cfg config.Config, present map[string]bool) []string {
 		switch {
 		case !present[b]:
 			lines = append(lines, fmt.Sprintf("✗ %s → %s (backend not available)", m.ID, b))
-		case (b == "llamacpp" || b == "mlx") && m.Path != "" && !pathExists(m.Path):
+		case !isAdoptBackend(b) && m.Path != "" && !pathExists(m.Path):
 			lines = append(lines, fmt.Sprintf("✗ %s → %s (weights not found: %s)", m.ID, b, m.Path))
 		default:
 			lines = append(lines, fmt.Sprintf("✓ %s → %s", m.ID, b))
@@ -340,7 +340,7 @@ func cmdServe() *cobra.Command {
 				cfg.TLSKey = tlsKey
 			}
 			for _, mf := range modelFlags {
-				m, err := parseModelFlag(mf)
+				m, err := parseModelFlag(mf, defaultBackendName(cfg))
 				if err != nil {
 					return err
 				}
@@ -354,7 +354,7 @@ func cmdServe() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", ":11500", "listen address")
-	cmd.Flags().StringArrayVar(&modelFlags, "model", nil, "model as id=/path/to/weights.gguf (repeatable)")
+	cmd.Flags().StringArrayVar(&modelFlags, "model", nil, "model as id=/path/to/weights.gguf, or id= on an adopt-only backend (repeatable)")
 	cmd.Flags().StringArrayVar(&apiKeys, "api-key", nil, "require this API key (repeatable); if none set, server runs OPEN")
 	cmd.Flags().IntVar(&keepAlive, "keep-alive", 300, "seconds to keep an idle model loaded (0 = never unload)")
 	cmd.Flags().IntVar(&maxLoaded, "max-loaded", 1, "max models resident at once by count (LRU-evicted beyond this)")
@@ -362,7 +362,7 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().IntVar(&maxInflight, "max-inflight", 0, "max concurrent requests per model (0 = unbounded)")
 	cmd.Flags().IntVar(&maxQueue, "max-queue", 0, "max queued waiters per model before returning 503")
 	cmd.Flags().StringVar(&usageLedger, "usage-ledger", "", "JSONL usage ledger path (empty = default location, \"off\" = disable)")
-	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | ollama | mlx")
+	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | mlx | ollama | lmstudio | llamafile | gpt4all")
 	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "", "Ollama daemon URL when --backend ollama")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
 	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate path (with --tls-key => serve HTTPS)")
@@ -854,9 +854,13 @@ func boolPtrDiffers(a, b *bool) bool {
 	return a != nil && *a != *b
 }
 
-// adoptBackendNames are the detect-and-adopt backends that can enumerate their
-// own models for auto-discovery.
+// adoptBackendNames are the detect-and-adopt backends: they hold their own
+// weights (so a model needs no path) and can enumerate their own models for
+// auto-discovery. Every other backend loads weights from a file we point it at.
 var adoptBackendNames = []string{"ollama", "lmstudio", "llamafile", "gpt4all"}
+
+// isAdoptBackend reports whether name is an adopt-only backend.
+func isAdoptBackend(name string) bool { return slices.Contains(adoptBackendNames, name) }
 
 // discoverModels queries each present backend that implements backend.ModelLister
 // and returns specs for models not already configured (configured wins on an id
@@ -997,12 +1001,18 @@ func buildAuth(cfg config.Config) *auth.Authenticator {
 	return auth.NewTenants(authTenants(cfg))
 }
 
-// parseModelFlag parses "id=/path/to/weights.gguf".
-func parseModelFlag(s string) (config.Model, error) {
+// parseModelFlag parses "id=/path/to/weights.gguf" for the backend that will
+// serve it. The path may be empty ("id=") on an adopt-only backend: that daemon
+// already holds the weights, so there is no path to give.
+func parseModelFlag(s, backendName string) (config.Model, error) {
 	id, path, ok := strings.Cut(s, "=")
 	id, path = strings.TrimSpace(id), strings.TrimSpace(path)
-	if !ok || id == "" || path == "" {
+	if !ok || id == "" {
 		return config.Model{}, fmt.Errorf("invalid --model %q: want id=/path/to/weights.gguf", s)
+	}
+	if path == "" && !isAdoptBackend(backendName) {
+		return config.Model{}, fmt.Errorf("invalid --model %q: backend %s loads the weights itself, so it needs a path (want id=/path/to/weights.gguf); an empty path is only valid on the adopt-only backends: %s",
+			s, backendName, strings.Join(adoptBackendNames, ", "))
 	}
 	return config.Model{ID: id, Path: path}, nil
 }
