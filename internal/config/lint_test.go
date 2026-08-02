@@ -146,3 +146,62 @@ func TestLintWarningString(t *testing.T) {
 		t.Fatalf("per-model String() = %q", got)
 	}
 }
+
+// TestLintPreciseWithoutEnforceIsInert — precise_context only refines the
+// guardrail's prompt count, so with ctx set but no guardrail to refine, exact
+// tokenization is computed for nothing.
+func TestLintPreciseWithoutEnforceIsInert(t *testing.T) {
+	cfg := Config{
+		PreciseContext: true,
+		Models:         []Model{{ID: "m1", Ctx: 4096}},
+	}
+	got := cfg.Lint()
+	if len(got) != 1 || !strings.Contains(got[0].Message, "without enforce_context") {
+		t.Fatalf("want one precise-without-enforce warning, got %v", got)
+	}
+	// With the guardrail on, it is doing its job — no warning.
+	cfg.EnforceContext = true
+	if got := cfg.Lint(); len(got) != 0 {
+		t.Fatalf("precise_context refines an active guardrail — want no warnings, got %v", got)
+	}
+}
+
+// TestLintAPIKeysIgnoredWhenTenantsSet — authTenants returns early on tenants, so
+// every api_keys entry silently authenticates nothing.
+func TestLintAPIKeysIgnoredWhenTenantsSet(t *testing.T) {
+	cfg := Config{
+		APIKeys: []string{"k1", "k2"},
+		Tenants: []Tenant{{Name: "t1", Key: "tk", Role: "admin"}},
+	}
+	got := cfg.Lint()
+	if len(got) != 1 || !strings.Contains(got[0].Message, "api_keys is ignored") {
+		t.Fatalf("want the ignored-api_keys warning, got %v", got)
+	}
+}
+
+// TestLintUnknownTenantRole — an unrecognised role silently becomes "inference",
+// so a typo'd "admin" quietly strips a tenant's privileges.
+func TestLintUnknownTenantRole(t *testing.T) {
+	cfg := Config{Tenants: []Tenant{{Name: "ops", Key: "k", Role: "Admin"}}}
+	got := cfg.Lint()
+	if len(got) != 1 || !strings.Contains(got[0].Message, "unknown role") {
+		t.Fatalf("want an unknown-role warning, got %v", got)
+	}
+	if !strings.Contains(got[0].Message, "ops") || !strings.Contains(got[0].Message, "Admin") {
+		t.Errorf("warning should name the tenant and the bad value: %v", got[0].Message)
+	}
+	for _, ok := range []string{"", "admin", "inference"} {
+		cfg := Config{Tenants: []Tenant{{Name: "t", Key: "k", Role: ok}}}
+		if got := cfg.Lint(); len(got) != 0 {
+			t.Errorf("role %q is valid, got %v", ok, got)
+		}
+	}
+}
+
+func TestLintTenantWithEmptyKey(t *testing.T) {
+	cfg := Config{Tenants: []Tenant{{Name: "ghost", Role: "admin"}}}
+	got := cfg.Lint()
+	if len(got) != 1 || !strings.Contains(got[0].Message, "empty key") {
+		t.Fatalf("want an empty-key warning, got %v", got)
+	}
+}

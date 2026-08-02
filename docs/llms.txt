@@ -139,6 +139,12 @@ MIT and already win; Mainspring wraps them).
   re-apply — timeouts, cache, guardrail, clamp, retry, coalesce, breaker, per-model cost/fallback
   overrides, and more — is logged as requiring a restart when it changes, rather than silently keeping
   the old value with no explanation.
+- Reload never weakens the running server: settings the config file cannot express are carried across
+  it rather than dropped. Models given with `--model` and models found by auto-discovery survive a
+  reload (the file wins on an id clash), and credentials given with `--api-key` are preserved. A reload
+  whose config would leave the server with no tenants at all — i.e. would switch a running,
+  authenticated server into open mode — is **refused** with an error and changes nothing, because the
+  check runs before anything is applied. Open mode is only ever entered at startup, deliberately.
 
 ## Backends
 

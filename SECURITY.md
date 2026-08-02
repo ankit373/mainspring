@@ -54,6 +54,13 @@ Exposing an open-mode instance to a network you do not control hands over both f
 hardware and administrative control of the server. Configure keys before binding to anything other
 than loopback.
 
+**Open mode is only ever reached at startup.** A config reload — `SIGHUP` or `POST /admin/reload` —
+cannot take an authenticated server into it. Credentials supplied with `--api-key` are carried across
+a reload (the config file has never seen them), and a reload whose config would leave no tenants at
+all is **refused** with an error rather than applied, leaving the running credentials in place. The
+refusal happens before anything else is touched, so a rejected reload changes nothing. Opening a
+server is therefore always a deliberate act: stop it and start it again without keys.
+
 **Backends are subprocesses or local daemons.** Mainspring supervises engines such as
 `llama-server` and adopts local daemons such as Ollama. It inherits their security properties; it
 does not sandbox them. Model files are executed by those engines, so treat an untrusted model file
