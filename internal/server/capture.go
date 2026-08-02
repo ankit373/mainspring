@@ -55,7 +55,7 @@ func (c *captureWriter) WriteHeader(code int) {
 	}
 	c.status = code
 	c.wroteHeader = true
-	c.stream = bytes.Contains([]byte(c.Header().Get("Content-Type")), []byte("event-stream"))
+	c.stream = isEventStream(c.Header().Get("Content-Type"))
 	if c.recordBody {
 		// Only the payload-describing subset: this snapshot is replayed to other
 		// callers, and by now the middleware has written this caller's request id

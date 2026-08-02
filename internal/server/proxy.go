@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/ankit373/mainspring/internal/apierr"
@@ -88,7 +87,11 @@ func clientGone(ctx context.Context) bool {
 // exponential backoff up to s.retryMax additional attempts. Retry is always
 // decided *before* any byte reaches the client, so it is safe for both
 // streaming and non-streaming responses.
-func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string, body []byte, extra map[string]string) proxyResult {
+//
+// cc is non-nil only when the caller asked for n>1 candidates, and is what makes
+// an engine that quietly returned fewer say so. Nil — the overwhelmingly common
+// case — leaves this a pure byte-shoveller.
+func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string, body []byte, extra map[string]string, cc *choiceCheck) proxyResult {
 	// Apply the fail-loud extras (backend, device, degraded warning, served model)
 	// to the header map once, up front. Applying them only on the commit path is
 	// what left every error return below — timeout, 502, retries exhausted —
@@ -134,8 +137,8 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, baseURL string,
 		if attempt > 0 {
 			w.Header().Set("X-Mainspring-Retries", strconv.Itoa(attempt))
 		}
-		copyErr := s.commitResponse(w, resp)
-		stream := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+		copyErr := s.commitResponse(w, resp, cc)
+		stream := isEventStream(resp.Header.Get("Content-Type"))
 		_ = resp.Body.Close()
 		if copyErr == nil {
 			return proxyResult{retries: attempt}
@@ -191,7 +194,14 @@ func (s *Server) upstreamDo(r *http.Request, baseURL string, body []byte) (*http
 // on the header map (see proxyTo) and win: a header we set describes this hop,
 // so an upstream that echoes the same name — Mainspring proxying Mainspring —
 // must not append a second, stale value.
-func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response) error {
+//
+// cc (nil unless the caller asked for n>1) is the one thing that reads the body
+// on the way past: a non-streaming answer is buffered before the status line so a
+// shortfall can still be reported in a header, and a stream is counted as it
+// flows. Its warning composes onto whatever the header already carries, so a
+// degraded device and a short `n` are both reported.
+func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response, cc *choiceCheck) error {
+	src, warn, preErr := cc.observe(resp)
 	for k, vs := range resp.Header {
 		ck := http.CanonicalHeaderKey(k)
 		if hopByHop[ck] || w.Header().Get(ck) != "" {
@@ -201,8 +211,19 @@ func (s *Server) commitResponse(w http.ResponseWriter, resp *http.Response) erro
 			w.Header().Add(ck, v)
 		}
 	}
+	applyShortfall(w.Header(), warn)
 	w.WriteHeader(resp.StatusCode)
-	return flushCopy(w, resp.Body)
+	if preErr != nil {
+		// The prefix we did read still belongs to the client; the read error is what
+		// marks the answer incomplete.
+		_ = flushCopy(w, src)
+		return preErr
+	}
+	if err := flushCopy(w, src); err != nil {
+		return err
+	}
+	cc.emitShortfall(w)
+	return nil
 }
 
 // sleepBackoff waits an exponential delay before retry `attempt` (1-based),
