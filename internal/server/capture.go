@@ -57,7 +57,10 @@ func (c *captureWriter) WriteHeader(code int) {
 	c.wroteHeader = true
 	c.stream = bytes.Contains([]byte(c.Header().Get("Content-Type")), []byte("event-stream"))
 	if c.recordBody {
-		c.snapHeader = c.Header().Clone()
+		// Only the payload-describing subset: this snapshot is replayed to other
+		// callers, and by now the middleware has written this caller's request id
+		// and quota headroom into the same map. See replayHeaderAllow.
+		c.snapHeader = replayHeader(c.Header())
 	}
 	c.ResponseWriter.WriteHeader(code)
 }
