@@ -9,8 +9,8 @@ package install
 
 import (
 	"context"
-	_ "embed"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
