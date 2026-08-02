@@ -262,3 +262,41 @@ func TestLintFlagsPathOnAnAdoptBackend(t *testing.T) {
 		})
 	}
 }
+
+// mlx_lm.server has no context-window flag (verified against 0.31.3, whose only
+// related option is --max-tokens, the generation cap). ctx used to be passed as
+// --max-tokens, silently reconfiguring generation instead. It is no longer sent
+// at all, so it must be reported rather than quietly doing nothing at the engine
+// — the failure mode #197 was about.
+func TestLintMLXCtxIsNotSilentlyDropped(t *testing.T) {
+	cfg := Config{
+		Backend: "mlx",
+		Models:  []Model{{ID: "m1", Ctx: 8192}},
+	}
+	warnings := cfg.Lint()
+	if len(warnings) != 1 || warnings[0].Model != "m1" {
+		t.Fatalf("expected one warning for m1, got %+v", warnings)
+	}
+	if !strings.Contains(warnings[0].Message, "ctx cannot be applied to the mlx backend") {
+		t.Errorf("warning should name the cause, got: %s", warnings[0].Message)
+	}
+	// It is a caveat, not "ignored": Mainspring's own guardrail still uses ctx.
+	if !strings.Contains(warnings[0].Message, "guardrail") {
+		t.Errorf("warning should say Mainspring still enforces it, got: %s", warnings[0].Message)
+	}
+
+	// Per-model backend selection is honoured too.
+	perModel := Config{
+		Backend: "llamacpp",
+		Models:  []Model{{ID: "a", Ctx: 4096}, {ID: "b", Backend: "mlx", Ctx: 4096}},
+	}
+	w := perModel.Lint()
+	if len(w) != 1 || w[0].Model != "b" {
+		t.Fatalf("only the mlx model should warn, got %+v", w)
+	}
+
+	// No ctx set, nothing to warn about.
+	if w := (Config{Backend: "mlx", Models: []Model{{ID: "m1"}}}).Lint(); len(w) != 0 {
+		t.Errorf("mlx without ctx should not warn, got %+v", w)
+	}
+}

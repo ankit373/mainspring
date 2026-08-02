@@ -236,6 +236,10 @@ MIT and already win; Mainspring wraps them).
 ## Backends
 
 - Managed (subprocess, opt-in install): `llamacpp` (llama-server), `mlx` (mlx_lm.server, Apple Silicon).
+  Backend caveat: mlx_lm.server has no context-window flag, so `ctx` cannot be handed to it. Mainspring's
+  own guardrail still enforces `ctx`, but the engine is not told and reports no effective window, so
+  `effective_ctx` is 0 (unknown) for mlx models rather than an unverified echo of the request. Startup
+  and `mainspring doctor` warn when an mlx model sets `ctx`.
 - Adopt-only (detect a running server; never installed): `ollama` (:11434), `lmstudio` (:1234),
   `llamafile` (:8080), `gpt4all` (:4891).
 

@@ -4,21 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-
-	"github.com/ankit373/mainspring/internal/backend"
 )
 
-func TestBuildArgs(t *testing.T) {
-	args := buildArgs(backend.ModelSpec{ID: "m", Path: "/models/m", CtxSize: 8192, ExtraArgs: []string{"--trust-remote-code"}}, "127.0.0.1", 9999)
-	joined := strings.Join(args, " ")
-	for _, want := range []string{"-m mlx_lm.server", "--model /models/m", "--host 127.0.0.1", "--port 9999", "--max-tokens 8192", "--trust-remote-code"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("args missing %q: %v", want, args)
-		}
-	}
-}
+// buildArgs' full contract lives in runner_test.go
+// (TestBuildArgsDoesNotPassCtxAsAGenerationCap). The version that used to live
+// here asserted `--max-tokens 8192` from `CtxSize: 8192`, which locked in the
+// bug fixed in #213 — a test can make a wrong mapping look deliberate.
 
 func TestDetectMissingPython(t *testing.T) {
 	av := New("definitely-not-a-real-python-xyz").Detect(context.Background())
