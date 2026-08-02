@@ -4,7 +4,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -210,8 +213,18 @@ func Load(path string) (Config, error) {
 		}
 		return cfg, fmt.Errorf("read config %s: %w", path, err)
 	}
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse config %s: %w", path, err)
+	// Decoded strictly: a key this struct does not know is refused, not dropped.
+	// Dropping it is how `enfore_context: true` used to start a server with the
+	// guardrail off and say nothing — see strict.go.
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			// An empty (or comments-only) file is a config that sets nothing, which
+			// is what Default() already is.
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("parse config %s: %w", path, explainDecodeError(err))
 	}
 	return cfg, nil
 }

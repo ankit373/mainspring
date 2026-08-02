@@ -211,3 +211,34 @@ func TestResolveBool(t *testing.T) {
 		}
 	}
 }
+
+// A reload is the worse version of the silent-typo bug: the operator is watching
+// for a change to take effect, and a dropped key means it quietly did not. The
+// reload must be refused with the running config left exactly as it was — the
+// same contract as a reload that would leave the server unauthenticated.
+func TestReloadRefusesAConfigWithAnUnknownKey(t *testing.T) {
+	rig := newReloadRig(t, config.Config{
+		Models: []config.Model{{ID: "m1", Path: "/m1.gguf", Backend: "llamacpp"}},
+	}, flagSources{})
+
+	rig.writeConfig(t, `enfore_context: true
+models:
+  - id: m2
+    path: /m2.gguf
+    backend: llamacpp
+`)
+	err := rig.reload()
+	if err == nil {
+		t.Fatal("reload accepted a config with a misspelled key")
+	}
+	if !strings.Contains(err.Error(), "enfore_context") {
+		t.Errorf("error does not name the offending key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "keeping current config") {
+		t.Errorf("error does not say the running config was kept: %v", err)
+	}
+	// The refusal must have changed nothing.
+	if got := rig.modelIDs(); !slices.Equal(got, []string{"m1"}) {
+		t.Errorf("models = %v after a refused reload, want [m1]", got)
+	}
+}
