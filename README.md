@@ -83,6 +83,16 @@ queue-wait percentiles, TLS, admin API, request-ID + trace-context, and `/v1/qua
 `go test -race` clean across the tree. See
 [CHANGELOG.md](CHANGELOG.md) and the [releases page](https://github.com/ankit373/mainspring/releases).
 
+**Since v0.2.0 (on `develop`, unreleased)** a full correctness audit of the tree closed 17 issues.
+Anthropic `/v1/messages` reached parity with the OpenAI path — it had been skipping the clamp, the
+context guardrail, cost accounting and the circuit breaker while recording a hardcoded `200` for every
+request. The response cache stopped replaying one tenant's request id and quota headroom to another,
+and stopped treating an *omitted* `temperature` as deterministic. A config reload can no longer wipe
+flag-supplied models or silently drop the server into open mode. Truncated responses are no longer
+served as successes or cached, and a client's own disconnect is no longer charged to the circuit
+breaker at any point — while a real timeout still is. Rejections, admin principals and ledger failures
+all now appear in the telemetry that claimed to cover them.
+
 ## Quick start
 
 ```bash
