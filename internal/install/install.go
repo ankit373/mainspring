@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/ankit373/mainspring/internal/util"
 )
 
 //go:embed manifest.json
@@ -64,24 +66,20 @@ type Spec struct {
 // PlatformKey is "os/arch", e.g. "darwin/arm64".
 func PlatformKey() string { return runtime.GOOS + "/" + runtime.GOARCH }
 
-// binaryName maps a backend to the executable it installs.
+// binaryName maps a backend to the executable it installs, with the platform's
+// executable suffix. Without it, a Windows install writes a file with no .exe
+// extension: the install reports success and the binary then cannot be run.
 func binaryName(backend string) string {
 	switch backend {
 	case "llamacpp":
-		return "llama-server"
+		return util.ExeName("llama-server")
 	default:
-		return backend
+		return util.ExeName(backend)
 	}
 }
 
-// ManagedDir is ~/.config/mainspring/bin.
-func ManagedDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "bin"
-	}
-	return filepath.Join(home, ".config", "mainspring", "bin")
-}
+// ManagedDir is the bin directory inside util.ConfigDir().
+func ManagedDir() string { return util.ConfigPath("bin") }
 
 func receiptPath(backend string) string {
 	return filepath.Join(ManagedDir(), backend, "receipt.json")
@@ -112,10 +110,7 @@ func LoadManifest(path string) (Manifest, error) {
 		return m, fmt.Errorf("embedded manifest: %w", err)
 	}
 	if path == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			path = filepath.Join(home, ".config", "mainspring", "install.json")
-		}
+		path = util.ConfigPath("install.json")
 	}
 	if path != "" {
 		if b, err := os.ReadFile(path); err == nil {

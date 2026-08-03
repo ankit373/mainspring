@@ -8,13 +8,26 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
-// withHome points ManagedDir at a temp HOME for the duration of a test.
+// withHome points ManagedDir at a throwaway directory for the duration of a test.
+//
+// Setting HOME alone is not enough: on Windows os.UserHomeDir reads %USERPROFILE%
+// and os.UserConfigDir reads %AppData%, so these tests were not isolated there at
+// all — they wrote into the real user profile and leaked into each other. That is
+// how a "failed install left llama-server.exe behind" failure appeared: the file
+// was left by the *previous* test.
 func withHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", dir)
+		t.Setenv("AppData", dir)
+	}
 }
 
 func serveBytes(t *testing.T, body []byte) *httptest.Server {
@@ -45,12 +58,18 @@ func TestInstallVerifiesAndRecords(t *testing.T) {
 	if rec.SHA256 != sha256hex(payload) {
 		t.Fatalf("receipt sha mismatch: %s", rec.SHA256)
 	}
-	// Binary present + executable.
+	// Binary present and runnable. What "runnable" means is platform-specific:
+	// Windows has no execute bit (os.Chmod there only toggles read-only), and
+	// executability comes from the .exe extension instead.
 	fi, err := os.Stat(rec.Path)
 	if err != nil {
 		t.Fatalf("installed binary missing: %v", err)
 	}
-	if fi.Mode()&0o111 == 0 {
+	if runtime.GOOS == "windows" {
+		if filepath.Ext(rec.Path) != ".exe" {
+			t.Fatalf("installed binary %q needs a .exe suffix to be executable", rec.Path)
+		}
+	} else if fi.Mode()&0o111 == 0 {
 		t.Fatal("installed binary should be executable")
 	}
 	// ManagedPath resolves the receipt.

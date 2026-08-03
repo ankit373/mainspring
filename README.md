@@ -88,6 +88,11 @@ layer around them **fail loud, VRAM-aware, and governed**.
   engine builds: you point it at
   the artifact you want with `--url` + `--sha256`, or at your own manifest (optionally ed25519-signed
   via `--pubkey`). Shipping a curated, pinned manifest is tracked separately.
+- **Runs on Linux, macOS and Windows**, amd64 and arm64 — a `CGO_ENABLED=0` static binary with no libc
+  to match, plus a real multi-arch container manifest so `docker pull` picks the right image itself.
+  Every platform is exercised in CI. Two honest caveats on Windows: **MLX is Apple-Silicon-only** by
+  construction and reports itself unavailable, and **there is no `SIGHUP`** — the server says so at
+  startup and `POST /admin/reload` does the same job.
 - **Deploy anywhere** — a single static binary, a distroless container image, and a Helm chart
   (HPA / ServiceMonitor / GPU node scheduling).
 
@@ -118,6 +123,39 @@ breaker at any point — while a real timeout still is. Rejections, admin princi
 all now appear in the telemetry that claimed to cover them. And the last unaddressed item in the *Why*
 list above closed: an `n: 3` that an engine answers with one choice is now reported instead of passing
 for a complete answer.
+
+## Install
+
+| Platform | amd64 | arm64 | How |
+|---|---|---|---|
+| Linux | ✅ | ✅ | `.rpm` · `.deb` · `.apk` · `.tar.gz` |
+| macOS (Intel / Apple Silicon) | ✅ | ✅ | `.tar.gz` |
+| Windows | ✅ | ✅ | `.zip` |
+| Container | ✅ | ✅ | `ghcr.io/ankit373/mainspring` (multi-arch manifest) |
+
+```bash
+# RHEL / Fedora / Rocky / Alma
+sudo dnf install ./mainspring_<version>_linux_amd64.rpm
+# Debian / Ubuntu
+sudo apt install ./mainspring_<version>_linux_amd64.deb
+# Alpine
+sudo apk add --allow-untrusted ./mainspring_<version>_linux_amd64.apk
+
+# The packages install a systemd unit and /etc/mainspring/config.yaml
+sudo systemctl enable --now mainspring
+sudo systemctl reload mainspring     # after editing the config
+```
+
+Every other platform: download an archive from
+[releases](https://github.com/ankit373/mainspring/releases), or `go build ./cmd/mainspring`.
+
+**One Linux binary covers every distribution.** The build is `CGO_ENABLED=0` with no `PT_INTERP` and no
+`PT_DYNAMIC` — no dynamic loader, no libc to match — so the same artifact runs on RHEL, Fedora, Rocky,
+Alma, Debian, Ubuntu, SUSE and Alpine. The packages differ only in how each distribution expects software
+to be installed and supervised.
+
+Upgrades never overwrite `/etc/mainspring/config.yaml`: it is registered as a config file, so `dpkg`
+prompts and `rpm` writes `.rpmnew` instead of replacing your edits.
 
 ## Quick start
 
