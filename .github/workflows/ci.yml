@@ -84,6 +84,22 @@ jobs:
           version: "~> v2"
           args: check
 
+  # The release path only executes during a release, so a typo in it is invisible
+  # until it costs a release — which is what happened in #227. actionlint resolves
+  # `needs.<job>.outputs.*`, reusable-workflow inputs and `inputs.*` types against
+  # their declarations, and shellchecks every `run:` block, so those typos fail here
+  # instead.
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint workflows
+        run: |
+          version=1.7.12
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            | tar -xz -C /tmp actionlint
+          /tmp/actionlint -color
+
   helm:
     runs-on: ubuntu-latest
     steps:
@@ -99,6 +115,7 @@ jobs:
         run: go install github.com/yannh/kubeconform/cmd/kubeconform@latest
       - name: Validate the chart
         run: |
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          export PATH="$PATH:$(go env GOPATH)/bin"
+          gopath="$(go env GOPATH)"
+          echo "${gopath}/bin" >> "$GITHUB_PATH"
+          export PATH="${PATH}:${gopath}/bin"
           ./deploy/helm/validate.sh

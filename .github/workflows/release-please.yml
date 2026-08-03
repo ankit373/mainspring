@@ -4,15 +4,74 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # #227 was a silent skip, so don't let its replacement become one. The build
+      # gate reads `release_created` and `tag_name`, which the action only emits
+      # unprefixed because our manifest package path is ".". If that ever changes,
+      # this fails loudly rather than quietly building nothing.
+      - name: Assert the outputs the build gate depends on
+        env:
+          RELEASES_CREATED: ${{ steps.rp.outputs.releases_created }}
+          RELEASE_CREATED: ${{ steps.rp.outputs.release_created }}
+          TAG_NAME: ${{ steps.rp.outputs.tag_name }}
+        run: |
+          if [ "$RELEASES_CREATED" != "true" ]; then
+            echo "No release this run — nothing to build."
+            exit 0
+          fi
+          if [ "$RELEASE_CREATED" != "true" ]; then
+            echo "::error::releases_created=true but release_created='$RELEASE_CREATED' — the build gate would skip and ship nothing"
+            exit 1
+          fi
+          if [ -z "$TAG_NAME" ]; then
+            echo "::error::releases_created=true but tag_name is empty — the build would target no tag"
+            exit 1
+          fi
+          echo "Release $TAG_NAME created; the build gate will fire."
+
+  # Build the release here instead of waiting for the tag-push event. release-please
+  # creates the tag with the default GITHUB_TOKEN, and GitHub never fires workflows for
+  # those events, so `release.yml`'s tag trigger never fired once in four releases
+  # (#227). Calling the workflow sidesteps that entirely and needs no PAT.
+  build:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+
+  # The guard, and the real lesson of #227: a tag that shipped nothing looked exactly
+  # like a tag that shipped everything. `always()` is load-bearing — this has to run
+  # even when `build` is skipped, because a silently skipped build is the failure being
+  # guarded against. It checks the release users can see, not the build log.
+  verify:
+    needs: [release-please, build]
+    if: ${{ always() && needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: .github/scripts/verify-release.sh "$TAG"

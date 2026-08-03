@@ -1,8 +1,35 @@
 name: release
 
+# release-please creates the tag using the default GITHUB_TOKEN, and GitHub does not
+# fire workflows for events created by that token. So `push: tags` alone never built a
+# release — every release up to v0.4.0 was built only because a human deleted and
+# re-pushed the tag (#227). release-please.yml now calls this workflow directly, which
+# is not subject to that restriction and needs no PAT.
+#
+#   workflow_call     — release-please, immediately after it creates the release
+#   push: tags        — a tag pushed by a human
+#   workflow_dispatch — rebuild an existing tag, optionally without publishing
+#
+# `inputs.tag` is empty on a tag push, where the ref is already the tag itself.
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v1.2.3."
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v1.2.3."
+        required: true
+        type: string
+      dry_run:
+        description: "Build every artifact but publish nothing."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -15,6 +42,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
@@ -24,7 +52,7 @@ jobs:
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean ${{ inputs.dry_run && '--skip=publish' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -32,31 +60,62 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags are needed to tell whether this is the newest release.
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Version from tag
+      - name: Version, commit and image tags
         id: v
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="${TAG#v}"
+
+          # Read the commit and its date out of the checkout rather than the event
+          # payload: workflow_dispatch has no head_commit at all, and on the
+          # workflow_call path the payload describes the push to main, not the tag.
+          commit="$(git rev-parse HEAD)"
+          date="$(git log -1 --format=%cI)"
+
+          # Only move :latest when building the highest version tag. Rebuilding an
+          # older tag by hand must not point :latest back at an old binary.
+          tags="ghcr.io/ankit373/mainspring:${version}"
+          newest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          if [ "$newest" = "$TAG" ]; then
+            tags="${tags}"$'\n'"ghcr.io/ankit373/mainspring:latest"
+          else
+            echo "::notice::${TAG} is not the newest tag (${newest}); leaving :latest alone"
+          fi
+
+          {
+            echo "version=${version}"
+            echo "commit=${commit}"
+            echo "date=${date}"
+            echo "tags<<__EOF__"
+            echo "$tags"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ !inputs.dry_run }}
           build-args: |
             VERSION=${{ steps.v.outputs.version }}
-            COMMIT=${{ github.sha }}
-            DATE=${{ github.event.head_commit.timestamp }}
-          tags: |
-            ghcr.io/ankit373/mainspring:${{ steps.v.outputs.version }}
-            ghcr.io/ankit373/mainspring:latest
+            COMMIT=${{ steps.v.outputs.commit }}
+            DATE=${{ steps.v.outputs.date }}
+          tags: ${{ steps.v.outputs.tags }}

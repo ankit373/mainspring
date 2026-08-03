@@ -32,7 +32,7 @@ jobs:
       - name: Start fake upstream
         run: |
           /tmp/fakeserver --addr :18080 > /tmp/fakeserver.log 2>&1 &
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:18080/api/tags >/dev/null && break
             sleep 0.3
           done
@@ -41,7 +41,7 @@ jobs:
       - name: Start mainspring (ollama adopt path)
         run: |
           /tmp/mainspring serve --config test/conformance/config.yaml > /tmp/mainspring.log 2>&1 &
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:11500/healthz >/dev/null && break
             sleep 0.3
           done
@@ -84,7 +84,7 @@ jobs:
       - name: Start fake upstream
         run: |
           /tmp/fakeserver --addr :18080 > /tmp/fakeserver.log 2>&1 &
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:18080/api/tags >/dev/null && break
             sleep 0.3
           done
@@ -93,7 +93,7 @@ jobs:
       - name: Start mainspring (ollama adopt path)
         run: |
           /tmp/mainspring serve --config test/conformance/config.yaml > /tmp/mainspring.log 2>&1 &
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:11500/healthz >/dev/null && break
             sleep 0.3
           done
