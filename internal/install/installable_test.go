@@ -2,7 +2,10 @@ package install
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -108,5 +111,42 @@ func TestEveryManagedBackendIsClassified(t *testing.T) {
 		if !backend.IsManaged(name) {
 			t.Errorf("%q is listed installable but is not a managed backend", name)
 		}
+	}
+}
+
+// TestStaleReceiptForANonInstallableBackendIsInert is the regression test for
+// #235. `mainspring install ollama` was possible before #234, and the receipt it
+// left behind made `backends`/`doctor` report an adopted daemon's SOURCE as
+// "managed" — permanently, since nothing revisits a receipt. Reporting where an
+// engine came from is the one thing that field must not get wrong.
+func TestStaleReceiptForANonInstallableBackendIsInert(t *testing.T) {
+	withHome(t)
+
+	// A receipt indistinguishable from one a real pre-#234 install would leave.
+	for _, name := range append(slices.Clone(backend.AdoptNames), "mlx") {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(ManagedDir(), name, "pinned")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(dir, name)
+			if err := os.WriteFile(bin, []byte("stub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			rec, err := json.Marshal(Receipt{
+				Backend: name, Version: "pinned", Path: bin,
+				SHA256: "deadbeef", InstalledAt: "2026-07-01T00:00:00Z",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ManagedDir(), name, "receipt.json"), rec, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if p, ok := ManagedPath(name); ok {
+				t.Fatalf("ManagedPath(%q) resolved to %q from a stale receipt; nothing loads a managed binary for it", name, p)
+			}
+		})
 	}
 }

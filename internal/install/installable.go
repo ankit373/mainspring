@@ -33,8 +33,12 @@ var notDistributedAsBinary = map[string]string{
 // command (#233). An adopt backend runs its own process and holds its own weights,
 // so there is nothing here for Mainspring to own; installing one is a no-op that
 // looks like a success.
+// installable reports whether `install` can fetch a binary for name, and so also
+// whether a receipt under that name means anything at all.
+func installable(name string) bool { return slices.Contains(installableNames, name) }
+
 func checkInstallable(name string) error {
-	if slices.Contains(installableNames, name) {
+	if installable(name) {
 		return nil
 	}
 	if backend.IsAdopt(name) {
