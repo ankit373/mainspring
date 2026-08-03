@@ -248,13 +248,27 @@ func TestBackendUnavailableRejectionIsRecorded(t *testing.T) {
 // below anything the server ever actually did.
 func TestCacheHitRecordsRealDuration(t *testing.T) {
 	var hits atomic.Int64
-	eng := countingEngine(t, &hits)
+	// A deliberately slow upstream. Asserting duration_ms > 0 on the hit alone
+	// tests the platform, not the code: a cache hit is sub-millisecond by design
+	// and measures a genuine 0 on Windows, whose clock is coarser than that. What
+	// actually matters is that the hit is timed *itself* rather than replaying the
+	// miss's duration, and that only shows up when the two differ.
+	eng := slowCountingEngine(t, &hits, firstByteDelay)
 	h, events := acctServer(t, fakeSched(eng.URL), auth.New(nil), func(srv *server.Server) {
 		srv.SetCache(time.Minute, 16)
 	})
 
 	const body = `{"model":"m1","temperature":0,"messages":[{"role":"user","content":"hi"}]}`
 	postBody(h, body)
+	missEv := lastEvent(t, events())
+	if missEv.Cached {
+		t.Fatalf("first request should be a miss: %+v", missEv)
+	}
+	if missEv.DurationMs < float64(firstByteDelay.Milliseconds()) {
+		t.Fatalf("miss recorded duration_ms=%v, want at least the upstream delay %v",
+			missEv.DurationMs, firstByteDelay.Milliseconds())
+	}
+
 	if w := postBody(h, body); w.Header().Get("X-Mainspring-Cache") != "hit" {
 		t.Fatalf("second request was not a cache hit: %v", w.Header())
 	}
@@ -262,8 +276,19 @@ func TestCacheHitRecordsRealDuration(t *testing.T) {
 	if !ev.Cached {
 		t.Fatalf("last event is not the cache hit: %+v", ev)
 	}
-	if ev.DurationMs <= 0 {
-		t.Fatalf("cache hit recorded duration_ms=%v, want the real (small) latency", ev.DurationMs)
+	if ev.DurationMs < 0 {
+		t.Fatalf("cache hit recorded a negative duration_ms=%v", ev.DurationMs)
+	}
+	// The hit never touched the upstream, so it cannot have taken the miss's time.
+	// A replayed duration would inflate the latency mean and percentiles with work
+	// the server did once and then served from memory.
+	if ev.DurationMs >= missEv.DurationMs {
+		t.Fatalf("cache hit recorded duration_ms=%v, which is not less than the miss's %v — "+
+			"the hit is being credited with the upstream latency it skipped",
+			ev.DurationMs, missEv.DurationMs)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream hit %d times, want 1 (the hit must not reach it)", got)
 	}
 }
 

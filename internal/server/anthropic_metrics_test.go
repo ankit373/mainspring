@@ -94,6 +94,12 @@ func onlyEvent(t *testing.T, events []msgEvent) msgEvent {
 
 // usageEngine reports a real usage object on both paths: 12/4 for the
 // non-streaming body and 15/3 in the streaming include_usage final chunk.
+// firstByteDelay is how long a fake engine waits before its first byte when a
+// test asserts on a measured latency. Windows' clock granularity is coarser than
+// an in-process loopback round trip, so without it TTFT and duration legitimately
+// measure 0 there and the assertion tests the platform rather than the code.
+const firstByteDelay = 25 * time.Millisecond
+
 func usageEngine(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -102,6 +108,12 @@ func usageEngine(t *testing.T) *httptest.Server {
 		if strings.Contains(string(body), `"stream":true`) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fl := w.(http.Flusher)
+			// Take a measurable moment before the first byte, so TTFT is something
+			// a clock can actually resolve. An instant in-process fake produces a
+			// genuine 0 on Windows, whose timer granularity is coarser than a
+			// loopback round trip — and 0 is indistinguishable from "never
+			// recorded", which is exactly what this test exists to catch.
+			time.Sleep(firstByteDelay)
 			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
 			fl.Flush()
 			_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":3}}\n\n")
