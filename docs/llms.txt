@@ -236,7 +236,12 @@ MIT and already win; Mainspring wraps them).
 ## Backends
 
 Platforms: linux, darwin and windows on both amd64 and arm64, shipped as static CGO-free binaries
-(tar.gz; zip on Windows) plus a multi-arch container image. All three run in CI. On Windows, config
+(tar.gz; zip on Windows) plus a multi-arch container image. All three run in CI. Linux additionally
+ships native packages — .rpm (RHEL/Fedora/Rocky/Alma), .deb (Debian/Ubuntu) and .apk (Alpine) — each
+installing /usr/bin/mainspring, a systemd unit at /usr/lib/systemd/system/mainspring.service, and
+/etc/mainspring/config.yaml registered as a config file so upgrades preserve operator edits. There is
+no per-distro binary: the build has no PT_INTERP and no PT_DYNAMIC, so one linux artifact runs on every
+distribution; only the install and service conventions differ. On Windows, config
 lives under %AppData%\mainspring instead of ~/.config/mainspring, managed engine binaries carry .exe,
 MLX is unavailable (Apple Silicon only), and SIGHUP does not exist — the server says so at startup and
 POST /admin/reload performs the same reload.

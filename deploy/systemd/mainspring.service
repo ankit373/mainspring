@@ -1,0 +1,53 @@
+[Unit]
+Description=Mainspring — local inference control plane
+Documentation=https://github.com/ankit373/mainspring
+# Adopt backends (Ollama, LM Studio) are usually separate services on the same
+# host. Wants= rather than Requires= so Mainspring still starts and reports the
+# backend as unavailable, instead of refusing to start at all — the whole point
+# is that it tells you the truth about what is running.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mainspring serve --config /etc/mainspring/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# DynamicUser gives the service its own transient, unprivileged account, so
+# installing the package does not have to create one and there is no stale user
+# left behind on removal. Requires systemd 232+ (RHEL 8+, Ubuntu 18.04+).
+DynamicUser=yes
+
+# /var/lib/mainspring and /etc/mainspring, created and owned by systemd.
+StateDirectory=mainspring
+ConfigurationDirectory=mainspring
+
+# Mainspring resolves its own paths from the home directory (util.ConfigDir), so
+# point that at the state directory. Without this, DynamicUser leaves HOME unset
+# and the usage ledger would land in the working directory.
+Environment=HOME=/var/lib/mainspring
+
+# Model weights are large and belong on a volume the operator chooses; keep this
+# generous rather than guessing a limit that breaks a 70B load.
+LimitNOFILE=65536
+
+# Hardening. Mainspring needs the network and its own two directories; nothing
+# else. ReadWritePaths is unnecessary — StateDirectory is already writable.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+
+[Install]
+WantedBy=multi-user.target
