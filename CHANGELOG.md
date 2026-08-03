@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.3.0](https://github.com/ankit373/mainspring/compare/v0.2.0...v0.3.0) (2026-08-02)
+
+
+### Features
+
+* **admin:** expose config lint warnings via GET /admin/config ([#142](https://github.com/ankit373/mainspring/issues/142)) ([8e2cc19](https://github.com/ankit373/mainspring/commit/8e2cc19e50c28a3a2889c7e50b5fb1ee1818f9bd)), closes [#136](https://github.com/ankit373/mainspring/issues/136)
+* **anthropic:** bring the response cache and coalescing to /v1/messages ([#186](https://github.com/ankit373/mainspring/issues/186)) ([#188](https://github.com/ankit373/mainspring/issues/188)) ([84ecde1](https://github.com/ankit373/mainspring/commit/84ecde1a55f3a9d02570b5424e5036ca4ac30e69))
+* **anthropic:** retry and model fallback on /v1/messages, ending the asymmetry ([#187](https://github.com/ankit373/mainspring/issues/187)) ([#190](https://github.com/ankit373/mainspring/issues/190)) ([3f5744c](https://github.com/ankit373/mainspring/commit/3f5744c60e7428cb13cb95a2de3087e995198b0a))
+* **docs:** "where we exist" — model tiers and the stack layer ([#150](https://github.com/ankit373/mainspring/issues/150)) ([0138f72](https://github.com/ankit373/mainspring/commit/0138f7271362dd7c5668c3d9d2f60c32d9fff9e3))
+* **docs:** brand foundation + landing-page copy refresh through Phase 17 ([#144](https://github.com/ankit373/mainspring/issues/144)) ([#147](https://github.com/ankit373/mainspring/issues/147)) ([29359f8](https://github.com/ankit373/mainspring/commit/29359f8a5edd9cfa63d579e51cc3b5765e2e80c2))
+* **docs:** fail-loud proof and the breaker state machine ([#146](https://github.com/ankit373/mainspring/issues/146)) ([#151](https://github.com/ankit373/mainspring/issues/151)) ([fa77178](https://github.com/ankit373/mainspring/commit/fa77178e6bccd1da0d08d7be2f6ab854bba9f38a))
+* **docs:** hero centerpiece — the journey of one request ([#145](https://github.com/ankit373/mainspring/issues/145)) ([#148](https://github.com/ankit373/mainspring/issues/148)) ([10249ca](https://github.com/ankit373/mainspring/commit/10249ca6a62f7fc0815b141c5900555668a2d660))
+* **metrics:** distinguish breaker half_open from open in /metrics ([#137](https://github.com/ankit373/mainspring/issues/137)) ([#143](https://github.com/ankit373/mainspring/issues/143)) ([5ad288b](https://github.com/ankit373/mainspring/commit/5ad288bd55d86157a6256fabc191377b104ca1f7))
+
+
+### Bug Fixes
+
+* **adopt:** diagnose a misconfigured adopt backend by what is actually there ([#204](https://github.com/ankit373/mainspring/issues/204)) ([867507f](https://github.com/ankit373/mainspring/commit/867507fe03218cea469b8ebe4a246757ef1dc560)), closes [#203](https://github.com/ankit373/mainspring/issues/203)
+* **anthropic:** make /v1/messages a first-class path ([#154](https://github.com/ankit373/mainspring/issues/154), [#155](https://github.com/ankit373/mainspring/issues/155), [#156](https://github.com/ankit373/mainspring/issues/156)) ([#172](https://github.com/ankit373/mainspring/issues/172)) ([c1528be](https://github.com/ankit373/mainspring/commit/c1528bebed344b2a7603e8f1f950bce8ad3dee90))
+* **anthropic:** make stop_reason "stop_sequence" reachable by owning the stop ([#193](https://github.com/ankit373/mainspring/issues/193)) ([be584fa](https://github.com/ankit373/mainspring/commit/be584fa5a957ee2d3b8a7da6fb843f5817261532)), closes [#192](https://github.com/ankit373/mainspring/issues/192)
+* **cache:** stop replaying tenant-scoped headers, and require an explicit temperature 0 ([#157](https://github.com/ankit373/mainspring/issues/157), [#158](https://github.com/ankit373/mainspring/issues/158)) ([#174](https://github.com/ankit373/mainspring/issues/174)) ([35f4e24](https://github.com/ankit373/mainspring/commit/35f4e24df2e3995ca5f9d46bad52d54f6a8db84a))
+* **cli,docs:** accept id= on adopt-only backends and correct the proof pane ([#159](https://github.com/ankit373/mainspring/issues/159)) ([#173](https://github.com/ankit373/mainspring/issues/173)) ([249f6f7](https://github.com/ankit373/mainspring/commit/249f6f7ef2f4b3ebdf6a987f3602d78c04ba73e5))
+* **config:** refuse a config key the schema does not know ([#199](https://github.com/ankit373/mainspring/issues/199)) ([fa6746d](https://github.com/ankit373/mainspring/commit/fa6746d134510448d117e53d24a27a4801fd96c5)), closes [#197](https://github.com/ankit373/mainspring/issues/197)
+* **deploy:** validate the Helm chart, and fix the install that crash-loops ([#207](https://github.com/ankit373/mainspring/issues/207)) ([#208](https://github.com/ankit373/mainspring/issues/208)) ([e13c7a2](https://github.com/ankit373/mainspring/commit/e13c7a27645cf9ecc35331565e1e1be63b170488))
+* **install:** stop the bounded-download test racing its own cap restore ([#214](https://github.com/ankit373/mainspring/issues/214)) ([#215](https://github.com/ankit373/mainspring/issues/215)) ([ebce635](https://github.com/ankit373/mainspring/commit/ebce635e561a698f5b55ce587a229e33f805faf0))
+* **install:** verify the download before it reaches the install path ([#209](https://github.com/ankit373/mainspring/issues/209)) ([#210](https://github.com/ankit373/mainspring/issues/210)) ([c93ae26](https://github.com/ankit373/mainspring/commit/c93ae2627412cfea055a4d4a226cc5eff45db2b2))
+* **llamacpp:** detect an engine that dies at startup, and stop degrading CPU-only models ([#211](https://github.com/ankit373/mainspring/issues/211)) ([#212](https://github.com/ankit373/mainspring/issues/212)) ([76eceb8](https://github.com/ankit373/mainspring/commit/76eceb83602f91e929f8b84578174cf325dda66b))
+* **mlx:** stop passing ctx as a generation cap, and stop reporting it as measured ([#213](https://github.com/ankit373/mainspring/issues/213)) ([#216](https://github.com/ankit373/mainspring/issues/216)) ([6c9e533](https://github.com/ankit373/mainspring/commit/6c9e5335b4bed359bca7316e0ad571fdfec5c708))
+* **openai:** report an `n` the engine quietly refused ([#201](https://github.com/ankit373/mainspring/issues/201)) ([e6e8ad0](https://github.com/ankit373/mainspring/commit/e6e8ad0807f24ffd2a2c75d18a2061b1a5e737e9))
+* **reload:** never let a reload open or empty a running server ([#162](https://github.com/ankit373/mainspring/issues/162), [#163](https://github.com/ankit373/mainspring/issues/163)) ([#175](https://github.com/ankit373/mainspring/issues/175)) ([757204a](https://github.com/ankit373/mainspring/commit/757204ae1fba755db2ce753c6c29759e2557a08c))
+* **server,metrics:** accounting and observability report what actually happened ([#179](https://github.com/ankit373/mainspring/issues/179)) ([bc13b21](https://github.com/ankit373/mainspring/commit/bc13b21305dcc3420b6001abf65e6eb9c8da4c0c))
+* **server:** a client abort is not a backend failure at any point ([#177](https://github.com/ankit373/mainspring/issues/177)) ([#180](https://github.com/ankit373/mainspring/issues/180)) ([9ba2583](https://github.com/ankit373/mainspring/commit/9ba2583456b5e95611062967be404fedaeffbea2))
+* **server:** answer unrouted paths inside the error taxonomy and implement count_tokens ([#196](https://github.com/ankit373/mainspring/issues/196)) ([d3d4921](https://github.com/ankit373/mainspring/commit/d3d4921d435f738d4a5b72ea61236fe84d081267)), closes [#191](https://github.com/ankit373/mainspring/issues/191)
+* **server:** attribute admin actions, gate-test every admin route, fix input shapes ([#178](https://github.com/ankit373/mainspring/issues/178)) ([f523e24](https://github.com/ankit373/mainspring/commit/f523e2407c4e97f1be04e7575ec13e9985361a25))
+* **server:** stream integrity and correct failure attribution ([#160](https://github.com/ankit373/mainspring/issues/160), [#161](https://github.com/ankit373/mainspring/issues/161)) ([#176](https://github.com/ankit373/mainspring/issues/176)) ([30bc0ca](https://github.com/ankit373/mainspring/commit/30bc0ca2fb0d36ff552468d23e537da60c8ebf06))
+
 ## [0.2.0](https://github.com/ankit373/mainspring/compare/v0.1.0...v0.2.0) (2026-08-01)
 
 
