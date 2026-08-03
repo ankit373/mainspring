@@ -56,6 +56,36 @@ no abstractions for a single call site, no error handling for impossible states.
 Never open a PR from a feature branch directly to `main`. Releases reach `main` through a release
 branch; version numbers are managed by release-please and are never edited by hand.
 
+## Releasing
+
+1. Open a PR from `develop` to `main` and **merge it with a merge commit, not a squash.** Squashing
+   rewrites the commits, so `main` stops being a descendant of `develop` and the next release cut
+   will not merge cleanly.
+2. release-please opens a `chore(main): release x.y.z` PR that bumps the manifest, the changelog and
+   the Helm chart version. Review the version it picked, then merge it.
+3. That merge creates the tag and the GitHub Release, and `release-please.yml` then calls
+   `release.yml` to build and publish. **No manual step is required** — in particular, do not delete
+   and re-push the tag. That used to be necessary because `release.yml` only triggered on tag pushes
+   and GitHub does not fire workflows for tags created with the default `GITHUB_TOKEN`; every release
+   through v0.4.0 was built by hand for that reason (#227).
+4. A `verify` job then checks the release users can actually see: every artifact named in its own
+   `checksums.txt` must be downloadable and hash-correct, and the platform matrix must be complete.
+   If a build silently shipped nothing, this is what turns the run red.
+
+To rebuild an existing tag — a publish that failed halfway, or a re-run after fixing the pipeline —
+use the manual trigger rather than inventing a tag:
+
+```bash
+gh workflow run release.yml -f tag=v1.2.3                  # rebuild and publish
+gh workflow run release.yml -f tag=v1.2.3 -f dry_run=true  # build everything, publish nothing
+```
+
+Verifying a past release from a laptop uses the same script CI runs:
+
+```bash
+.github/scripts/verify-release.sh v1.2.3
+```
+
 ## Update the docs in the same change
 
 This is a real requirement, not a courtesy. If your change adds or alters a **CLI command, HTTP
