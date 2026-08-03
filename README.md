@@ -87,7 +87,9 @@ layer around them **fail loud, VRAM-aware, and governed**.
   never disturbs an engine already installed there. Mainspring does **not** bundle a catalogue of
   engine builds: you point it at
   the artifact you want with `--url` + `--sha256`, or at your own manifest (optionally ed25519-signed
-  via `--pubkey`). Shipping a curated, pinned manifest is tracked separately.
+  via `--pubkey`). Shipping a curated, pinned manifest is tracked separately. Only `llamacpp` is
+  installable — MLX runs as a Python module (`pip install mlx-lm`) and the adopt backends run their own
+  process, so `install` refuses both with the real remedy instead of writing a binary nothing reads.
 - **Runs on Linux, macOS and Windows**, amd64 and arm64 — a `CGO_ENABLED=0` static binary with no libc
   to match, plus a real multi-arch container manifest so `docker pull` picks the right image itself.
   Every platform is exercised in CI. Two honest caveats on Windows: **MLX is Apple-Silicon-only** by

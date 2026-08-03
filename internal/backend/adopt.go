@@ -19,6 +19,20 @@ var AdoptNames = []string{"ollama", "lmstudio", "llamafile", "gpt4all"}
 // IsAdopt reports whether name is an adopt-only backend.
 func IsAdopt(name string) bool { return slices.Contains(AdoptNames, name) }
 
+// ManagedNames are the backends Mainspring runs as a subprocess: it owns the
+// binary and opens the model file itself. These are the only backends
+// `mainspring install` will accept — installing anything else writes a binary
+// nothing ever reads (#233).
+var ManagedNames = []string{"llamacpp", "mlx"}
+
+// IsManaged reports whether name is a backend Mainspring runs as a subprocess.
+func IsManaged(name string) bool { return slices.Contains(ManagedNames, name) }
+
+// AllNames is every backend name the server accepts, managed first. The CLI's
+// --backend help and its unknown-backend error both derive from this, so a
+// backend cannot be added to the constructor and left out of the help text.
+var AllNames = slices.Concat(ManagedNames, AdoptNames)
+
 // missingModelListCap bounds how much of a daemon's inventory is echoed into an
 // error. Enough to recognise the name you meant, not so much that a host with
 // hundreds of models buries the message.

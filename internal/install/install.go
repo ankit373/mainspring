@@ -161,6 +161,11 @@ func resolve(backend string, spec Spec, manifestPath string) (url, sha, version 
 // writing a receipt. It is the ONLY function that performs a download, and only
 // when explicitly invoked.
 func Install(ctx context.Context, backend string, spec Spec, manifestPath string, out io.Writer) (Receipt, error) {
+	// Refuse a backend nothing could ever run before touching the network, so a
+	// pinned URL cannot install a binary that is never read (#233).
+	if err := checkInstallable(backend); err != nil {
+		return Receipt{}, err
+	}
 	// When installing from a manifest (not a direct --url pin) and a public key
 	// is configured, the manifest must carry a valid detached signature.
 	if spec.URL == "" {
