@@ -15,6 +15,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -28,6 +29,12 @@ archives:
   - id: default
     formats:
       - tar.gz
+    # zip on Windows: tar is not present on a stock Windows box, and zip is what
+    # the platform's own tooling and every install guide expects.
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
