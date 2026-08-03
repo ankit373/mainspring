@@ -37,6 +37,36 @@ archives:
           - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+# Native packages, from the same binaries the archives use. There is no
+# per-distro build: the binary is CGO_ENABLED=0 with no PT_INTERP and no
+# PT_DYNAMIC, so one linux artifact runs on RHEL, Fedora, Rocky, Alma, Debian,
+# Ubuntu, SUSE and Alpine alike. What differs between them is how software is
+# installed and supervised, which is what these provide.
+nfpms:
+  - id: packages
+    package_name: mainspring
+    vendor: ankit373
+    homepage: https://github.com/ankit373/mainspring
+    maintainer: ankit373 <noreply@github.com>
+    description: |-
+      Backend-agnostic local inference server — one OpenAI/Anthropic-compatible
+      API, pluggable engines (llama.cpp, MLX, Ollama).
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: deploy/systemd/mainspring.service
+        dst: /usr/lib/systemd/system/mainspring.service
+      - src: deploy/packaging/config.yaml
+        dst: /etc/mainspring/config.yaml
+        # type config means the package manager preserves operator edits across
+        # upgrades (dpkg prompts, rpm writes .rpmnew) rather than overwriting a
+        # working configuration.
+        type: config|noreplace
+
 checksum:
   name_template: "checksums.txt"
 

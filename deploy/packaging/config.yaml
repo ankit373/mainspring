@@ -1,0 +1,47 @@
+# Mainspring server configuration.
+#
+# Installed to /etc/mainspring/config.yaml and marked as a config file, so
+# upgrading the package will not overwrite your edits.
+#
+# Reload after editing:  systemctl reload mainspring
+# Check before starting: mainspring doctor --config /etc/mainspring/config.yaml
+#
+# Unknown keys are a hard error rather than being ignored, so a typo cannot
+# silently disable a guardrail. `mainspring doctor` names the key and suggests
+# the one you meant.
+
+addr: ":11500"
+
+# Which engine to drive. Adopt backends (ollama, lmstudio, llamafile, gpt4all)
+# attach to a daemon already running on this host and are never installed by
+# Mainspring; llamacpp and mlx are managed as subprocesses.
+#
+# Defaulting to ollama because it is the one most likely to already be present.
+# Switch to llamacpp and give each model a `path` to serve GGUF files directly.
+backend: ollama
+ollama_host: "http://127.0.0.1:11434"
+
+# Expose whatever the adopted daemon already holds, instead of listing models
+# here. For an adopt backend a model's id is the name the daemon knows it by, and
+# `path` is unused — there is no file for Mainspring to open.
+discover_models: true
+models: []
+#   - id: qwen2.5-coder:7b
+#     ctx: 8192
+
+# Unload an idle model after five minutes; hold one at a time.
+keep_alive_seconds: 300
+max_loaded: 1
+
+# HOME is set to the state directory by the systemd unit, so this resolves under
+# /var/lib/mainspring. Set to "off" to disable request logging entirely.
+# usage_ledger: /var/lib/mainspring/usage.jsonl
+
+# No `tenants` block means the server runs in OPEN mode: no API key is required.
+# That is fine bound to localhost. Add tenants before exposing it further —
+# a reload can never silently turn an authenticated server back into an open one.
+# tenants:
+#   - name: team-a
+#     key: change-me
+#     role: inference
+#     rate_rpm: 120
