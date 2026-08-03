@@ -119,3 +119,13 @@ jobs:
             COMMIT=${{ steps.v.outputs.commit }}
             DATE=${{ steps.v.outputs.date }}
           tags: ${{ steps.v.outputs.tags }}
+
+      # A successful push proves only that *we* can write it. GHCR packages are private
+      # by default even under a public repository, so v0.4.0 published green and was
+      # unpullable by everyone (#228). Check it the way a stranger would, with no
+      # credentials at all.
+      - name: Verify the image is anonymously pullable
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: .github/scripts/verify-image.sh "$VERSION"

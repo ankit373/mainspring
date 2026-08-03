@@ -131,7 +131,7 @@ for a complete answer.
 | Linux | ✅ | ✅ | `.rpm` · `.deb` · `.apk` · `.tar.gz` |
 | macOS (Intel / Apple Silicon) | ✅ | ✅ | `.tar.gz` |
 | Windows | ✅ | ✅ | `.zip` |
-| Container | ✅ | ✅ | `ghcr.io/ankit373/mainspring` (multi-arch manifest) |
+| Container | ✅ | ✅ | `ghcr.io/ankit373/mainspring` (multi-arch manifest) — **not yet publicly pullable, see below** |
 
 ```bash
 # RHEL / Fedora / Rocky / Alma
@@ -157,14 +157,19 @@ to be installed and supervised.
 Upgrades never overwrite `/etc/mainspring/config.yaml`: it is registered as a config file, so `dpkg`
 prompts and `rpm` writes `.rpmnew` instead of replacing your edits.
 
+**The container image is built and pushed multi-arch on every release, but is not yet anonymously
+pullable.** A GHCR package stays private even when its repository is public, so `docker pull` fails
+without credentials ([#228](https://github.com/ankit373/mainspring/issues/228)). Build it locally
+meanwhile — `docker build -t mainspring:dev .`, see [deploy/README.md](deploy/README.md). Each release
+now checks this with an unauthenticated pull, so this claim and the reality cannot drift apart again.
+
 ## Quick start
 
 ```bash
 # Build from source…
 go build -o mainspring ./cmd/mainspring
-# …or grab a release binary / the container image
+# …or grab a release binary
 #   https://github.com/ankit373/mainspring/releases
-#   ghcr.io/ankit373/mainspring:latest
 
 # See which engines are present on this host (detect-first)
 ./mainspring backends

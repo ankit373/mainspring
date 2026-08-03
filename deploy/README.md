@@ -26,6 +26,13 @@ Provide one by:
 
 ## Kubernetes (Helm)
 
+The chart's default `image.repository` is `ghcr.io/ankit373/mainspring`, which is **not yet
+anonymously pullable** — a GHCR package stays private even when its repository is public, so these
+commands currently land in `ImagePullBackOff`
+([#228](https://github.com/ankit373/mainspring/issues/228)). Until it is public, push the locally
+built image to a registry your cluster can read and `--set image.repository=…`, or supply
+`imagePullSecrets`.
+
 ```bash
 helm install ms deploy/helm/mainspring \
   --set image.tag=latest \
