@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/ankit373/mainspring/compare/v0.3.0...v0.4.0) (2026-08-03)
+
+
+### Features
+
+* **dist:** native .rpm/.deb/.apk packages and a systemd unit ([#223](https://github.com/ankit373/mainspring/issues/223)) ([#224](https://github.com/ankit373/mainspring/issues/224)) ([c00db40](https://github.com/ankit373/mainspring/commit/c00db4062c2c57ba77095ab3f32cbc010f7d29f9))
+* **portability:** ship and test Windows, and stop four copies of the config path ([#222](https://github.com/ankit373/mainspring/issues/222)) ([6b7eeae](https://github.com/ankit373/mainspring/commit/6b7eeae5186e4e34fc95f4813654ba9b1232e648))
+
 ## [0.3.0](https://github.com/ankit373/mainspring/compare/v0.2.0...v0.3.0) (2026-08-02)
 
 
