@@ -236,7 +236,8 @@ MIT and already win; Mainspring wraps them).
 ## Backends
 
 Platforms: linux, darwin and windows on both amd64 and arm64, shipped as static CGO-free binaries
-(tar.gz; zip on Windows) plus a multi-arch container image. All three run in CI. Linux additionally
+(tar.gz; zip on Windows) plus a multi-arch container image, which is built and pushed on every release
+but is not yet anonymously pullable from GHCR (#228) — build it locally until then. All three run in CI. Linux additionally
 ships native packages — .rpm (RHEL/Fedora/Rocky/Alma), .deb (Debian/Ubuntu) and .apk (Alpine) — each
 installing /usr/bin/mainspring, a systemd unit at /usr/lib/systemd/system/mainspring.service, and
 /etc/mainspring/config.yaml registered as a config file so upgrades preserve operator edits. There is

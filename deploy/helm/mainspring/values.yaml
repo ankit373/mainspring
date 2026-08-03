@@ -1,6 +1,10 @@
 replicaCount: 1
 
 image:
+  # This image is not yet anonymously pullable: a GHCR package stays private even when
+  # its repository is public, so a default install currently ImagePullBackOffs (#228).
+  # Until it is made public, either set imagePullSecrets below or point this at your own
+  # registry after `docker build -t <your-registry>/mainspring .`.
   repository: ghcr.io/ankit373/mainspring
   tag: ""          # defaults to .Chart.appVersion
   pullPolicy: IfNotPresent

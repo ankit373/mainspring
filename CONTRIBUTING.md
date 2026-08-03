@@ -71,6 +71,9 @@ branch; version numbers are managed by release-please and are never edited by ha
 4. A `verify` job then checks the release users can actually see: every artifact named in its own
    `checksums.txt` must be downloadable and hash-correct, and the platform matrix must be complete.
    If a build silently shipped nothing, this is what turns the run red.
+5. The image job then pulls what it just pushed **with no credentials**, because an authenticated
+   push proves only that we can write it — v0.4.0's image published green and was unpullable by
+   everyone (#228).
 
 To rebuild an existing tag — a publish that failed halfway, or a re-run after fixing the pipeline —
 use the manual trigger rather than inventing a tag:
@@ -80,10 +83,11 @@ gh workflow run release.yml -f tag=v1.2.3                  # rebuild and publish
 gh workflow run release.yml -f tag=v1.2.3 -f dry_run=true  # build everything, publish nothing
 ```
 
-Verifying a past release from a laptop uses the same script CI runs:
+Verifying a past release from a laptop uses the same scripts CI runs:
 
 ```bash
-.github/scripts/verify-release.sh v1.2.3
+.github/scripts/verify-release.sh v1.2.3   # release assets, against their own checksums.txt
+.github/scripts/verify-image.sh 1.2.3      # anonymous multi-arch pull from GHCR
 ```
 
 ## Update the docs in the same change
