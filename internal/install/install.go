@@ -87,7 +87,16 @@ func receiptPath(backend string) string {
 
 // ManagedPath returns the installed binary path for backend if a valid receipt
 // exists and the file is present.
+//
+// A receipt for a backend that cannot be installed is meaningless: nothing loads a
+// managed binary for it. Gating here rather than at each call site keeps the
+// callers honest — `mainspring backends` and `doctor` used to report SOURCE as
+// "managed" for an adopted daemon purely because a stale pre-#234 receipt existed,
+// while the same row pointed at the daemon's URL (#235).
 func ManagedPath(backend string) (string, bool) {
+	if !installable(backend) {
+		return "", false
+	}
 	b, err := os.ReadFile(receiptPath(backend))
 	if err != nil {
 		return "", false
