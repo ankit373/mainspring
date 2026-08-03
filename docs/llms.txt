@@ -197,6 +197,10 @@ MIT and already win; Mainspring wraps them).
   no curated artifact catalogue — the embedded manifest is empty by design, so you supply the artifact
   with `--url` + `--sha256`, or your own manifest file (optionally ed25519-signed via `--pubkey`).
   Running `mainspring install <backend>` with nothing supplied says so plainly rather than guessing.
+  Only `llamacpp` can be installed at all, and the other backends say why instead of failing on a
+  manifest lookup: MLX is a Python module (`pip install mlx-lm`, then point `--mlx-python` at that
+  interpreter), and the adopt backends run their own process, so neither has a binary Mainspring would
+  ever read. Installing one used to succeed and write bytes nothing loads.
 - Deploy anywhere: single static binary, distroless container image, and a Helm chart (HPA,
   ServiceMonitor, GPU node scheduling). Optional TLS (tls_cert/tls_key => HTTPS, TLS 1.2 minimum).
 - Graceful drain: `/readyz` flips to 503 on shutdown so load balancers stop routing while in-flight
@@ -263,7 +267,8 @@ POST /admin/reload performs the same reload.
 - `mainspring backends` — detect engines on this host (system vs managed).
 - `mainspring models` — list configured models and their resolved backend.
 - `mainspring install <backend>` — opt-in, checksum-verified engine install (--url/--sha256 or a
-  signed manifest via --pubkey/--manifest-sig).
+  signed manifest via --pubkey/--manifest-sig). Installable: llamacpp only; anything else is refused
+  with its actual remedy.
 - `mainspring doctor` — diagnose backends, config, models, ports, accelerator.
 - `mainspring version`.
 

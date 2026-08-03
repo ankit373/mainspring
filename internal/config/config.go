@@ -65,41 +65,44 @@ type Tenant struct {
 
 // Config is the full server configuration.
 type Config struct {
-	Addr             string            `yaml:"addr"`
-	APIKeys          []string          `yaml:"api_keys,omitempty"`
-	Tenants          []Tenant          `yaml:"tenants,omitempty"`
-	KeepAliveSeconds int               `yaml:"keep_alive_seconds"`
-	MaxLoaded        int               `yaml:"max_loaded"`
-	MaxResidentMB    int               `yaml:"max_resident_mb,omitempty"`
-	MaxInflight      int               `yaml:"max_inflight,omitempty"`             // concurrent requests per model; 0 = unbounded
-	MaxQueue         int               `yaml:"max_queue,omitempty"`                // extra waiters per model before 503
-	BreakerThreshold int               `yaml:"breaker_threshold,omitempty"`        // consecutive failures before the circuit opens; 0 = disabled
-	BreakerCooldownS int               `yaml:"breaker_cooldown_seconds,omitempty"` // seconds a tripped breaker stays open; <=0 => 30
-	HealthProbeS     int               `yaml:"health_probe_seconds,omitempty"`     // background health-probe interval; <=0 => off
-	DrainSeconds     int               `yaml:"drain_seconds,omitempty"`            // shutdown drain timeout; <=0 => 30s
-	UsageLedger      string            `yaml:"usage_ledger,omitempty"`             // JSONL path; empty => default location
-	AccessLog        string            `yaml:"access_log,omitempty"`               // JSONL access log path; empty => off, "stderr"/"stdout" accepted
-	TLSCert          string            `yaml:"tls_cert,omitempty"`                 // PEM cert path; with tls_key => serve HTTPS
-	TLSKey           string            `yaml:"tls_key,omitempty"`                  // PEM key path
-	Backend          string            `yaml:"backend,omitempty"`                  // "llamacpp" (default) | "ollama" | "mlx" | "lmstudio"
-	LlamaServerPath  string            `yaml:"llama_server_path,omitempty"`
-	OllamaHost       string            `yaml:"ollama_host,omitempty"`    // e.g. http://127.0.0.1:11434
-	MLXPython        string            `yaml:"mlx_python,omitempty"`     // python interpreter for mlx_lm.server
-	LMStudioHost     string            `yaml:"lmstudio_host,omitempty"`  // e.g. http://127.0.0.1:1234
-	LlamafileHost    string            `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
-	GPT4AllHost      string            `yaml:"gpt4all_host,omitempty"`   // e.g. http://127.0.0.1:4891
-	Models           []Model           `yaml:"models,omitempty"`
-	Aliases          map[string]string `yaml:"aliases,omitempty"`                 // friendly name -> model id (or another alias)
-	DiscoverModels   bool              `yaml:"discover_models,omitempty"`         // auto-expose models from present adopt backends
-	RequestTimeoutS  int               `yaml:"request_timeout_seconds,omitempty"` // default per-request timeout; 0 = unbounded
-	CacheMaxEntries  int               `yaml:"cache_max_entries,omitempty"`       // opt-in response cache size; 0 = disabled
-	CacheTTLS        int               `yaml:"cache_ttl_seconds,omitempty"`       // response-cache entry lifetime; <=0 => 300s
-	EnforceContext   bool              `yaml:"enforce_context,omitempty"`         // reject requests exceeding a model's context window (needs model ctx > 0)
-	PreciseContext   bool              `yaml:"precise_context,omitempty"`         // count guardrail prompt tokens exactly when the model is resident on a tokenizing engine
-	ClampMaxTokens   bool              `yaml:"clamp_max_tokens,omitempty"`        // shrink an over-budget max_tokens to fit the context window (needs model ctx > 0)
-	RetryMax         int               `yaml:"retry_max,omitempty"`               // additional upstream attempts after the first on transient failure; 0 = no retry
-	RetryBackoffMs   int               `yaml:"retry_backoff_ms,omitempty"`        // base of the exponential retry backoff; <=0 => 100ms when retry enabled
-	Coalesce         bool              `yaml:"coalesce,omitempty"`                // single-flight de-dup of identical deterministic in-flight requests
+	Addr             string   `yaml:"addr"`
+	APIKeys          []string `yaml:"api_keys,omitempty"`
+	Tenants          []Tenant `yaml:"tenants,omitempty"`
+	KeepAliveSeconds int      `yaml:"keep_alive_seconds"`
+	MaxLoaded        int      `yaml:"max_loaded"`
+	MaxResidentMB    int      `yaml:"max_resident_mb,omitempty"`
+	MaxInflight      int      `yaml:"max_inflight,omitempty"`             // concurrent requests per model; 0 = unbounded
+	MaxQueue         int      `yaml:"max_queue,omitempty"`                // extra waiters per model before 503
+	BreakerThreshold int      `yaml:"breaker_threshold,omitempty"`        // consecutive failures before the circuit opens; 0 = disabled
+	BreakerCooldownS int      `yaml:"breaker_cooldown_seconds,omitempty"` // seconds a tripped breaker stays open; <=0 => 30
+	HealthProbeS     int      `yaml:"health_probe_seconds,omitempty"`     // background health-probe interval; <=0 => off
+	DrainSeconds     int      `yaml:"drain_seconds,omitempty"`            // shutdown drain timeout; <=0 => 30s
+	UsageLedger      string   `yaml:"usage_ledger,omitempty"`             // JSONL path; empty => default location
+	AccessLog        string   `yaml:"access_log,omitempty"`               // JSONL access log path; empty => off, "stderr"/"stdout" accepted
+	TLSCert          string   `yaml:"tls_cert,omitempty"`                 // PEM cert path; with tls_key => serve HTTPS
+	TLSKey           string   `yaml:"tls_key,omitempty"`                  // PEM key path
+	// One of backend.AllNames — llamacpp (default) or mlx, which Mainspring runs as a
+	// subprocess, or ollama / lmstudio / llamafile / gpt4all, which it adopts. That
+	// list is the source of truth; this comment is prose and cannot derive from it.
+	Backend         string            `yaml:"backend,omitempty"`
+	LlamaServerPath string            `yaml:"llama_server_path,omitempty"`
+	OllamaHost      string            `yaml:"ollama_host,omitempty"`    // e.g. http://127.0.0.1:11434
+	MLXPython       string            `yaml:"mlx_python,omitempty"`     // python interpreter for mlx_lm.server
+	LMStudioHost    string            `yaml:"lmstudio_host,omitempty"`  // e.g. http://127.0.0.1:1234
+	LlamafileHost   string            `yaml:"llamafile_host,omitempty"` // e.g. http://127.0.0.1:8080
+	GPT4AllHost     string            `yaml:"gpt4all_host,omitempty"`   // e.g. http://127.0.0.1:4891
+	Models          []Model           `yaml:"models,omitempty"`
+	Aliases         map[string]string `yaml:"aliases,omitempty"`                 // friendly name -> model id (or another alias)
+	DiscoverModels  bool              `yaml:"discover_models,omitempty"`         // auto-expose models from present adopt backends
+	RequestTimeoutS int               `yaml:"request_timeout_seconds,omitempty"` // default per-request timeout; 0 = unbounded
+	CacheMaxEntries int               `yaml:"cache_max_entries,omitempty"`       // opt-in response cache size; 0 = disabled
+	CacheTTLS       int               `yaml:"cache_ttl_seconds,omitempty"`       // response-cache entry lifetime; <=0 => 300s
+	EnforceContext  bool              `yaml:"enforce_context,omitempty"`         // reject requests exceeding a model's context window (needs model ctx > 0)
+	PreciseContext  bool              `yaml:"precise_context,omitempty"`         // count guardrail prompt tokens exactly when the model is resident on a tokenizing engine
+	ClampMaxTokens  bool              `yaml:"clamp_max_tokens,omitempty"`        // shrink an over-budget max_tokens to fit the context window (needs model ctx > 0)
+	RetryMax        int               `yaml:"retry_max,omitempty"`               // additional upstream attempts after the first on transient failure; 0 = no retry
+	RetryBackoffMs  int               `yaml:"retry_backoff_ms,omitempty"`        // base of the exponential retry backoff; <=0 => 100ms when retry enabled
+	Coalesce        bool              `yaml:"coalesce,omitempty"`                // single-flight de-dup of identical deterministic in-flight requests
 }
 
 // Default returns the baseline configuration.

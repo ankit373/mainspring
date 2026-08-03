@@ -366,7 +366,8 @@ func cmdServe() *cobra.Command {
 	cmd.Flags().IntVar(&maxInflight, "max-inflight", 0, "max concurrent requests per model (0 = unbounded)")
 	cmd.Flags().IntVar(&maxQueue, "max-queue", 0, "max queued waiters per model before returning 503")
 	cmd.Flags().StringVar(&usageLedger, "usage-ledger", "", "JSONL usage ledger path (empty = default location, \"off\" = disable)")
-	cmd.Flags().StringVar(&backendName, "backend", "", "engine backend: llamacpp (default) | mlx | ollama | lmstudio | llamafile | gpt4all")
+	cmd.Flags().StringVar(&backendName, "backend", "", fmt.Sprintf("engine backend: %s (default %s)",
+		strings.Join(backend.AllNames, " | "), backend.ManagedNames[0]))
 	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "", "Ollama daemon URL when --backend ollama")
 	cmd.Flags().StringVar(&llamaServer, "llama-server", "", "path to llama-server (default: look up PATH)")
 	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate path (with --tls-key => serve HTTPS)")
@@ -1051,7 +1052,7 @@ func newBackendByName(name string, cfg config.Config) (backend.Backend, error) {
 		return openaiadopt.New("gpt4all", orDefault(cfg.GPT4AllHost, "http://127.0.0.1:4891"),
 			"enable the API server in GPT4All → Settings → Application"), nil
 	default:
-		return nil, fmt.Errorf("unknown backend %q (want llamacpp|ollama|mlx|lmstudio|llamafile|gpt4all)", name)
+		return nil, fmt.Errorf("unknown backend %q (want %s)", name, strings.Join(backend.AllNames, "|"))
 	}
 }
 
