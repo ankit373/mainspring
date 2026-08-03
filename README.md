@@ -88,6 +88,11 @@ layer around them **fail loud, VRAM-aware, and governed**.
   engine builds: you point it at
   the artifact you want with `--url` + `--sha256`, or at your own manifest (optionally ed25519-signed
   via `--pubkey`). Shipping a curated, pinned manifest is tracked separately.
+- **Runs on Linux, macOS and Windows**, amd64 and arm64 — a `CGO_ENABLED=0` static binary with no libc
+  to match, plus a real multi-arch container manifest so `docker pull` picks the right image itself.
+  Every platform is exercised in CI. Two honest caveats on Windows: **MLX is Apple-Silicon-only** by
+  construction and reports itself unavailable, and **there is no `SIGHUP`** — the server says so at
+  startup and `POST /admin/reload` does the same job.
 - **Deploy anywhere** — a single static binary, a distroless container image, and a Helm chart
   (HPA / ServiceMonitor / GPU node scheduling).
 

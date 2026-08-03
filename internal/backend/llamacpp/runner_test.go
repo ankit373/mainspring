@@ -2,6 +2,7 @@ package llamacpp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,20 +15,37 @@ import (
 	"github.com/ankit373/mainspring/internal/util"
 )
 
-// fakeEngine writes an executable stand-in for llama-server and a dummy weights
-// file, and returns the two paths. script is a /bin/sh body.
-func fakeEngine(t *testing.T, script string) (bin, weights string) {
-	t.Helper()
-	dir := t.TempDir()
-	bin = filepath.Join(dir, "llama-server")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
-		t.Fatal(err)
+// The test binary stands in for llama-server when fakeEngineEnv is set. A
+// #!/bin/sh script would be simpler but does not run on Windows, and skipping
+// these tests there would read as a pass on the platform whose process handling
+// most needs checking. Re-execing ourselves is portable and, unlike a shell
+// wrapper, spawns a single process — so a kill actually reaps it.
+const fakeEngineEnv = "MAINSPRING_TEST_FAKE_ENGINE"
+
+func TestMain(m *testing.M) {
+	switch os.Getenv(fakeEngineEnv) {
+	case "die":
+		// Whatever a real engine would say about a model it cannot load.
+		fmt.Fprintln(os.Stderr, "error: unable to load model")
+		os.Exit(1)
+	case "hang":
+		// Never becomes ready; the parent kills it.
+		time.Sleep(10 * time.Minute)
+		os.Exit(0)
 	}
-	weights = filepath.Join(dir, "model.gguf")
+	os.Exit(m.Run())
+}
+
+// fakeEngine points the backend at this test binary in the given mode and returns
+// that path plus a dummy weights file (Start stats it before spawning).
+func fakeEngine(t *testing.T, mode string) (bin, weights string) {
+	t.Helper()
+	t.Setenv(fakeEngineEnv, mode) // inherited by the child we spawn
+	weights = filepath.Join(t.TempDir(), "model.gguf")
 	if err := os.WriteFile(weights, []byte("not really a model"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return bin, weights
+	return os.Args[0], weights
 }
 
 // A server that dies on startup must be reported immediately, with the engine's
@@ -40,7 +58,7 @@ func fakeEngine(t *testing.T, script string) (bin, weights string) {
 // five-minute ceiling and then blamed a timeout, discarding the one thing that
 // explained it — the engine's stderr.
 func TestStartFailsFastWhenTheEngineDies(t *testing.T) {
-	bin, weights := fakeEngine(t, `echo "error: unable to load model" >&2; exit 1`)
+	bin, weights := fakeEngine(t, "die")
 	b := New(bin)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

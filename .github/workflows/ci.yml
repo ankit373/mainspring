@@ -18,7 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Windows is here because that is where portability breaks: path
+        # separators, %AppData%, .exe suffixes and process spawning. Nothing else
+        # in this matrix would catch a regression in any of them.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

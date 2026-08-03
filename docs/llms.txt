@@ -235,6 +235,12 @@ MIT and already win; Mainspring wraps them).
 
 ## Backends
 
+Platforms: linux, darwin and windows on both amd64 and arm64, shipped as static CGO-free binaries
+(tar.gz; zip on Windows) plus a multi-arch container image. All three run in CI. On Windows, config
+lives under %AppData%\mainspring instead of ~/.config/mainspring, managed engine binaries carry .exe,
+MLX is unavailable (Apple Silicon only), and SIGHUP does not exist — the server says so at startup and
+POST /admin/reload performs the same reload.
+
 - Managed (subprocess, opt-in install): `llamacpp` (llama-server), `mlx` (mlx_lm.server, Apple Silicon).
   Backend caveat: mlx_lm.server has no context-window flag, so `ctx` cannot be handed to it. Mainspring's
   own guardrail still enforces `ctx`, but the engine is not told and reports no effective window, so

@@ -21,10 +21,20 @@ import (
 // countingEngine records how many upstream requests it actually served, so a
 // cache hit can be proven by the count staying flat.
 func countingEngine(t *testing.T, hits *atomic.Int64) *httptest.Server {
+	return slowCountingEngine(t, hits, 0)
+}
+
+// slowCountingEngine is countingEngine with a delay before it answers, for tests
+// that assert on a measured latency. The delay stays opt-in so the other seventeen
+// users of countingEngine are not slowed for it.
+func slowCountingEngine(t *testing.T, hits *atomic.Int64, delay time.Duration) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"Hello"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
 	})

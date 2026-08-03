@@ -682,18 +682,26 @@ func runServe(ctx context.Context, cfg config.Config, cfgPath string, flagSrc fl
 		}()
 	}
 
-	// SIGHUP hot-reloads the safe subset of config (models, aliases, tenants)
-	// from the config file without dropping in-flight requests or the listener.
+	// The reload signal hot-reloads the safe subset of config (models, aliases,
+	// tenants) from the config file without dropping in-flight requests or the
+	// listener. Where the platform has no such signal, say so rather than
+	// registering a handler that can never fire — POST /admin/reload does the same
+	// work and is the answer on Windows.
 	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
-	go func() {
-		for range hup {
-			if err := reloadConfig(cfgPath, cfg, reloadSrc, sched, authn, srv); err != nil {
-				fmt.Fprintln(os.Stderr, "SIGHUP:", err)
+	if notifyReloadSignal(hup) {
+		defer stopReloadSignal(hup)
+		go func() {
+			for range hup {
+				if err := reloadConfig(cfgPath, cfg, reloadSrc, sched, authn, srv); err != nil {
+					fmt.Fprintln(os.Stderr, reloadSignalName+":", err)
+				}
 			}
-		}
-	}()
+		}()
+	} else {
+		fmt.Fprintf(os.Stderr,
+			"note: %s — use POST /admin/reload to reload config on this platform\n",
+			reloadSignalName)
+	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

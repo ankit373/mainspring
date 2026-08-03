@@ -2,10 +2,10 @@ package mlx
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,15 +14,32 @@ import (
 	"github.com/ankit373/mainspring/internal/util"
 )
 
-// fakePython writes an executable stand-in for the python interpreter, so Start
-// can be exercised without mlx_lm installed.
-func fakePython(t *testing.T, script string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "python3")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
-		t.Fatal(err)
+// The test binary stands in for the python interpreter when fakeMLXEnv is set, so
+// Start can be exercised without mlx_lm installed and on every platform. A
+// #!/bin/sh stub would not run on Windows, and skipping there would read as a
+// pass on the platform whose process handling most needs checking. Re-execing
+// ourselves also spawns a single process, so a kill actually reaps it — the shell
+// wrapper it replaces left a child holding the stdout pipe and blocked Wait.
+const fakeMLXEnv = "MAINSPRING_TEST_FAKE_MLX"
+
+func TestMain(m *testing.M) {
+	switch os.Getenv(fakeMLXEnv) {
+	case "die":
+		// What a real mlx_lm.server prints when the wheel is not installed.
+		fmt.Fprintln(os.Stderr, "ModuleNotFoundError: No module named 'mlx_lm'")
+		os.Exit(1)
+	case "hang":
+		time.Sleep(10 * time.Minute)
+		os.Exit(0)
 	}
-	return p
+	os.Exit(m.Run())
+}
+
+// fakePython points the backend at this test binary in the given mode.
+func fakePython(t *testing.T, mode string) string {
+	t.Helper()
+	t.Setenv(fakeMLXEnv, mode) // inherited by the child we spawn
+	return os.Args[0]
 }
 
 // A server that dies on startup must be reported immediately, with its output.
@@ -34,7 +51,7 @@ func fakePython(t *testing.T, script string) string {
 // in milliseconds with a traceback that names the cause, and that traceback is
 // exactly what a five-minute timeout throws away.
 func TestStartFailsFastWhenTheServerDies(t *testing.T) {
-	py := fakePython(t, `echo "ModuleNotFoundError: No module named 'mlx_lm'" >&2; exit 1`)
+	py := fakePython(t, "die")
 	b := &Backend{Python: py, Host: "127.0.0.1"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -61,9 +78,7 @@ func TestStartFailsFastWhenTheServerDies(t *testing.T) {
 // Stop observes the reaper rather than calling Wait a second time, which would
 // error and race the first.
 func TestStopIsIdempotentAlongsideTheReaper(t *testing.T) {
-	// exec so the shell replaces itself; a forked child would outlive the kill
-	// still holding the stdout pipe and block Wait for 10s.
-	py := fakePython(t, `exec sleep 30`)
+	py := fakePython(t, "hang")
 	b := &Backend{Python: py, Host: "127.0.0.1"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

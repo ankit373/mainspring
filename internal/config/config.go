@@ -1,6 +1,6 @@
-// Package config loads Mainspring's server configuration
-// (~/.config/mainspring/config.yaml by default). Flags on `mainspring serve`
-// override file values.
+// Package config loads Mainspring's server configuration (config.yaml inside
+// util.ConfigDir() by default — ~/.config/mainspring on Unix, %AppData% on
+// Windows). Flags on `mainspring serve` override file values.
 package config
 
 import (
@@ -9,10 +9,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ankit373/mainspring/internal/util"
 )
 
 // Model is one servable model entry.
@@ -179,23 +180,11 @@ func (c Config) MaxBytes() int64 {
 	return int64(c.MaxResidentMB) << 20
 }
 
-// DefaultPath is ~/.config/mainspring/config.yaml.
-func DefaultPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "config.yaml"
-	}
-	return filepath.Join(home, ".config", "mainspring", "config.yaml")
-}
+// DefaultPath is config.yaml inside util.ConfigDir().
+func DefaultPath() string { return util.ConfigPath("config.yaml") }
 
-// DefaultLedgerPath is ~/.config/mainspring/usage.jsonl.
-func DefaultLedgerPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "usage.jsonl"
-	}
-	return filepath.Join(home, ".config", "mainspring", "usage.jsonl")
-}
+// DefaultLedgerPath is usage.jsonl inside util.ConfigDir().
+func DefaultLedgerPath() string { return util.ConfigPath("usage.jsonl") }
 
 // Load reads config from path, layered over Default. An empty path uses
 // DefaultPath and treats a missing file as "just defaults" (no error). An
